@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0b0f" />
+    <title>Sohail Studio</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">S</div>
+          <div>
+            <div class="brand-name">Sohail Studio</div>
+            <div class="brand-caption">AI engineering workspace</div>
+          </div>
+        </div>
+
+        <div class="workspace-switcher">
+          <div class="workspace-icon">⌂</div>
+          <div class="workspace-copy">
+            <span class="label-muted">Workspace</span>
+            <strong>Local workspace</strong>
+          </div>
+          <span class="chevron">⌄</span>
+        </div>
+
+        <div class="nav-section-label">Workspace</div>
+        <nav class="main-nav" aria-label="Main navigation">
+          <button class="nav-item active" data-route="home"><span class="nav-icon">⌂</span>Home</button>
+          <button class="nav-item" data-route="workflows"><span class="nav-icon">✦</span>Workflows</button>
+          <button class="nav-item" data-route="terminal"><span class="nav-icon">›_</span>Terminal</button>
+          <button class="nav-item" data-route="sessions"><span class="nav-icon">◷</span>Sessions</button>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+        <div class="nav-section-label">System</div>
+        <button class="nav-item" data-route="settings"><span class="nav-icon">⚙</span>Settings</button>
+        <div class="local-badge"><span class="status-dot"></span><span>Local-first mode</span></div>
+        <div class="sidebar-footer"><span>v0.1 foundation</span><span class="footer-chip">BETA</span></div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div class="breadcrumbs"><span id="breadcrumb-root">Workspace</span><span class="slash">/</span><strong id="page-title">Home</strong></div>
+          <div class="topbar-actions">
+            <div class="connection-pill"><span class="status-dot"></span><span id="connection-label">Checking local API</span></div>
+            <button class="avatar" title="Sohail">S</button>
+          </div>
+        </header>
+        <div id="app" class="content"></div>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
