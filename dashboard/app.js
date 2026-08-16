@@ -82,17 +82,15 @@ function mentorCard(icon, title, copy, action = "Open") {
 
 function mentorPanel() {
   return `<section class="mentor-panel surface-card"><div class="panel-heading"><div><span class="panel-kicker">Senior platform engineer</span><h2>AI Mentor</h2></div><span class="neutral-badge">Guide</span></div>
-  <button class="mentor-avatar-btn" data-route="chat" aria-label="Open AI Mentor" title="Open AI Mentor">
-    <img src="/assets/ai-avatar.jpeg" alt="AI Mentor Avatar" class="mentor-avatar-img" />
-  </button>
-  <p class="panel-description">Signals and suggestions for the work in front of you. Not a chat.</p><div class="mentor-list">
-    ${mentorCard("↗", "Next recommendation", "Inspect the repository before planning changes.")}
-    ${mentorCard("▣", "Project summary", "No project context loaded yet.")}
-    ${mentorCard("+", "Missing files", "Surface deployment gaps when a project is open.")}
-    ${mentorCard("□", "Docker suggestions", "Container readiness checks will appear here.")}
-    ${mentorCard("◇", "Kubernetes suggestions", "Review manifests and runtime assumptions.")}
-    ${mentorCard("⌁", "Documentation", "Keep project knowledge easy to hand off.")}
-    ${mentorCard("!", "Security notes", "Watch for secrets, permissions, and drift.")}
+  <div class="mentor-robot-container">
+    <button id="mentor-robot-btn" class="mentor-robot-btn" aria-label="Open AI Mentor" title="Open AI Mentor">
+      <div class="mentor-robot-wrapper">
+        <img src="/assets/new-ai.png" alt="AI Mentor Avatar" class="mentor-robot-img" />
+      </div>
+    </button>
+  </div>
+  <div class="mentor-suggestion">
+    <button class="mentor-suggestion-btn" data-route="chat">Inspect repository first →</button>
   </div></section>`;
 }
 
@@ -292,6 +290,27 @@ function bindView() {
   }));
   const promptForm = document.getElementById("prompt-form");
   if (promptForm) promptForm.addEventListener("submit", (event) => { event.preventDefault(); setRoute("chat"); });
+
+  const mentorRobotBtn = document.getElementById("mentor-robot-btn");
+  if (mentorRobotBtn) {
+    mentorRobotBtn.addEventListener("click", () => {
+      const wrapper = mentorRobotBtn.querySelector(".mentor-robot-wrapper");
+      if (wrapper) {
+        wrapper.classList.remove("is-jumping");
+        // Force reflow to restart animation
+        void wrapper.offsetWidth;
+        wrapper.classList.add("is-jumping");
+
+        setTimeout(() => {
+          wrapper.classList.remove("is-jumping");
+          setRoute("chat");
+        }, 400); // 400ms matches the jump animation duration
+      } else {
+        setRoute("chat");
+      }
+    });
+  }
+
   const planForm = document.getElementById("plan-form");
   if (planForm) planForm.addEventListener("submit", submitPlan);
   const approveButton = document.getElementById("approve-run");
