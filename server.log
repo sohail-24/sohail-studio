@@ -1,0 +1,25 @@
+INFO:     Started server process [91589]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:37200 - "GET /api/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33276 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33276 - "GET /assets/styles.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33280 - "GET /assets/app.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33280 - "GET /api/workflows HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33276 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36004 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36004 - "GET /assets/styles.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36008 - "GET /assets/app.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36008 - "GET /api/workflows HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36004 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36010 - "WebSocket /ws/terminal" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:36024 - "WebSocket /ws/terminal" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:36034 - "WebSocket /ws/terminal" [accepted]
+INFO:     connection open
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [91589]

@@ -48,6 +48,8 @@ class CliBridge:
         *,
         dry_run: bool = False,
         overwrite: bool = False,
+        provider: str = "",
+        model: str = "",
     ) -> CliCommand:
         """Build one intentional CLI invocation; never use a shell string."""
         if workflow not in self.WORKFLOW_COMMANDS:
@@ -60,11 +62,17 @@ class CliBridge:
             args.append("--overwrite")
         args.extend([command, str(target)])
         display = " ".join(self._quote(arg) for arg in args)
+        if provider:
+            display = f"SOHAIL_AI_PROVIDER={self._quote(provider)} " + display
+        if model:
+            display = f"SOHAIL_AI_MODEL={self._quote(model)} " + display
         return CliCommand(tuple(args), display, purpose)
 
     async def stream(
         self,
         command: CliCommand,
+        provider: str = "",
+        model: str = "",
         *,
         on_start: callable,
     ) -> AsyncIterator[tuple[str, str]]:
@@ -72,10 +80,16 @@ class CliBridge:
         if not self.cli_root.exists():
             raise FileNotFoundError(f"Sohail-Agent-CLI not found at {self.cli_root}")
 
+        env = {**os.environ, "PYTHONPATH": str(self.cli_root)}
+        if provider:
+            env["SOHAIL_AI_PROVIDER"] = provider
+        if model:
+            env["SOHAIL_AI_MODEL"] = model
+
         process = await asyncio.create_subprocess_exec(
             *command.argv,
             cwd=self.cli_root,
-            env={**os.environ, "PYTHONPATH": str(self.cli_root)},
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

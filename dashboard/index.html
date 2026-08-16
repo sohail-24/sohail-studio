@@ -11,6 +11,7 @@
     <div class="studio-shell">
       <header class="studio-header">
         <div class="studio-brand">
+          <button class="avatar" title="Sohail">S</button>
           <div class="brand-mark">S</div>
           <div>
             <div class="brand-name">Sohail Studio</div>
@@ -25,13 +26,12 @@
         </nav>
         <div class="header-profile">
           <button class="header-button" data-route="settings">Settings</button>
-          <button class="avatar" title="Sohail">S</button>
         </div>
       </header>
       <div class="status-strip">
         <div class="connection-pill"><span class="status-dot"></span><span id="connection-label">Checking local API</span></div>
         <div class="status-context"><span>Workspace</span><strong>~/my-project</strong></div>
-        <div class="status-context"><span>AI</span><strong>Ollama <em>/</em> Gemini</strong></div>
+        <div class="status-context"><span>AI</span><strong id="status-ai-provider">Ollama</strong><em>/</em><strong id="status-ai-model">qwen3.5</strong></div>
         <div class="status-context status-context-right"><span>Mode</span><strong>Local only</strong></div>
       </div>
       <main class="studio-main">
