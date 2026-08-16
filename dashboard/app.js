@@ -117,7 +117,7 @@ function workspaceTabContent(tab) {
 
 function workspaceCanvas() {
   const tabs = [["overview", "Overview"], ["plan", "Plan"], ["files", "Files"], ["logs", "Logs"], ["documentation", "Documentation"], ["architecture", "Architecture"], ["diff", "Diff"], ["timeline", "Timeline"]];
-  return `<section class="workspace-canvas surface-card"><div class="canvas-header"><div><span class="panel-kicker">Workspace canvas</span><h1>Build with context</h1></div><span class="canvas-state"><span class="state-dot"></span> Ready</span></div><div class="workspace-tabs" role="tablist">${tabs.map(([id, label]) => `<button class="workspace-tab ${state.workspaceTab === id ? "active" : ""}" data-workspace-tab="${id}" role="tab" aria-selected="${state.workspaceTab === id}">${label}</button>`).join("")}</div><div class="canvas-content">${workspaceTabContent(state.workspaceTab)}</div></section>`;
+  return `<section class="workspace-canvas surface-card"><div class="canvas-header"><div><span class="panel-kicker">Workspace canvas</span><h1>Build with context</h1></div><span class="canvas-state"><span class="state-dot"></span> Ready</span></div><div class="workspace-tabs" role="tablist">${tabs.map(([id, label]) => `<button class="workspace-tab ${state.workspaceTab === id ? "active" : ""}" data-workspace-tab="${id}" role="tab" aria-selected="${state.workspaceTab === id}">${label}</button>`).join("")}</div><div class="canvas-content">${workspaceTabContent(state.workspaceTab)}</div>${commandBar()}</section>`;
 }
 
 function advancedPanel() {
@@ -190,7 +190,7 @@ function commandBar() {
 }
 
 function homeView() {
-  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column">${knowledgeSphere()}${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}${commandBar()}</div><div class="right-column">${advancedPanel()}${homeTerminalPanel()}</div></div></div>`;
+  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column">${knowledgeSphere()}${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}</div><div class="right-column">${advancedPanel()}${homeTerminalPanel()}</div></div></div>`;
 }
 
 function workflowsView() {
