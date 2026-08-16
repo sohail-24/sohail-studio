@@ -85,10 +85,10 @@ button { border: 0; cursor: pointer; color: inherit; }
 .mentor-robot-container { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 200px; }
 .mentor-robot-btn { display: block; padding: 0; margin: 0; background: transparent; border-radius: 12px; cursor: pointer; border: none; outline: none; }
 .mentor-robot-btn:focus-visible { outline: 2px solid #5a7bd5; outline-offset: 4px; }
-.mentor-robot-wrapper { animation: robot-idle-float 4s ease-in-out infinite; }
+.mentor-robot-wrapper { /* Remove CSS animation because 3D handles it in requestAnimationFrame */ }
 .mentor-robot-wrapper.is-jumping { animation: robot-jump 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
-.mentor-robot-img { display: block; width: auto; max-width: 100%; height: 180px; object-fit: contain; transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), filter 0.3s ease; transform-origin: bottom center; }
-.mentor-robot-btn:hover .mentor-robot-img { transform: scale(1.05); filter: drop-shadow(0 0 15px rgba(90, 123, 213, 0.4)); }
+.mentor-robot-3d { display: block; width: 180px; height: 180px; transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), filter 0.3s ease; transform-origin: bottom center; touch-action: none; }
+.mentor-robot-btn:hover .mentor-robot-3d { transform: scale(1.05); filter: drop-shadow(0 0 15px rgba(90, 123, 213, 0.4)); }
 .mentor-suggestion { text-align: center; margin-top: 10px; }
 .mentor-suggestion-btn { background: transparent; border: none; padding: 6px 12px; color: var(--subtle); font-size: 10px; transition: color 0.2s; cursor: pointer; }
 .mentor-suggestion-btn:hover { color: var(--text); }
