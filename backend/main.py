@@ -45,6 +45,8 @@ WORKFLOWS: list[dict[str, Any]] = [
 class PlanRequest(BaseModel):
     workflow: str
     target: str = Field(default="", description="Local project directory")
+    provider: str = Field(default="")
+    model: str = Field(default="")
 
 
 class RunRequest(PlanRequest):
@@ -58,6 +60,8 @@ class RunState:
     run_id: str
     workflow: str
     target: str
+    provider: str = ""
+    model: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
     complete: bool = False
@@ -74,7 +78,7 @@ class RunManager:
 
     def create(self, request: RunRequest) -> RunState:
         run_id = uuid.uuid4().hex[:12]
-        state = RunState(run_id, request.workflow, request.target)
+        state = RunState(run_id, request.workflow, request.target, request.provider, request.model)
         self.runs[run_id] = state
         asyncio.create_task(self._execute(state, request))
         return state
@@ -87,6 +91,8 @@ class RunManager:
                 target,
                 dry_run=request.dry_run,
                 overwrite=request.overwrite,
+                provider=request.provider,
+                model=request.model,
             )
             await state.publish({"type": "command", "command": command.display, "purpose": command.purpose})
 
@@ -97,7 +103,7 @@ class RunManager:
                 pid = process_id
 
             output: list[str] = []
-            async for kind, chunk in cli.stream(command, on_start=record_pid):
+            async for kind, chunk in cli.stream(command, request.provider, request.model, on_start=record_pid):
                 if kind == "output":
                     output.append(chunk)
                     await state.publish({"type": "output", "message": chunk})
