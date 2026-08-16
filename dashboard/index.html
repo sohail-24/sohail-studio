@@ -8,48 +8,34 @@
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <div class="brand">
+    <div class="studio-shell">
+      <header class="studio-header">
+        <div class="studio-brand">
           <div class="brand-mark">S</div>
           <div>
             <div class="brand-name">Sohail Studio</div>
-            <div class="brand-caption">AI engineering workspace</div>
+            <div class="brand-caption">Local-first AI engineering workspace</div>
           </div>
         </div>
-
-        <div class="workspace-switcher">
-          <div class="workspace-icon">⌂</div>
-          <div class="workspace-copy">
-            <span class="label-muted">Workspace</span>
-            <strong>Local workspace</strong>
-          </div>
-          <span class="chevron">⌄</span>
-        </div>
-
-        <div class="nav-section-label">Workspace</div>
-        <nav class="main-nav" aria-label="Main navigation">
-          <button class="nav-item active" data-route="home"><span class="nav-icon">⌂</span>Home</button>
-          <button class="nav-item" data-route="workflows"><span class="nav-icon">✦</span>Workflows</button>
-          <button class="nav-item" data-route="terminal"><span class="nav-icon">›_</span>Terminal</button>
-          <button class="nav-item" data-route="sessions"><span class="nav-icon">◷</span>Sessions</button>
+        <nav class="top-nav" aria-label="Main navigation">
+          <button class="nav-item active" data-route="home">Home</button>
+          <button class="nav-item" data-route="workflows">Workflows</button>
+          <button class="nav-item" data-route="terminal">Terminal</button>
+          <button class="nav-item" data-route="sessions">Sessions</button>
         </nav>
-
-        <div class="sidebar-spacer"></div>
-        <div class="nav-section-label">System</div>
-        <button class="nav-item" data-route="settings"><span class="nav-icon">⚙</span>Settings</button>
-        <div class="local-badge"><span class="status-dot"></span><span>Local-first mode</span></div>
-        <div class="sidebar-footer"><span>v0.1 foundation</span><span class="footer-chip">BETA</span></div>
-      </aside>
-
-      <main class="main-area">
-        <header class="topbar">
-          <div class="breadcrumbs"><span id="breadcrumb-root">Workspace</span><span class="slash">/</span><strong id="page-title">Home</strong></div>
-          <div class="topbar-actions">
-            <div class="connection-pill"><span class="status-dot"></span><span id="connection-label">Checking local API</span></div>
-            <button class="avatar" title="Sohail">S</button>
-          </div>
-        </header>
+        <div class="header-profile">
+          <button class="header-button" data-route="settings">Settings</button>
+          <button class="avatar" title="Sohail">S</button>
+        </div>
+      </header>
+      <div class="status-strip">
+        <div class="connection-pill"><span class="status-dot"></span><span id="connection-label">Checking local API</span></div>
+        <div class="status-context"><span>Workspace</span><strong>~/my-project</strong></div>
+        <div class="status-context"><span>AI</span><strong>Ollama <em>/</em> Gemini</strong></div>
+        <div class="status-context status-context-right"><span>Mode</span><strong>Local only</strong></div>
+      </div>
+      <main class="studio-main">
+        <div class="page-context"><span id="breadcrumb-root">Workspace</span><span class="slash">/</span><strong id="page-title">Home</strong></div>
         <div id="app" class="content"></div>
       </main>
     </div>

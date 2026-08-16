@@ -8,6 +8,8 @@ const state = {
   runSocket: null,
   terminalSocket: null,
   terminalCwd: "",
+  workspaceTab: "overview",
+  advancedOpen: true,
 };
 
 const app = document.getElementById("app");
@@ -52,24 +54,69 @@ function workflowCard(workflow) {
   </button>`;
 }
 
+const knowledgeNodes = ["Docker", "Kubernetes", "Python", "FastAPI", "Git", "CI/CD", "Sessions", "Docs"];
+
+function knowledgeSphere() {
+  return `<section class="sphere-card surface-card">
+    <div class="panel-heading"><div><span class="panel-kicker">Workspace memory</span><h2>Engineering Knowledge Sphere</h2></div><button class="quiet-icon" title="Sphere info">i</button></div>
+    <div class="sphere-stage" aria-label="Engineering knowledge sphere placeholder">
+      <div class="sphere-orbit orbit-one"></div><div class="sphere-orbit orbit-two"></div><div class="sphere-orbit orbit-three"></div>
+      <div class="sphere-core"><span>SOHAIL</span><small>STUDIO</small></div>
+      ${knowledgeNodes.map((node, index) => `<button class="sphere-node node-${index + 1}" title="Filter by ${node}">${node}</button>`).join("")}
+    </div>
+    <div class="sphere-footer"><span>● Learning graph</span><span>Drag · zoom · filter</span></div>
+  </section>`;
+}
+
+function mentorCard(icon, title, copy, action = "Open") {
+  return `<button class="mentor-card" data-mentor="${title}"><span class="mentor-icon">${icon}</span><span class="mentor-copy"><strong>${title}</strong><small>${copy}</small></span><span class="mentor-arrow">↗</span></button>`;
+}
+
+function mentorPanel() {
+  return `<section class="mentor-panel surface-card"><div class="panel-heading"><div><span class="panel-kicker">Senior platform engineer</span><h2>AI Mentor</h2></div><span class="neutral-badge">Guide</span></div><p class="panel-description">Signals and suggestions for the work in front of you. Not a chat.</p><div class="mentor-list">
+    ${mentorCard("↗", "Next recommendation", "Inspect the repository before planning changes.")}
+    ${mentorCard("▣", "Project summary", "No project context loaded yet.")}
+    ${mentorCard("+", "Missing files", "Surface deployment gaps when a project is open.")}
+    ${mentorCard("□", "Docker suggestions", "Container readiness checks will appear here.")}
+    ${mentorCard("◇", "Kubernetes suggestions", "Review manifests and runtime assumptions.")}
+    ${mentorCard("⌁", "Documentation", "Keep project knowledge easy to hand off.")}
+    ${mentorCard("!", "Security notes", "Watch for secrets, permissions, and drift.")}
+  </div></section>`;
+}
+
+function workspaceTabContent(tab) {
+  const content = {
+    overview: `<div class="canvas-welcome"><div class="welcome-mark">S</div><div><span class="panel-kicker">Workspace canvas</span><h2>Welcome to your engineering workspace</h2><p>Choose a workflow or describe the task you want to plan. Your project context will live here.</p></div></div><div class="canvas-grid"><section class="canvas-card current-task-card"><div class="card-title-row"><span class="canvas-icon">◉</span><h3>Current Task</h3><span class="empty-label">Waiting</span></div><strong>No active task</strong><p>Approved work will appear here with a clear owner, purpose, and scope.</p></section><section class="canvas-card"><div class="card-title-row"><span class="canvas-icon">✓</span><h3>Execution Plan</h3><span class="empty-label">3 steps</span></div><div class="plan-preview"><span><b>01</b> Understand project context</span><span><b>02</b> Review the proposed plan</span><span><b>03</b> Approve before execution</span></div></section><section class="canvas-card"><div class="card-title-row"><span class="canvas-icon">◷</span><h3>Recent Activity</h3><span class="empty-label">Local</span></div><p class="empty-card-copy">Completed workflows and session memory will be listed here.</p></section><section class="canvas-card"><div class="card-title-row"><span class="canvas-icon">≡</span><h3>Documentation Preview</h3><span class="empty-label">Markdown</span></div><div class="document-lines"><i></i><i></i><i></i><i class="short"></i></div></section></div>`,
+    plan: `<div class="tab-placeholder"><span class="placeholder-icon">✓</span><h2>Execution plans</h2><p>Plans will be reviewed here before the CLI is approved to run.</p><div class="placeholder-meta"><span>Approval required</span><span>Transparent commands</span></div></div>`,
+    files: `<div class="tab-placeholder"><span class="placeholder-icon">▣</span><h2>Generated files</h2><p>Files created by approved workflows will appear in a reviewable workspace view.</p></div>`,
+    logs: `<div class="tab-placeholder"><span class="placeholder-icon">›_</span><h2>Execution logs</h2><p>Command output and exit codes will stay visible and local.</p></div>`,
+    documentation: `<div class="tab-placeholder"><span class="placeholder-icon">≡</span><h2>Documentation preview</h2><p>Project documentation will be composed as a readable Markdown preview.</p></div>`,
+    architecture: `<div class="architecture-preview"><div class="architecture-node">Workspace</div><span class="architecture-line"></span><div class="architecture-branches"><div class="architecture-node">Source</div><div class="architecture-node">Runtime</div><div class="architecture-node">Delivery</div></div><p>Architecture relationships will be drawn from project memory.</p></div>`,
+  };
+  return content[tab] || content.overview;
+}
+
+function workspaceCanvas() {
+  const tabs = [["overview", "Overview"], ["plan", "Plan"], ["files", "Files"], ["logs", "Logs"], ["documentation", "Documentation"], ["architecture", "Architecture"]];
+  return `<section class="workspace-canvas surface-card"><div class="canvas-header"><div><span class="panel-kicker">Workspace canvas</span><h1>Build with context</h1></div><span class="canvas-state"><span class="state-dot"></span> Ready</span></div><div class="workspace-tabs" role="tablist">${tabs.map(([id, label]) => `<button class="workspace-tab ${state.workspaceTab === id ? "active" : ""}" data-workspace-tab="${id}" role="tab" aria-selected="${state.workspaceTab === id}">${label}</button>`).join("")}</div><div class="canvas-content">${workspaceTabContent(state.workspaceTab)}</div></section>`;
+}
+
+function advancedPanel() {
+  const providerOpen = state.advancedOpen ? "" : "collapsed";
+  return `<section class="advanced-panel surface-card ${providerOpen}"><div class="advanced-heading"><div><span class="panel-kicker">AI settings</span><h2>Advanced Panel</h2></div><button class="collapse-button" id="advanced-toggle" aria-label="Toggle advanced panel">${state.advancedOpen ? "⌃" : "⌄"}</button></div><div class="advanced-content"><div class="setting-group"><label>AI Provider</label><div class="provider-list"><button class="provider-option selected" data-provider="ollama"><span class="provider-radio"></span><span><strong>Ollama</strong><small>Connected</small></span><span class="provider-status connected">●</span></button><button class="provider-option" data-provider="gemini"><span class="provider-radio"></span><span><strong>Gemini</strong><small>Not configured</small></span><span class="provider-status">○</span></button></div></div><div class="setting-grid"><label>Model<span class="select-like">qwen3.5 <b>⌄</b></span></label><label>Temperature<span class="range-like"><i style="width:42%"></i></span><small class="range-value">0.4</small></label><label>Workspace<span class="select-like">~/my-project <b>⌄</b></span></label><label>Planning mode<span class="select-like">Review first <b>⌄</b></span></label><label>Execution mode<span class="select-like">Approval required <b>⌄</b></span></label><label>Memory<span class="select-like">Session memory <b>⌄</b></span></label><label>Context<span class="select-like">Auto <b>⌄</b></span></label><label>Theme<span class="select-like">Dark <b>⌄</b></span></label></div></div></section>`;
+}
+
+function homeTerminalPanel() {
+  return `<section class="terminal-panel surface-card"><div class="terminal-panel-header"><div><span class="panel-kicker">Execution engine</span><h2>Terminal</h2></div><div class="terminal-header-actions"><span class="terminal-connection"><span class="neutral-dot"></span>Available</span><button class="quiet-icon" title="Collapse terminal">⌃</button></div></div><div class="terminal-status-row"><span class="terminal-idle">Idle</span><span>No approved command</span></div><div class="terminal-preview"><div class="terminal-line terminal-muted">Sohail Studio terminal</div><div class="terminal-line"><span class="terminal-prompt">$</span> Waiting for an approved command…</div><div class="terminal-line terminal-muted">Output will stream here when execution begins.</div></div><div class="terminal-panel-footer"><span>PTY bridge ready</span><button class="text-button" data-route="terminal">Open terminal ↗</button></div></section>`;
+}
+
+function commandBar() {
+  const examples = ["Inspect project", "Generate Docker", "Generate Kubernetes", "Generate CI/CD", "Review Repository", "Generate README"];
+  return `<section class="command-bar-section"><form class="command-bar" id="prompt-form"><span class="command-spark">✦</span><input id="prompt-input" placeholder="Ask Sohail Studio..." autocomplete="off" /><span class="token-count">128 / 8192</span><button class="execute-button" aria-label="Execute command">▶ <span>Execute</span></button></form><div class="command-examples"><span>Try</span>${examples.map((example) => `<button type="button" data-command-example="${example}">${example}</button>`).join("")}</div></section>`;
+}
+
 function homeView() {
-  const cards = state.workflows.length ? state.workflows.map(workflowCard).join("") : "<div class=\"panel panel-pad\">Loading workflows…</div>";
-  return `<div class="home-grid">
-    <section class="hero">
-      <div class="eyebrow">Local engineering, thoughtfully orchestrated</div>
-      <h1>Hello Sohail <span>👋</span></h1>
-      <p class="hero-subtitle">What would you like to do today?</p>
-      <form class="prompt-box" id="prompt-form"><span class="prompt-icon">✦</span><input id="prompt-input" placeholder="Ask Sohail Studio anything…" autocomplete="off" /><button class="prompt-action" aria-label="Start">↗</button></form>
-      <div class="section-heading"><h2>Start with a workflow</h2><span class="hint">Plan first · approve second</span></div>
-      <div class="workflow-grid">${cards}</div>
-    </section>
-    <aside class="activity-panel">
-      <h2>Recent activity</h2>
-      <p>Your local engineering memory</p>
-      ${state.sessions.length ? sessionRows(state.sessions.slice(0, 3)) : `<div class="activity-empty"><div class="empty-orbit">◷</div><strong>Your workspace is ready</strong><span>Approved runs and project memory will appear here.</span></div>`}
-      <div class="side-note"><strong>Visible by design</strong><p>Every command is shown with its purpose before real output streams into the workspace.</p></div>
-    </aside>
-  </div>`;
+  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column">${knowledgeSphere()}${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}</div><div class="right-column">${advancedPanel()}${homeTerminalPanel()}</div></div>${commandBar()}</div>`;
 }
 
 function workflowsView() {
@@ -101,7 +148,7 @@ function runView() {
 }
 
 function terminalView() {
-  return `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>A real local PTY, embedded as a first-class part of the workspace.</p></div><div class="terminal-shell"><div class="terminal-toolbar"><div style="display:flex;align-items:center"><span class="terminal-dots"><i></i><i></i><i></i></span><strong>sohail-studio / terminal</strong></div><span id="terminal-status">Connecting…</span></div><div class="terminal-screen" id="terminal-screen"></div><form class="terminal-input-row" id="terminal-form"><span>›</span><input class="terminal-input" id="terminal-input" placeholder="Type a command and press Enter" autocomplete="off" /><span class="terminal-hint">Ctrl+C supported</span></form></div>`;
+  return `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>A real local PTY, embedded as a first-class part of the workspace.</p></div><section class="terminal-shell"><div class="terminal-toolbar"><div class="terminal-toolbar-title"><span class="terminal-dots"><i></i><i></i><i></i></span><strong>sohail-studio / terminal</strong></div><div class="terminal-toolbar-status"><span class="status-dot"></span><span id="terminal-status">Connecting…</span><button class="quiet-icon" data-route="home" title="Collapse terminal">⌃</button></div></div><div class="terminal-execution-row"><span>Execution status</span><strong>Interactive shell</strong><span>Command output is live</span></div><div class="terminal-screen" id="terminal-screen"></div><form class="terminal-input-row" id="terminal-form"><span>›</span><input class="terminal-input" id="terminal-input" placeholder="Type a command and press Enter" autocomplete="off" /><span class="terminal-hint">Ctrl+C supported</span></form></section>`;
 }
 
 function sessionRows(sessions) {
@@ -141,6 +188,19 @@ function bindView() {
     state.selectedWorkflow = state.workflows.find((workflow) => workflow.id === item.dataset.workflow);
     state.route = "plan";
     render();
+  }));
+  document.querySelectorAll("[data-workspace-tab]").forEach((item) => item.addEventListener("click", () => {
+    state.workspaceTab = item.dataset.workspaceTab;
+    render();
+  }));
+  const advancedToggle = document.getElementById("advanced-toggle");
+  if (advancedToggle) advancedToggle.addEventListener("click", () => { state.advancedOpen = !state.advancedOpen; render(); });
+  document.querySelectorAll("[data-provider]").forEach((item) => item.addEventListener("click", () => {
+    document.querySelectorAll("[data-provider]").forEach((provider) => provider.classList.toggle("selected", provider === item));
+  }));
+  document.querySelectorAll("[data-command-example]").forEach((item) => item.addEventListener("click", () => {
+    const input = document.getElementById("prompt-input");
+    if (input) { input.value = item.dataset.commandExample; input.focus(); }
   }));
   const promptForm = document.getElementById("prompt-form");
   if (promptForm) promptForm.addEventListener("submit", (event) => { event.preventDefault(); setRoute("chat"); });
