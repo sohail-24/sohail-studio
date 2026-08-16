@@ -85,7 +85,7 @@ function mentorPanel() {
   <div class="mentor-robot-container">
     <button id="mentor-robot-btn" class="mentor-robot-btn" aria-label="Open AI Mentor" title="Open AI Mentor">
       <div class="mentor-robot-wrapper">
-        <img src="/assets/new-ai.png" alt="AI Mentor Avatar" class="mentor-robot-img" />
+        <div id="mentor-3d-container" class="mentor-robot-3d" aria-label="Interactive AI Mentor 3D robot"></div>
       </div>
     </button>
   </div>
@@ -230,6 +230,165 @@ function placeholderView(title, copy) {
   return `<div class="page-intro"><div class="eyebrow">Sohail Studio</div><h1>${title}</h1><p>${copy}</p></div><div class="panel placeholder-panel"><div class="empty-orbit">✦</div><h2>Coming in the next layer</h2><p>The navigation and local-first contracts are ready. This surface is intentionally small until its underlying engineering workflow is connected.</p><button class="primary-button" data-route="home">Back to home</button></div>`;
 }
 
+
+let mentor3DScene = null;
+
+function initAIMentor3D() {
+  const container = document.getElementById("mentor-3d-container");
+  if (!container || !window.THREE) return;
+
+  if (mentor3DScene) {
+    // If scene exists but isn't in DOM, re-attach canvas
+    if (!container.contains(mentor3DScene.renderer.domElement)) {
+        container.appendChild(mentor3DScene.renderer.domElement);
+        // Force resize update to fix aspect ratio/size
+        mentor3DScene.camera.aspect = container.clientWidth / container.clientHeight;
+        mentor3DScene.camera.updateProjectionMatrix();
+        mentor3DScene.renderer.setSize(container.clientWidth, container.clientHeight);
+
+        // Re-attach the click prevention to the new parent button
+        const btn = container.closest('button');
+        if (btn) {
+          btn.addEventListener('click', (e) => {
+            if (mentor3DScene.hasDragged) {
+              e.preventDefault();
+              e.stopPropagation();
+            }
+          });
+        }
+    }
+    return;
+  }
+
+  // 1. Scene Setup
+  const scene = new THREE.Scene();
+
+  // 2. Camera Setup
+  const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
+  camera.position.z = 5;
+
+  // 3. Renderer Setup
+  const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  container.appendChild(renderer.domElement);
+
+  // 4. Lighting
+  const ambientLight = new THREE.AmbientLight(0x404040, 2); // Soft white light
+  scene.add(ambientLight);
+
+  const directionalLight = new THREE.DirectionalLight(0x00ffff, 0.8); // Cyan tint
+  directionalLight.position.set(1, 1, 2);
+  scene.add(directionalLight);
+
+  const backLight = new THREE.DirectionalLight(0x3366ff, 0.5); // Blue rim light
+  backLight.position.set(-1, 1, -2);
+  scene.add(backLight);
+
+  // 5. Placeholder Object (Integration point for future .glb)
+  const group = new THREE.Group();
+  scene.add(group);
+
+  // Simple robot representation: a box for body, a smaller box for head
+  const bodyGeo = new THREE.BoxGeometry(1, 1.5, 0.8);
+  const headGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x5a7bd5,
+    metalness: 0.8,
+    roughness: 0.2
+  });
+
+  const body = new THREE.Mesh(bodyGeo, material);
+  body.position.y = -0.2;
+  const head = new THREE.Mesh(headGeo, material);
+  head.position.y = 1.1;
+
+  group.add(body);
+  group.add(head);
+
+  // Store references for animation/interaction
+  mentor3DScene = { scene, camera, renderer, container, group, hasDragged: false };
+
+  // 6. Interaction: Drag to rotate
+  let isDragging = false;
+  let previousMousePosition = { x: 0, y: 0 };
+
+  const onPointerDown = (e) => {
+    isDragging = true;
+    mentor3DScene.hasDragged = false; // Reset on down
+    previousMousePosition = { x: e.clientX || e.touches[0].clientX, y: e.clientY || e.touches[0].clientY };
+  };
+
+  const onPointerMove = (e) => {
+    if (!isDragging) return;
+    const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+    if (!clientX) return;
+
+    const deltaMove = {
+      x: clientX - previousMousePosition.x
+    };
+
+    if (Math.abs(deltaMove.x) > 2) {
+      mentor3DScene.hasDragged = true; // Significant movement
+    }
+
+    // Rotate around Y axis
+    group.rotation.y += deltaMove.x * 0.01;
+
+    previousMousePosition = { x: clientX, y: previousMousePosition.y };
+  };
+
+  const onPointerUp = (e) => {
+    isDragging = false;
+  };
+
+  renderer.domElement.addEventListener('mousedown', onPointerDown);
+  renderer.domElement.addEventListener('mousemove', onPointerMove);
+  window.addEventListener('mouseup', onPointerUp);
+
+  renderer.domElement.addEventListener('touchstart', onPointerDown, { passive: true });
+  renderer.domElement.addEventListener('touchmove', onPointerMove, { passive: true });
+  window.addEventListener('touchend', onPointerUp);
+
+  // Prevent parent button click if drag occurred
+  const btn = container.closest('button');
+  if (btn) {
+    btn.addEventListener('click', (e) => {
+      if (mentor3DScene.hasDragged) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+  }
+
+  // Handle window resize
+  const resizeObserver = new ResizeObserver(() => {
+    if (container.clientWidth > 0 && container.clientHeight > 0) {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    }
+  });
+  resizeObserver.observe(container);
+
+  // 7. Animation Loop (idle floating)
+  const clock = new THREE.Clock();
+
+  function animate() {
+    requestAnimationFrame(animate);
+
+    const time = clock.getElapsedTime();
+
+    // Subtle idle floating (y position) and rotation
+    if (!isDragging) {
+      group.position.y = Math.sin(time * 2) * 0.1;
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  animate();
+}
 function render() {
   const route = state.route;
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.route === (["plan", "approved-plan", "run"].includes(route) ? "workflows" : route)));
@@ -253,6 +412,9 @@ function render() {
   bindView();
   if (route === "run" && state.runId) connectRun(state.runId);
   if (route === "terminal") connectTerminal();
+
+  // Initialize or re-attach the 3D robot if its container exists in the current view
+  setTimeout(() => { initAIMentor3D(); }, 0);
 }
 
 function bindView() {
