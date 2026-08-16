@@ -182,7 +182,7 @@ function commandBar() {
     <form class="command-bar" id="prompt-form" style="margin-top: 8px;">
       <span class="command-spark">✦</span>
       <input id="prompt-input" placeholder="${placeholders[state.commandMode]}" autocomplete="off" />
-      <span class="token-count">128 / 8192</span>
+
       <button class="execute-button" aria-label="Execute command">▶ <span>${buttonLabels[state.commandMode]}</span></button>
     </form>
     <div class="command-examples"><span>Try</span>${examples.map((example) => `<button type="button" data-command-example="${example}">${example}</button>`).join("")}</div>
@@ -190,7 +190,7 @@ function commandBar() {
 }
 
 function homeView() {
-  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column">${knowledgeSphere()}${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}</div><div class="right-column">${advancedPanel()}${homeTerminalPanel()}</div></div>${commandBar()}</div>`;
+  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column">${knowledgeSphere()}${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}${commandBar()}</div><div class="right-column">${advancedPanel()}${homeTerminalPanel()}</div></div></div>`;
 }
 
 function workflowsView() {
