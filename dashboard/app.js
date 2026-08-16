@@ -82,14 +82,9 @@ function mentorCard(icon, title, copy, action = "Open") {
 
 function mentorPanel() {
   return `<section class="mentor-panel surface-card"><div class="panel-heading"><div><span class="panel-kicker">Senior platform engineer</span><h2>AI Mentor</h2></div><span class="neutral-badge">Guide</span></div>
-  <svg class="mentor-avatar-svg" viewBox="0 0 100 120" xmlns="http://www.w3.org/2000/svg">
-    <path class="body" d="M20,120 Q20,80 50,80 Q80,80 80,120 Z" />
-    <circle class="head" cx="50" cy="45" r="25" />
-    <path d="M40,40 Q50,55 60,40" />
-    <circle cx="42" cy="35" r="3" fill="#5a7bd5" />
-    <circle cx="58" cy="35" r="3" fill="#5a7bd5" />
-    <path d="M25,95 L10,120 M75,95 L90,120" stroke-dasharray="2 4" />
-  </svg>
+  <button class="mentor-avatar-btn" data-route="chat" aria-label="Open AI Mentor" title="Open AI Mentor">
+    <img src="/assets/ai-avatar.jpeg" alt="AI Mentor Avatar" class="mentor-avatar-img" />
+  </button>
   <p class="panel-description">Signals and suggestions for the work in front of you. Not a chat.</p><div class="mentor-list">
     ${mentorCard("↗", "Next recommendation", "Inspect the repository before planning changes.")}
     ${mentorCard("▣", "Project summary", "No project context loaded yet.")}
