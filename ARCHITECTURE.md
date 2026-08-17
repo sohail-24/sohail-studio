@@ -101,7 +101,12 @@ The dashboard (`dashboard/`) is a lightweight, dependency-free Single Page Appli
 
 - **Components**: UI is built using vanilla HTML and CSS (`index.html`, `styles.css`). Dynamic generation of components like workflow cards, terminal windows, and session lists is handled by `app.js`.
 
-- **Layout**: Features a persistent sidebar for navigation and a main content area containing the dynamic view content.
+- **Layout**: The dashboard follows a structured layout:
+  - **Top Navigation**: Contains the main navigation routes (Home, Workflows, Terminal, Sessions).
+  - **Top-Left Branding**: Displays a personal avatar (`/assets/sohail-avatar.png`) appearing *before* the "Sohail Studio" title, establishing the local workspace identity.
+  - **Workspace Status**: A persistent strip showing the connection status, current directory, AI provider/model, and mode.
+  - **Main Content Columns**: Features a Left side (Workspace Memory, AI Mentor), Center side (Workspace Canvas, Command Center), and Right side (Advanced Panel, Execution Engine / Terminal).
+  - **AI Mentor Panel**: Located on the left side, containing an interactive **3D AI robot** visual element. The robot is programmatically rendered using Vanilla Three.js (`index.html` and `app.js`) and acts purely as a visual UI companion, *not* an autonomous AI agent.
 
 - **Navigation**: Client-side navigation updates the `state.route` variable and triggers a re-render of the main content area, interacting with backend APIs as needed.
 

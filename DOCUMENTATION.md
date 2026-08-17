@@ -61,9 +61,12 @@ This application is designed specifically as a "local-first" engineering tool. I
 
 The Dashboard provides a UI constructed purely from plain web technologies (HTML/JS/CSS).
 
+- **Top-left avatar**: The top-left branding area features a personal avatar (`/assets/sohail-avatar.png`) that appears right before the "Sohail Studio" title. This serves to establish the personal workspace identity.
+- **AI Mentor 3D robot**: The left side of the dashboard contains an **AI Mentor panel**, which features an interactive 3D AI robot visual. This robot is built programmatically using Vanilla Three.js and functions strictly as a visual UI element, not an autonomous agent.
+
 ## Navigation
 
-The sidebar lets users jump between key views:
+The top navigation lets users jump between key views:
 
 - **Home**: The central view summarizing current workspace state.
 
@@ -75,23 +78,23 @@ The sidebar lets users jump between key views:
 
 ## Current Workflows
 
-The UI exposes several configured workflows that either act independently or bridge to the CLI:
+The UI exposes several configured workflows (found in `backend/main.py`) that either act independently or bridge to the CLI:
 
-- **Inspect Project** (CLI backed)
+- **Inspect Project** (`inspect-project`, CLI backed)
 
-- **Create New Project**
+- **Create New Project** (`create-project`)
 
-- **Dockerize Project** (CLI backed)
+- **Dockerize Project** (`dockerize-project`, CLI backed)
 
-- **Kubernetes** (CLI backed)
+- **Kubernetes** (`kubernetes`, CLI backed)
 
-- **CI/CD** (CLI backed)
+- **CI/CD** (`cicd`, CLI backed)
 
-- **Generate Documentation** (CLI backed)
+- **Generate Documentation** (`documentation`, CLI backed)
 
-- **Debug Error**
+- **Debug Error** (`debug-error`)
 
-- **AI Chat**
+- **AI Chat** (`ai-chat`)
 
 ---
 
@@ -177,7 +180,7 @@ Endpoints are defined in `backend/main.py`. Define standard REST endpoints using
 
 ## Current Limitations
 
-- Workflows such as `Create New Project`, `Debug Error`, and `AI Chat` are currently exposed in the UI but are not explicitly mapped to `Sohail-Agent-CLI` execution commands in the bridge, acting as placeholders.
+- Workflows such as `create-project` (Create New Project), `debug-error` (Debug Error), and `ai-chat` (AI Chat) are currently exposed in the UI but are not explicitly mapped to `Sohail-Agent-CLI` execution commands in the bridge, acting as placeholders.
 - Terminal integration uses a relatively simple polling mechanism on non-blocking file descriptors for the PTY bridge, which works well for standard local use but is not built for high-throughput buffering over high latency networks.
 - The `Sohail-Agent-CLI` path is heavily dependent on a static default absolute path (`/Users/sohal/Downloads/testing-project/Sohail-Agent-CLI`) if not overwritten by the `SOHAIL_AGENT_ROOT` environment variable.
 
