@@ -231,6 +231,157 @@ function placeholderView(title, copy) {
 }
 
 
+function createAIMentorRobot() {
+  const robotGroup = new THREE.Group();
+
+  // Materials
+  const whiteMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    metalness: 0.1,
+    roughness: 0.3
+  });
+
+  const faceMat = new THREE.MeshStandardMaterial({
+    color: 0x050b14,
+    metalness: 0.5,
+    roughness: 0.8
+  });
+
+  const eyeMat = new THREE.MeshBasicMaterial({
+    color: 0x00ffff,
+  });
+
+  const jointMat = new THREE.MeshStandardMaterial({
+    color: 0x222233,
+    metalness: 0.8,
+    roughness: 0.4
+  });
+
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: 0x00ffff,
+    transparent: true,
+    opacity: 0.7
+  });
+
+  // --- Head Group ---
+  const headGroup = new THREE.Group();
+  headGroup.position.y = 1.3;
+
+  // Head outer shell (rounded box look using capsule + spheres or roundedBox)
+  // We'll use a slightly scaled sphere to make it rounded rectangular-ish, or just simple geometries
+  const headGeo = new THREE.BoxGeometry(1.2, 0.9, 1.0);
+  const headMesh = new THREE.Mesh(headGeo, whiteMat);
+  headGroup.add(headMesh);
+
+  // Face screen
+  const faceGeo = new THREE.PlaneGeometry(1.0, 0.7);
+  const faceMesh = new THREE.Mesh(faceGeo, faceMat);
+  faceMesh.position.set(0, 0, 0.51); // slightly in front of head box
+  headGroup.add(faceMesh);
+
+  // Eyes (Left & Right)
+  const eyeGeo = new THREE.CircleGeometry(0.1, 16);
+  const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
+  leftEye.position.set(-0.25, 0.1, 0.52);
+  const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
+  rightEye.position.set(0.25, 0.1, 0.52);
+  headGroup.add(leftEye);
+  headGroup.add(rightEye);
+
+  // Smile
+  const smilePath = new THREE.Path();
+  smilePath.absarc(0, 0, 0.25, Math.PI, 0, true);
+  const smilePoints = smilePath.getPoints(10);
+  const smileGeo = new THREE.BufferGeometry().setFromPoints(smilePoints);
+  const smileLine = new THREE.Line(smileGeo, new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2 }));
+  smileLine.position.set(0, -0.15, 0.52);
+  headGroup.add(smileLine);
+
+  robotGroup.add(headGroup);
+
+  // --- Body Group ---
+  const bodyGroup = new THREE.Group();
+  bodyGroup.position.y = 0.3;
+
+  // Torso
+  const torsoGeo = new THREE.CylinderGeometry(0.6, 0.5, 1.2, 32);
+  const torsoMesh = new THREE.Mesh(torsoGeo, whiteMat);
+  bodyGroup.add(torsoMesh);
+
+  robotGroup.add(bodyGroup);
+
+  // --- Arms Group ---
+  // Left Arm (waving pose)
+  const leftArmGroup = new THREE.Group();
+  leftArmGroup.position.set(-0.7, 0.7, 0);
+
+  const shoulderGeo = new THREE.SphereGeometry(0.2);
+  const leftShoulder = new THREE.Mesh(shoulderGeo, jointMat);
+  leftArmGroup.add(leftShoulder);
+
+  const upperArmGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.6);
+  const leftUpper = new THREE.Mesh(upperArmGeo, whiteMat);
+  leftUpper.position.set(-0.3, 0.2, 0);
+  leftUpper.rotation.z = Math.PI / 4;
+  leftArmGroup.add(leftUpper);
+
+  const leftJoint = new THREE.Mesh(shoulderGeo, jointMat);
+  leftJoint.position.set(-0.5, 0.4, 0);
+  leftArmGroup.add(leftJoint);
+
+  const forearmGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.5);
+  const leftForearm = new THREE.Mesh(forearmGeo, whiteMat);
+  leftForearm.position.set(-0.5, 0.7, 0);
+  leftForearm.rotation.z = 0;
+  leftArmGroup.add(leftForearm);
+
+  const handGeo = new THREE.SphereGeometry(0.15);
+  const leftHand = new THREE.Mesh(handGeo, whiteMat);
+  leftHand.position.set(-0.5, 1.0, 0);
+  leftArmGroup.add(leftHand);
+
+  robotGroup.add(leftArmGroup);
+
+  // Right Arm (relaxed pose)
+  const rightArmGroup = new THREE.Group();
+  rightArmGroup.position.set(0.7, 0.7, 0);
+
+  const rightShoulder = new THREE.Mesh(shoulderGeo, jointMat);
+  rightArmGroup.add(rightShoulder);
+
+  const rightUpper = new THREE.Mesh(upperArmGeo, whiteMat);
+  rightUpper.position.set(0.15, -0.25, 0);
+  rightUpper.rotation.z = -Math.PI / 6;
+  rightArmGroup.add(rightUpper);
+
+  robotGroup.add(rightArmGroup);
+
+  // --- Lower Floating Body ---
+  const lowerGroup = new THREE.Group();
+  lowerGroup.position.y = -0.5;
+
+  const baseGeo = new THREE.SphereGeometry(0.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+  const baseMesh = new THREE.Mesh(baseGeo, whiteMat);
+  baseMesh.rotation.x = Math.PI; // upside down bowl
+  lowerGroup.add(baseMesh);
+
+  // Glow ring
+  const ringGeo = new THREE.TorusGeometry(0.4, 0.05, 16, 32);
+  const ringMesh = new THREE.Mesh(ringGeo, glowMat);
+  ringMesh.position.y = -0.1;
+  ringMesh.rotation.x = Math.PI / 2;
+  lowerGroup.add(ringMesh);
+
+  robotGroup.add(lowerGroup);
+
+  // Scale the robot to fit nicely in the view
+  robotGroup.scale.set(0.7, 0.7, 0.7);
+  // Center roughly at y=0 so floating works well
+  robotGroup.position.y = -0.2;
+
+  return robotGroup;
+}
+
 let mentor3DScene = null;
 
 function initAIMentor3D() {
@@ -285,33 +436,21 @@ function initAIMentor3D() {
   backLight.position.set(-1, 1, -2);
   scene.add(backLight);
 
-  // 5. Placeholder Object (Integration point for future .glb)
+  // 5. Code-built AI Mentor Robot
   const group = new THREE.Group();
   scene.add(group);
 
-  // Simple robot representation: a box for body, a smaller box for head
-  const bodyGeo = new THREE.BoxGeometry(1, 1.5, 0.8);
-  const headGeo = new THREE.BoxGeometry(0.8, 0.8, 0.8);
-  const material = new THREE.MeshStandardMaterial({
-    color: 0x5a7bd5,
-    metalness: 0.8,
-    roughness: 0.2
-  });
-
-  const body = new THREE.Mesh(bodyGeo, material);
-  body.position.y = -0.2;
-  const head = new THREE.Mesh(headGeo, material);
-  head.position.y = 1.1;
-
-  group.add(body);
-  group.add(head);
+  const robot = createAIMentorRobot();
+  group.add(robot);
 
   // Store references for animation/interaction
-  mentor3DScene = { scene, camera, renderer, container, group, hasDragged: false };
+  mentor3DScene = { scene, camera, renderer, container, group, robot, hasDragged: false };
 
-  // 6. Interaction: Drag to rotate
+  // 6. Interaction: Drag to rotate & Hover effects
   let isDragging = false;
   let previousMousePosition = { x: 0, y: 0 };
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
 
   const onPointerDown = (e) => {
     isDragging = true;
@@ -320,9 +459,29 @@ function initAIMentor3D() {
   };
 
   const onPointerMove = (e) => {
-    if (!isDragging) return;
     const clientX = e.clientX || (e.touches && e.touches[0].clientX);
-    if (!clientX) return;
+    const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+
+    // Hover logic
+    if (clientX && clientY && container.clientWidth > 0) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObject(robot, true);
+
+      if (intersects.length > 0) {
+        // Subtle hover reaction
+        robot.scale.set(0.72, 0.72, 0.72);
+        renderer.domElement.style.cursor = 'pointer';
+      } else {
+        robot.scale.set(0.7, 0.7, 0.7);
+        renderer.domElement.style.cursor = 'default';
+      }
+    }
+
+    if (!isDragging || !clientX) return;
 
     const deltaMove = {
       x: clientX - previousMousePosition.x
