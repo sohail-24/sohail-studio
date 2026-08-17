@@ -313,6 +313,7 @@ function createAIMentorRobot() {
   // --- Arms Group ---
   // Left Arm (waving pose)
   const leftArmGroup = new THREE.Group();
+  leftArmGroup.name = 'leftArmGroup';
   leftArmGroup.position.set(-0.7, 0.7, 0);
 
   const shoulderGeo = new THREE.SphereGeometry(0.2);
@@ -446,6 +447,13 @@ function initAIMentor3D() {
   // Store references for animation/interaction
   mentor3DScene = { scene, camera, renderer, container, group, robot, hasDragged: false };
 
+  // Phase 3 Animation State Variables
+  let robotState = 'idle'; // 'idle', 'animating'
+  let targetScale = 0.7;
+  let currentScale = 0.7;
+  let animStartTime = 0;
+  let baseRotationY = 0;
+
   // 6. Interaction: Drag to rotate & Hover effects
   let isDragging = false;
   let previousMousePosition = { x: 0, y: 0 };
@@ -472,13 +480,17 @@ function initAIMentor3D() {
       const intersects = raycaster.intersectObject(robot, true);
 
       if (intersects.length > 0) {
-        // Subtle hover reaction
-        robot.scale.set(0.72, 0.72, 0.72);
+        // Subtle hover reaction (state update only, smoothing happens in animate)
+        targetScale = 0.75;
         renderer.domElement.style.cursor = 'pointer';
       } else {
-        robot.scale.set(0.7, 0.7, 0.7);
+        targetScale = 0.7;
         renderer.domElement.style.cursor = 'default';
       }
+    } else {
+      // If pointer is off canvas, reset target scale
+      targetScale = 0.7;
+      renderer.domElement.style.cursor = 'default';
     }
 
     if (!isDragging || !clientX) return;
@@ -492,7 +504,8 @@ function initAIMentor3D() {
     }
 
     // Rotate around Y axis
-    group.rotation.y += deltaMove.x * 0.01;
+    baseRotationY += deltaMove.x * 0.01;
+    group.rotation.y = baseRotationY;
 
     previousMousePosition = { x: clientX, y: previousMousePosition.y };
   };
@@ -509,13 +522,19 @@ function initAIMentor3D() {
   renderer.domElement.addEventListener('touchmove', onPointerMove, { passive: true });
   window.addEventListener('touchend', onPointerUp);
 
-  // Prevent parent button click if drag occurred
+  // Prevent parent button click if drag occurred, else trigger click reaction
   const btn = container.closest('button');
   if (btn) {
     btn.addEventListener('click', (e) => {
       if (mentor3DScene.hasDragged) {
         e.preventDefault();
         e.stopPropagation();
+      } else {
+        // Trigger click reaction animation if not already animating
+        if (robotState !== 'animating') {
+          robotState = 'animating';
+          animStartTime = clock ? clock.getElapsedTime() : 0;
+        }
       }
     });
   }
@@ -530,17 +549,64 @@ function initAIMentor3D() {
   });
   resizeObserver.observe(container);
 
-  // 7. Animation Loop (idle floating)
+  // 7. Animation Loop (idle floating & reactive animations)
   const clock = new THREE.Clock();
+
+  // Find left arm for waving animation
+  const leftArm = robot.getObjectByName('leftArmGroup');
 
   function animate() {
     requestAnimationFrame(animate);
 
     const time = clock.getElapsedTime();
+    const dt = clock.getDelta(); // time since last frame
+
+    // Smooth hover scaling
+    currentScale += (targetScale - currentScale) * 0.1;
+    robot.scale.set(currentScale, currentScale, currentScale);
+
+    // Animation state machine
+    if (robotState === 'animating') {
+      const animTime = time - animStartTime;
+      const jumpDuration = 0.5;
+      const waveDuration = 1.0;
+      const totalDuration = jumpDuration + waveDuration;
+
+      if (animTime < jumpDuration) {
+        // Jump phase: move up and down
+        // Sin(pi * t / duration) gives a nice arc from 0 to 1 to 0
+        const jumpHeight = 0.3;
+        robot.position.y = Math.sin((Math.PI * animTime) / jumpDuration) * jumpHeight;
+      } else if (animTime < totalDuration) {
+        // Wave phase: back to ground, wave arm
+        robot.position.y = 0;
+        if (leftArm) {
+          // Wave arm back and forth
+          const waveTime = animTime - jumpDuration;
+          leftArm.rotation.z = Math.sin(waveTime * Math.PI * 4) * 0.5;
+        }
+      } else {
+        // Finished
+        robotState = 'idle';
+        robot.position.y = 0;
+        if (leftArm) leftArm.rotation.z = 0;
+      }
+    } else {
+      // Return arm to resting position if not animating
+      if (leftArm && leftArm.rotation.z !== 0) {
+        leftArm.rotation.z += (0 - leftArm.rotation.z) * 0.1;
+      }
+      // Return robot body to 0 (idle takes care of group floating)
+      if (robot.position.y !== 0) {
+        robot.position.y += (0 - robot.position.y) * 0.1;
+      }
+    }
 
     // Subtle idle floating (y position) and rotation
     if (!isDragging) {
       group.position.y = Math.sin(time * 2) * 0.1;
+      // Add a very subtle idle rotation that oscillates around baseRotationY
+      group.rotation.y = baseRotationY + Math.sin(time) * 0.05;
     }
 
     renderer.render(scene, camera);
