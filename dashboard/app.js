@@ -233,152 +233,281 @@ function placeholderView(title, copy) {
 
 function createAIMentorRobot() {
   const robotGroup = new THREE.Group();
+  robotGroup.name = "robotGroup";
 
-  // Materials
-  const whiteMat = new THREE.MeshStandardMaterial({
-    color: 0xffffff,
-    metalness: 0.1,
-    roughness: 0.3
-  });
+  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf4f8ff, metalness: 0.32, roughness: 0.24 });
+  const whiteSoftMat = new THREE.MeshStandardMaterial({ color: 0xd8e4f3, metalness: 0.22, roughness: 0.3 });
+  const faceMat = new THREE.MeshStandardMaterial({ color: 0x071226, metalness: 0.65, roughness: 0.2 });
+  const navyMat = new THREE.MeshStandardMaterial({ color: 0x0d1934, metalness: 0.68, roughness: 0.26 });
+  const jointMat = new THREE.MeshStandardMaterial({ color: 0x101d38, metalness: 0.82, roughness: 0.23 });
+  const blueMat = new THREE.MeshStandardMaterial({ color: 0x1974f5, metalness: 0.38, roughness: 0.2, emissive: 0x051b5b, emissiveIntensity: 0.35 });
+  const cyanMat = new THREE.MeshStandardMaterial({ color: 0x27dbff, metalness: 0.18, roughness: 0.18, emissive: 0x00a9df, emissiveIntensity: 1.45 });
+  const cyanBasicMat = new THREE.MeshBasicMaterial({ color: 0x20dfff });
 
-  const faceMat = new THREE.MeshStandardMaterial({
-    color: 0x050b14,
-    metalness: 0.5,
-    roughness: 0.8
-  });
+  function roundedBoxGeometry(width, height, depth, radius) {
+    const x = width / 2;
+    const y = height / 2;
+    const r = Math.min(radius, x, y);
+    const shape = new THREE.Shape();
+    shape.moveTo(-x + r, -y);
+    shape.lineTo(x - r, -y);
+    shape.quadraticCurveTo(x, -y, x, -y + r);
+    shape.lineTo(x, y - r);
+    shape.quadraticCurveTo(x, y, x - r, y);
+    shape.lineTo(-x + r, y);
+    shape.quadraticCurveTo(-x, y, -x, y - r);
+    shape.lineTo(-x, -y + r);
+    shape.quadraticCurveTo(-x, -y, -x + r, -y);
+    const geometry = new THREE.ExtrudeGeometry(shape, {
+      depth,
+      bevelEnabled: true,
+      bevelSegments: 3,
+      bevelSize: Math.min(r * 0.45, depth * 0.35),
+      bevelThickness: Math.min(r * 0.45, depth * 0.35),
+      curveSegments: 8,
+      steps: 1
+    });
+    geometry.translate(0, 0, -depth / 2);
+    geometry.computeVertexNormals();
+    return geometry;
+  }
 
-  const eyeMat = new THREE.MeshBasicMaterial({
-    color: 0x00ffff,
-  });
+  function roundedMesh(width, height, depth, radius, material) {
+    return new THREE.Mesh(roundedBoxGeometry(width, height, depth, radius), material);
+  }
 
-  const jointMat = new THREE.MeshStandardMaterial({
-    color: 0x222233,
-    metalness: 0.8,
-    roughness: 0.4
-  });
+  function addCylinder(parent, radius, height, material, position, rotation = {}) {
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, height, 24), material);
+    mesh.position.set(position[0], position[1], position[2]);
+    mesh.rotation.set(rotation.x || 0, rotation.y || 0, rotation.z || 0);
+    parent.add(mesh);
+    return mesh;
+  }
 
-  const glowMat = new THREE.MeshBasicMaterial({
-    color: 0x00ffff,
-    transparent: true,
-    opacity: 0.7
-  });
+  function addFinger(handGroup, x, y, z, rotationZ = 0) {
+    const finger = addCylinder(handGroup, 0.045, 0.22, jointMat, [x, y, z], { z: rotationZ });
+    finger.scale.x = 0.92;
+    return finger;
+  }
 
-  // --- Head Group ---
+  function addEye(parent, x) {
+    const eye = new THREE.Group();
+    eye.name = x < 0 ? "leftEye" : "rightEye";
+    eye.position.set(x, 0.1, 0.535);
+    const socket = roundedMesh(0.29, 0.31, 0.035, 0.1, navyMat);
+    socket.position.z = -0.01;
+    eye.add(socket);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.115, 0.026, 10, 24), cyanMat);
+    ring.scale.y = 1.13;
+    eye.add(ring);
+    const iris = new THREE.Mesh(new THREE.SphereGeometry(0.075, 18, 12), cyanMat);
+    iris.scale.set(1, 1.18, 0.3);
+    iris.position.z = 0.035;
+    eye.add(iris);
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.027, 12, 8), faceMat);
+    pupil.position.set(0.015, -0.005, 0.062);
+    pupil.scale.z = 0.35;
+    eye.add(pupil);
+    const glint = new THREE.Mesh(new THREE.SphereGeometry(0.018, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    glint.position.set(-0.035, 0.045, 0.074);
+    eye.add(glint);
+    parent.add(eye);
+    return eye;
+  }
+
+  // Head: rounded shell, bezel, glossy screen, expressive eyes, brows, and a curved smile.
   const headGroup = new THREE.Group();
-  headGroup.position.y = 1.3;
+  headGroup.name = "headGroup";
+  headGroup.position.y = 1.25;
+  const headShell = roundedMesh(1.72, 1.2, 0.92, 0.22, whiteMat);
+  headShell.name = "headShell";
+  headGroup.add(headShell);
+  const faceBezel = roundedMesh(1.46, 0.9, 0.07, 0.17, blueMat);
+  faceBezel.position.z = 0.475;
+  faceBezel.name = "faceBezel";
+  headGroup.add(faceBezel);
+  const faceScreen = roundedMesh(1.35, 0.79, 0.075, 0.15, faceMat);
+  faceScreen.position.z = 0.53;
+  faceScreen.name = "faceScreen";
+  headGroup.add(faceScreen);
+  addEye(headGroup, -0.34);
+  addEye(headGroup, 0.34);
 
-  // Head outer shell (rounded box look using capsule + spheres or roundedBox)
-  // We'll use a slightly scaled sphere to make it rounded rectangular-ish, or just simple geometries
-  const headGeo = new THREE.BoxGeometry(1.2, 0.9, 1.0);
-  const headMesh = new THREE.Mesh(headGeo, whiteMat);
-  headGroup.add(headMesh);
+  const browMat = new THREE.MeshBasicMaterial({ color: 0x4fe6ff });
+  [-0.34, 0.34].forEach((x) => {
+    const brow = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.018, 8, 20, Math.PI), browMat);
+    brow.position.set(x, 0.285, 0.565);
+    brow.rotation.z = x < 0 ? -0.12 : 0.12;
+    headGroup.add(brow);
+  });
+  const smileCurve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-0.22, -0.18, 0.57),
+    new THREE.Vector3(-0.12, -0.25, 0.57),
+    new THREE.Vector3(0, -0.28, 0.57),
+    new THREE.Vector3(0.12, -0.25, 0.57),
+    new THREE.Vector3(0.22, -0.18, 0.57)
+  ]);
+  const smile = new THREE.Mesh(new THREE.TubeGeometry(smileCurve, 18, 0.025, 8, false), cyanMat);
+  smile.name = "mouth";
+  headGroup.add(smile);
 
-  // Face screen
-  const faceGeo = new THREE.PlaneGeometry(1.0, 0.7);
-  const faceMesh = new THREE.Mesh(faceGeo, faceMat);
-  faceMesh.position.set(0, 0, 0.51); // slightly in front of head box
-  headGroup.add(faceMesh);
-
-  // Eyes (Left & Right)
-  const eyeGeo = new THREE.CircleGeometry(0.1, 16);
-  const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
-  leftEye.position.set(-0.25, 0.1, 0.52);
-  const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
-  rightEye.position.set(0.25, 0.1, 0.52);
-  headGroup.add(leftEye);
-  headGroup.add(rightEye);
-
-  // Smile
-  const smilePath = new THREE.Path();
-  smilePath.absarc(0, 0, 0.25, Math.PI, 0, true);
-  const smilePoints = smilePath.getPoints(10);
-  const smileGeo = new THREE.BufferGeometry().setFromPoints(smilePoints);
-  const smileLine = new THREE.Line(smileGeo, new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2 }));
-  smileLine.position.set(0, -0.15, 0.52);
-  headGroup.add(smileLine);
-
+  // Headphones and antenna-like side details add silhouette without relying on textures.
+  [-1, 1].forEach((side) => {
+    const ear = new THREE.Group();
+    ear.name = side < 0 ? "leftEar" : "rightEar";
+    ear.position.set(side * 0.9, 0.03, 0);
+    addCylinder(ear, 0.22, 0.16, blueMat, [0, 0, 0], { z: Math.PI / 2 });
+    const earRing = new THREE.Mesh(new THREE.TorusGeometry(0.14, 0.022, 10, 24), cyanMat);
+    earRing.rotation.y = Math.PI / 2;
+    ear.add(earRing);
+    addCylinder(ear, 0.045, 0.34, whiteSoftMat, [0, 0.31, 0]);
+    headGroup.add(ear);
+  });
   robotGroup.add(headGroup);
 
-  // --- Body Group ---
+  // Mechanical neck with a luminous collar.
+  const neckGroup = new THREE.Group();
+  neckGroup.name = "neckGroup";
+  neckGroup.position.y = 0.67;
+  addCylinder(neckGroup, 0.2, 0.2, jointMat, [0, 0, 0]);
+  addCylinder(neckGroup, 0.15, 0.08, whiteSoftMat, [0, 0.12, 0]);
+  const neckRing = new THREE.Mesh(new THREE.TorusGeometry(0.26, 0.027, 10, 28), cyanMat);
+  neckRing.rotation.x = Math.PI / 2;
+  neckRing.position.y = 0.08;
+  neckGroup.add(neckRing);
+  robotGroup.add(neckGroup);
+
+  // Rounded body, chest screen, and a geometric AI emblem.
   const bodyGroup = new THREE.Group();
-  bodyGroup.position.y = 0.3;
-
-  // Torso
-  const torsoGeo = new THREE.CylinderGeometry(0.6, 0.5, 1.2, 32);
-  const torsoMesh = new THREE.Mesh(torsoGeo, whiteMat);
-  bodyGroup.add(torsoMesh);
-
+  bodyGroup.name = "bodyGroup";
+  bodyGroup.position.y = 0.05;
+  const bodyShell = roundedMesh(1.34, 1.06, 0.78, 0.22, whiteMat);
+  bodyShell.name = "bodyShell";
+  bodyGroup.add(bodyShell);
+  const chestPanel = roundedMesh(0.86, 0.58, 0.055, 0.12, navyMat);
+  chestPanel.position.set(0, 0.04, 0.42);
+  chestPanel.name = "chestPanel";
+  bodyGroup.add(chestPanel);
+  const panelLine = new THREE.Mesh(new THREE.TorusGeometry(0.39, 0.012, 6, 4), cyanBasicMat);
+  panelLine.scale.set(1.34, 0.82, 1);
+  panelLine.position.set(0, 0.04, 0.455);
+  panelLine.rotation.z = Math.PI / 4;
+  bodyGroup.add(panelLine);
+  const emblemMat = new THREE.MeshBasicMaterial({ color: 0x4aa1ff });
+  const emblemA1 = roundedMesh(0.065, 0.32, 0.035, 0.02, emblemMat);
+  emblemA1.position.set(-0.2, 0.04, 0.47); emblemA1.rotation.z = -0.22; bodyGroup.add(emblemA1);
+  const emblemA2 = roundedMesh(0.065, 0.32, 0.035, 0.02, emblemMat);
+  emblemA2.position.set(-0.04, 0.04, 0.47); emblemA2.rotation.z = 0.22; bodyGroup.add(emblemA2);
+  const emblemCross = roundedMesh(0.15, 0.045, 0.035, 0.018, emblemMat);
+  emblemCross.position.set(-0.12, 0.03, 0.48); bodyGroup.add(emblemCross);
+  const emblemI = roundedMesh(0.065, 0.32, 0.035, 0.02, emblemMat);
+  emblemI.position.set(0.15, 0.04, 0.47); bodyGroup.add(emblemI);
+  [-0.46, 0.46].forEach((x) => {
+    const vent = roundedMesh(0.035, 0.28, 0.025, 0.015, cyanMat);
+    vent.position.set(x, 0.03, 0.415);
+    bodyGroup.add(vent);
+  });
   robotGroup.add(bodyGroup);
 
-  // --- Arms Group ---
-  // Left Arm (waving pose)
-  const leftArmGroup = new THREE.Group();
-  leftArmGroup.position.set(-0.7, 0.7, 0);
+  function createArm(name, side, raised) {
+    const armGroup = new THREE.Group();
+    armGroup.name = name;
+    armGroup.position.set(side * 0.82, 0.31, 0.4);
+    armGroup.scale.setScalar(1.1);
+    const shoulderGroup = new THREE.Group();
+    shoulderGroup.name = `${name === "leftArmGroup" ? "left" : "right"}ShoulderGroup`;
+    const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.23, 24, 16), whiteSoftMat);
+    shoulder.scale.set(1, 0.9, 1.08);
+    shoulderGroup.add(shoulder);
+    const shoulderRing = new THREE.Mesh(new THREE.TorusGeometry(0.14, 0.023, 8, 20), cyanMat);
+    shoulderRing.rotation.y = Math.PI / 2;
+    shoulderGroup.add(shoulderRing);
+    armGroup.add(shoulderGroup);
 
-  const shoulderGeo = new THREE.SphereGeometry(0.2);
-  const leftShoulder = new THREE.Mesh(shoulderGeo, jointMat);
-  leftArmGroup.add(leftShoulder);
+    const upperArmGroup = new THREE.Group();
+    upperArmGroup.name = `${name === "leftArmGroup" ? "left" : "right"}UpperArmGroup`;
+    upperArmGroup.rotation.z = raised ? -0.52 : -0.2;
+    const upperArm = roundedMesh(0.24, 0.44, 0.3, 0.09, whiteMat);
+    upperArm.position.y = raised ? 0.22 : -0.22;
+    upperArmGroup.add(upperArm);
+    const upperAccent = new THREE.Mesh(new THREE.TorusGeometry(0.095, 0.018, 8, 18), cyanMat);
+    upperAccent.rotation.x = Math.PI / 2;
+    upperAccent.position.y = raised ? 0.22 : -0.22;
+    upperArmGroup.add(upperAccent);
+    armGroup.add(upperArmGroup);
 
-  const upperArmGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.6);
-  const leftUpper = new THREE.Mesh(upperArmGeo, whiteMat);
-  leftUpper.position.set(-0.3, 0.2, 0);
-  leftUpper.rotation.z = Math.PI / 4;
-  leftArmGroup.add(leftUpper);
+    const forearmGroup = new THREE.Group();
+    forearmGroup.name = `${name === "leftArmGroup" ? "left" : "right"}ForearmGroup`;
+    forearmGroup.position.y = raised ? 0.43 : -0.43;
+    forearmGroup.rotation.z = raised ? 0.16 : -0.12;
+    const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.13, 18, 12), jointMat);
+    forearmGroup.add(elbow);
+    const forearm = roundedMesh(0.22, 0.42, 0.28, 0.08, whiteMat);
+    forearm.position.y = raised ? 0.19 : -0.19;
+    forearmGroup.add(forearm);
+    const forearmAccent = new THREE.Mesh(new THREE.TorusGeometry(0.085, 0.017, 8, 18), cyanMat);
+    forearmAccent.rotation.x = Math.PI / 2;
+    forearmAccent.position.y = raised ? 0.19 : -0.19;
+    forearmGroup.add(forearmAccent);
+    armGroup.add(forearmGroup);
 
-  const leftJoint = new THREE.Mesh(shoulderGeo, jointMat);
-  leftJoint.position.set(-0.5, 0.4, 0);
-  leftArmGroup.add(leftJoint);
+    const handGroup = new THREE.Group();
+    handGroup.name = `${name === "leftArmGroup" ? "left" : "right"}HandGroup`;
+    handGroup.position.y = raised ? 0.84 : -0.84;
+    const palm = roundedMesh(0.3, 0.27, 0.25, 0.08, jointMat);
+    handGroup.add(palm);
+    const fingerY = raised ? 0.22 : -0.22;
+    [-0.09, 0, 0.09].forEach((x, index) => addFinger(handGroup, x, fingerY, 0, raised ? (index - 1) * 0.09 : (1 - index) * 0.09));
+    addFinger(handGroup, side < 0 ? 0.17 : -0.17, raised ? 0.02 : -0.02, 0, side < 0 ? -0.55 : 0.55);
+    const palmAccent = new THREE.Mesh(new THREE.TorusGeometry(0.085, 0.014, 8, 18), cyanMat);
+    palmAccent.rotation.x = Math.PI / 2;
+    palmAccent.position.z = 0.13;
+    handGroup.add(palmAccent);
+    forearmGroup.add(handGroup);
+    return { armGroup, shoulderGroup, forearmGroup, handGroup };
+  }
 
-  const forearmGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.5);
-  const leftForearm = new THREE.Mesh(forearmGeo, whiteMat);
-  leftForearm.position.set(-0.5, 0.7, 0);
-  leftForearm.rotation.z = 0;
-  leftArmGroup.add(leftForearm);
+  const leftArm = createArm("leftArmGroup", -1, true);
+  const rightArm = createArm("rightArmGroup", 1, false);
+  robotGroup.add(leftArm.armGroup, rightArm.armGroup);
 
-  const handGeo = new THREE.SphereGeometry(0.15);
-  const leftHand = new THREE.Mesh(handGeo, whiteMat);
-  leftHand.position.set(-0.5, 1.0, 0);
-  leftArmGroup.add(leftHand);
+  // A rounded hover pod replaces legs and gives the robot its floating silhouette.
+  const lowerHoverGroup = new THREE.Group();
+  lowerHoverGroup.name = "lowerHoverGroup";
+  lowerHoverGroup.position.y = -0.79;
+  const dock = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.38, 0.13, 32), jointMat);
+  dock.position.y = 0.2;
+  lowerHoverGroup.add(dock);
+  const hoverPod = new THREE.Mesh(new THREE.SphereGeometry(0.58, 32, 20, 0, Math.PI * 2, 0, Math.PI / 2), blueMat);
+  hoverPod.scale.set(1, 0.78, 1);
+  hoverPod.rotation.x = Math.PI;
+  lowerHoverGroup.add(hoverPod);
+  const hoverRing = new THREE.Mesh(new THREE.TorusGeometry(0.47, 0.035, 12, 32), cyanMat);
+  hoverRing.rotation.x = Math.PI / 2;
+  hoverRing.position.y = 0.08;
+  lowerHoverGroup.add(hoverRing);
+  const underside = new THREE.Mesh(new THREE.SphereGeometry(0.38, 24, 12), cyanMat);
+  underside.scale.set(1, 0.15, 1);
+  underside.position.y = -0.25;
+  lowerHoverGroup.add(underside);
+  robotGroup.add(lowerHoverGroup);
 
-  robotGroup.add(leftArmGroup);
-
-  // Right Arm (relaxed pose)
-  const rightArmGroup = new THREE.Group();
-  rightArmGroup.position.set(0.7, 0.7, 0);
-
-  const rightShoulder = new THREE.Mesh(shoulderGeo, jointMat);
-  rightArmGroup.add(rightShoulder);
-
-  const rightUpper = new THREE.Mesh(upperArmGeo, whiteMat);
-  rightUpper.position.set(0.15, -0.25, 0);
-  rightUpper.rotation.z = -Math.PI / 6;
-  rightArmGroup.add(rightUpper);
-
-  robotGroup.add(rightArmGroup);
-
-  // --- Lower Floating Body ---
-  const lowerGroup = new THREE.Group();
-  lowerGroup.position.y = -0.5;
-
-  const baseGeo = new THREE.SphereGeometry(0.5, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2);
-  const baseMesh = new THREE.Mesh(baseGeo, whiteMat);
-  baseMesh.rotation.x = Math.PI; // upside down bowl
-  lowerGroup.add(baseMesh);
-
-  // Glow ring
-  const ringGeo = new THREE.TorusGeometry(0.4, 0.05, 16, 32);
-  const ringMesh = new THREE.Mesh(ringGeo, glowMat);
-  ringMesh.position.y = -0.1;
-  ringMesh.rotation.x = Math.PI / 2;
-  lowerGroup.add(ringMesh);
-
-  robotGroup.add(lowerGroup);
-
-  // Scale the robot to fit nicely in the view
-  robotGroup.scale.set(0.7, 0.7, 0.7);
-  // Center roughly at y=0 so floating works well
-  robotGroup.position.y = -0.2;
-
+  robotGroup.scale.setScalar(0.72);
+  robotGroup.position.y = -0.16;
+  robotGroup.userData.parts = {
+    headGroup,
+    neckGroup,
+    bodyGroup,
+    leftArmGroup: leftArm.armGroup,
+    leftShoulderGroup: leftArm.shoulderGroup,
+    leftForearmGroup: leftArm.forearmGroup,
+    leftHandGroup: leftArm.handGroup,
+    rightArmGroup: rightArm.armGroup,
+    rightShoulderGroup: rightArm.shoulderGroup,
+    rightForearmGroup: rightArm.forearmGroup,
+    rightHandGroup: rightArm.handGroup,
+    lowerHoverGroup
+  };
   return robotGroup;
 }
 
@@ -416,7 +545,7 @@ function initAIMentor3D() {
 
   // 2. Camera Setup
   const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
-  camera.position.z = 5;
+  camera.position.z = 4.2;
 
   // 3. Renderer Setup
   const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
@@ -424,17 +553,17 @@ function initAIMentor3D() {
   renderer.setPixelRatio(window.devicePixelRatio);
   container.appendChild(renderer.domElement);
 
-  // 4. Lighting
-  const ambientLight = new THREE.AmbientLight(0x404040, 2); // Soft white light
-  scene.add(ambientLight);
-
-  const directionalLight = new THREE.DirectionalLight(0x00ffff, 0.8); // Cyan tint
-  directionalLight.position.set(1, 1, 2);
-  scene.add(directionalLight);
-
-  const backLight = new THREE.DirectionalLight(0x3366ff, 0.5); // Blue rim light
-  backLight.position.set(-1, 1, -2);
-  scene.add(backLight);
+  // 4. Soft studio lighting keeps the white shell readable without flooding the card.
+  scene.add(new THREE.HemisphereLight(0xbfd8ff, 0x081126, 1.65));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.55);
+  keyLight.position.set(1.5, 2.5, 3);
+  scene.add(keyLight);
+  const rimLight = new THREE.DirectionalLight(0x1ecbff, 0.75);
+  rimLight.position.set(-2, 1.2, -2.5);
+  scene.add(rimLight);
+  const fillLight = new THREE.PointLight(0x2b6fff, 0.4, 8);
+  fillLight.position.set(0, -1, 2);
+  scene.add(fillLight);
 
   // 5. Code-built AI Mentor Robot
   const group = new THREE.Group();
@@ -443,8 +572,21 @@ function initAIMentor3D() {
   const robot = createAIMentorRobot();
   group.add(robot);
 
-  // Store references for animation/interaction
-  mentor3DScene = { scene, camera, renderer, container, group, robot, hasDragged: false };
+  // Store references for animation/interaction and keep the model hierarchy future-ready.
+  const parts = robot.userData.parts;
+  mentor3DScene = {
+    scene,
+    camera,
+    renderer,
+    container,
+    group,
+    robot,
+    parts,
+    hasDragged: false,
+    hovered: false,
+    animation: { startedAt: -10, busy: false },
+    baseScale: 0.72
+  };
 
   // 6. Interaction: Drag to rotate & Hover effects
   let isDragging = false;
@@ -455,33 +597,28 @@ function initAIMentor3D() {
   const onPointerDown = (e) => {
     isDragging = true;
     mentor3DScene.hasDragged = false; // Reset on down
-    previousMousePosition = { x: e.clientX || e.touches[0].clientX, y: e.clientY || e.touches[0].clientY };
+    const touch = e.touches && e.touches[0];
+    previousMousePosition = { x: e.clientX ?? touch?.clientX ?? 0, y: e.clientY ?? touch?.clientY ?? 0 };
   };
 
   const onPointerMove = (e) => {
-    const clientX = e.clientX || (e.touches && e.touches[0].clientX);
-    const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+    const touch = e.touches && e.touches[0];
+    const clientX = e.clientX ?? touch?.clientX;
+    const clientY = e.clientY ?? touch?.clientY;
 
     // Hover logic
-    if (clientX && clientY && container.clientWidth > 0) {
+    if (clientX != null && clientY != null && container.clientWidth > 0) {
       const rect = renderer.domElement.getBoundingClientRect();
       mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
 
       raycaster.setFromCamera(mouse, camera);
       const intersects = raycaster.intersectObject(robot, true);
-
-      if (intersects.length > 0) {
-        // Subtle hover reaction
-        robot.scale.set(0.72, 0.72, 0.72);
-        renderer.domElement.style.cursor = 'pointer';
-      } else {
-        robot.scale.set(0.7, 0.7, 0.7);
-        renderer.domElement.style.cursor = 'default';
-      }
+      mentor3DScene.hovered = intersects.length > 0;
+      renderer.domElement.style.cursor = mentor3DScene.hovered ? 'pointer' : 'default';
     }
 
-    if (!isDragging || !clientX) return;
+    if (!isDragging || clientX == null) return;
 
     const deltaMove = {
       x: clientX - previousMousePosition.x
@@ -501,12 +638,18 @@ function initAIMentor3D() {
     isDragging = false;
   };
 
+  const onPointerLeave = () => {
+    if (!isDragging) mentor3DScene.hovered = false;
+    renderer.domElement.style.cursor = 'default';
+  };
+
   renderer.domElement.addEventListener('mousedown', onPointerDown);
   renderer.domElement.addEventListener('mousemove', onPointerMove);
   window.addEventListener('mouseup', onPointerUp);
 
   renderer.domElement.addEventListener('touchstart', onPointerDown, { passive: true });
   renderer.domElement.addEventListener('touchmove', onPointerMove, { passive: true });
+  renderer.domElement.addEventListener('mouseleave', onPointerLeave);
   window.addEventListener('touchend', onPointerUp);
 
   // Prevent parent button click if drag occurred
@@ -530,18 +673,45 @@ function initAIMentor3D() {
   });
   resizeObserver.observe(container);
 
-  // 7. Animation Loop (idle floating)
+  // 7. Animation loop: idle float, hover response, and the click greeting sequence.
   const clock = new THREE.Clock();
+
+  mentor3DScene.playGreeting = () => {
+    if (mentor3DScene.animation.busy) return;
+    mentor3DScene.animation.startedAt = clock.getElapsedTime();
+    mentor3DScene.animation.busy = true;
+  };
 
   function animate() {
     requestAnimationFrame(animate);
 
-    const time = clock.getElapsedTime();
+    const delta = clock.getDelta();
+    const time = clock.elapsedTime;
+    const greetingTime = time - mentor3DScene.animation.startedAt;
+    let jumpOffset = 0;
+    let waveAmount = 0;
 
-    // Subtle idle floating (y position) and rotation
-    if (!isDragging) {
-      group.position.y = Math.sin(time * 2) * 0.1;
+    if (mentor3DScene.animation.busy) {
+      const jumpProgress = Math.min(greetingTime / 1.18, 1);
+      jumpOffset = Math.sin(jumpProgress * Math.PI) * 0.3;
+      if (greetingTime > 0.28) {
+        const waveProgress = Math.min((greetingTime - 0.28) / 0.86, 1);
+        const waveEnvelope = Math.sin(waveProgress * Math.PI);
+        waveAmount = Math.sin(waveProgress * Math.PI * 4) * 0.32 * waveEnvelope;
+      }
+      if (greetingTime > 1.42) {
+        mentor3DScene.animation.busy = false;
+        mentor3DScene.animation.startedAt = -10;
+      }
     }
+
+    // Drag owns rotation; these animations only adjust vertical position and articulated parts.
+    robot.position.y = -0.16 + Math.sin(time * 1.8) * 0.065 + jumpOffset;
+    robot.scale.lerp(new THREE.Vector3(mentor3DScene.hovered ? 0.76 : mentor3DScene.baseScale, mentor3DScene.hovered ? 0.76 : mentor3DScene.baseScale, mentor3DScene.hovered ? 0.76 : mentor3DScene.baseScale), Math.min(delta * 8, 1));
+    parts.leftArmGroup.rotation.z = waveAmount;
+    parts.headGroup.rotation.z = Math.sin(time * 1.2) * 0.012;
+    parts.lowerHoverGroup.rotation.y += delta * 0.55;
+    parts.lowerHoverGroup.position.y = -0.79 + Math.sin(time * 1.8 + 0.6) * 0.014;
 
     renderer.render(scene, camera);
   }
@@ -615,17 +785,17 @@ function bindView() {
   const mentorRobotBtn = document.getElementById("mentor-robot-btn");
   if (mentorRobotBtn) {
     mentorRobotBtn.addEventListener("click", () => {
+      if (mentor3DScene && mentor3DScene.playGreeting) mentor3DScene.playGreeting();
       const wrapper = mentorRobotBtn.querySelector(".mentor-robot-wrapper");
       if (wrapper) {
         wrapper.classList.remove("is-jumping");
-        // Force reflow to restart animation
         void wrapper.offsetWidth;
         wrapper.classList.add("is-jumping");
 
         setTimeout(() => {
           wrapper.classList.remove("is-jumping");
           setRoute("chat");
-        }, 400); // 400ms matches the jump animation duration
+        }, 1450);
       } else {
         setRoute("chat");
       }
