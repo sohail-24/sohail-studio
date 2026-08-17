@@ -426,7 +426,7 @@ function createAIMentorRobot() {
 
     const upperArmGroup = new THREE.Group();
     upperArmGroup.name = `${name === "leftArmGroup" ? "left" : "right"}UpperArmGroup`;
-    upperArmGroup.rotation.z = raised ? -0.52 : -0.2;
+    upperArmGroup.rotation.z = side < 0 ? 3.14 : -0.75;
     const upperArm = roundedMesh(0.24, 0.44, 0.3, 0.09, whiteMat);
     upperArm.position.y = raised ? 0.22 : -0.22;
     upperArmGroup.add(upperArm);
@@ -439,7 +439,7 @@ function createAIMentorRobot() {
     const forearmGroup = new THREE.Group();
     forearmGroup.name = `${name === "leftArmGroup" ? "left" : "right"}ForearmGroup`;
     forearmGroup.position.y = raised ? 0.43 : -0.43;
-    forearmGroup.rotation.z = raised ? 0.16 : -0.12;
+    forearmGroup.rotation.z = side < 0 ? 0.5 : -0.1;
     const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.13, 18, 12), jointMat);
     forearmGroup.add(elbow);
     const forearm = roundedMesh(0.22, 0.42, 0.28, 0.08, whiteMat);
