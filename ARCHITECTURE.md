@@ -74,22 +74,23 @@ The backend is built with **FastAPI** (`backend/main.py`) and serves both as a t
 - **FastAPI Entrypoint**: Defined in `backend/main.py`, it mounts the static `dashboard` directory and defines the API routes.
 
 - **API Routes**:
-  - `GET /api/health`: Health check.
+  - `GET /`: Serves the main dashboard application (`index.html`).
+  - `GET /api/health`: Health check, returns local status and CLI availability.
   - `GET /api/workflows`: Lists available workflows.
-  - `GET /api/sessions`: Returns recent session histories.
-  - `POST /api/workflows/plan`: Generates a plan for a chosen workflow.
+  - `GET /api/sessions`: Returns recent session histories from local JSON files.
+  - `POST /api/workflows/plan`: Generates a plan for a chosen workflow, enforcing approval workflows.
   - `POST /api/runs`: Initializes a run based on an approved plan.
   - `GET /api/runs/{run_id}`: Retrieves the state of a specific run.
 
 - **Services**:
-  - `SessionStore` (`core/session_store.py`): Manages writing and retrieving run execution details to/from local JSON files.
-  - `RunManager` (`backend/main.py`): Manages concurrent run states and publishes events.
+  - `SessionStore` (`core/session_store.py`): Manages writing and retrieving run execution details (including `updated_at` timestamps) to/from local JSON files.
+  - `RunManager` (`backend/main.py`): Manages concurrent run states and publishes events via queues.
 
 - **WebSocket Usage**:
-  - `/ws/runs/{run_id}`: Streams real-time run execution events (command, output, process info, completion status) to the UI.
-  - `/ws/terminal`: Implements a direct PTY bridge to a local shell instance for raw terminal interaction.
+  - `/ws/runs/{run_id}`: Streams real-time run execution events (command, output, process info, completion status, errors) to the UI.
+  - `/ws/terminal`: Implements a direct PTY bridge to a local shell instance for raw terminal interaction. Supports sending input and a specific `stop` action to send `SIGINT`.
 
-- **CLI Bridge**: `core/cli_bridge.py` acts as a process adapter. It strictly maps studio workflows to exact `Sohail-Agent-CLI` commands, ensuring robust parameter quoting and preventing shell injection by bypassing `shell=True`.
+- **CLI Bridge**: `core/cli_bridge.py` acts as a process adapter. It strictly maps studio workflows to exact `Sohail-Agent-CLI` commands (e.g., `inspect`, `dockerize`, `k8s`). It executes `sys.executable -m src.main` to invoke the CLI, passes `--dry-run` and `--overwrite` flags, and securely sets `SOHAIL_AI_PROVIDER` and `SOHAIL_AI_MODEL` environment variables. It prevents shell injection by bypassing `shell=True`.
 
 ---
 
@@ -101,7 +102,12 @@ The dashboard (`dashboard/`) is a lightweight, dependency-free Single Page Appli
 
 - **Components**: UI is built using vanilla HTML and CSS (`index.html`, `styles.css`). Dynamic generation of components like workflow cards, terminal windows, and session lists is handled by `app.js`.
 
-- **Layout**: Features a persistent sidebar for navigation and a main content area containing the dynamic view content.
+- **Layout**: The UI utilizes a strict three-column layout designed for desktop viewports:
+  - **Left Column**: Contains the Workspace Memory / Knowledge Sphere and the **AI Mentor panel**. The AI Mentor panel includes a **3D AI robot visual element**, constructed programmatically using Vanilla Three.js primitives rather than external `.glb` files. This robot functions strictly as a visual UI element, not as an autonomous AI agent.
+  - **Center Column**: Contains the Workspace Canvas and Command Center (dynamic view content).
+  - **Right Column**: Contains the Advanced Panel and Execution Engine / Terminal.
+
+- **Header / Navigation**: Features a top navigation bar. The top-left branding area contains a personal avatar (`/assets/sohail-avatar.png`) that appears before the "Sohail Studio" title.
 
 - **Navigation**: Client-side navigation updates the `state.route` variable and triggers a re-render of the main content area, interacting with backend APIs as needed.
 
@@ -130,7 +136,11 @@ The application is configured through environment variables and local files:
   - `SOHAIL_AGENT_ROOT`: Specifies the path to the underlying `Sohail-Agent-CLI` installation (defaults to a predefined path if unset).
   - `SOHAIL_STUDIO_SHELL`: Specifies the shell to use for the PTY bridge (defaults to `/bin/bash`).
 
-- **Configuration Files**: `settings/default.json` contains basic fallback configuration (e.g., CLI paths and local execution flags).
+- **Configuration Files**: `settings/default.json` contains basic configuration including:
+  - `workspace_root`: The default path for the terminal.
+  - `cli_root`: Fallback path for the CLI if `SOHAIL_AGENT_ROOT` is unset.
+  - `shell`: Fallback shell.
+  - `local_only`: Flag enforcing local execution rules.
 
 - **Runtime Requirements**: Python 3.11+, FastAPI, Uvicorn, and Pydantic. It requires a local installation of the `Sohail-Agent-CLI` to function for CLI-backed workflows.
 
@@ -146,6 +156,6 @@ Sohail Studio adheres to the following principles:
 
 - **Transparent execution**: Every execution clearly states its exact command and purpose before execution.
 
-- **Minimal dependencies**: The frontend is built without frameworks (React, Vue, etc.) utilizing plain HTML/JS/CSS to ensure it remains fast and straightforward. The backend avoids complex ORMs, utilizing simple JSON files for state.
+- **Minimal dependencies**: The frontend is built without frameworks (React, Vue, etc.) utilizing plain HTML/JS/CSS to ensure it remains fast and straightforward. 3D features are integrated via Three.js and GLTFLoader using CDN links, avoiding a frontend build step. The backend avoids complex ORMs, utilizing simple JSON files for state.
 
 - **No duplicated logic**: The Studio intentionally offloads all agent logic and business rules to the existing `Sohail-Agent-CLI`, acting purely as an orchestration and interface layer.

@@ -61,9 +61,17 @@ This application is designed specifically as a "local-first" engineering tool. I
 
 The Dashboard provides a UI constructed purely from plain web technologies (HTML/JS/CSS).
 
+### Header Elements
+
+- **Top-left avatar**: The top-left branding area contains a personal avatar (loaded from `/assets/sohail-avatar.png`). It appears before the "Sohail Studio" title.
+
+### Workspace Elements
+
+- **AI Mentor 3D robot**: Located in the left-side AI Mentor panel. The 3D robot is constructed programmatically with Three.js. It acts purely as a visual UI element and is not an autonomous AI agent.
+
 ## Navigation
 
-The sidebar lets users jump between key views:
+The top navigation lets users jump between key views:
 
 - **Home**: The central view summarizing current workspace state.
 
@@ -79,7 +87,7 @@ The UI exposes several configured workflows that either act independently or bri
 
 - **Inspect Project** (CLI backed)
 
-- **Create New Project**
+- **Create New Project** (Placeholder)
 
 - **Dockerize Project** (CLI backed)
 
@@ -89,9 +97,9 @@ The UI exposes several configured workflows that either act independently or bri
 
 - **Generate Documentation** (CLI backed)
 
-- **Debug Error**
+- **Debug Error** (Placeholder)
 
-- **AI Chat**
+- **AI Chat** (Placeholder)
 
 ---
 
@@ -103,21 +111,21 @@ The backend orchestrates the dashboard's needs and communicates with the underly
 
 - `GET /`: Serves the main `index.html` file.
 
-- `GET /api/health`: Provides a status check and validates the availability of the CLI root.
+- `GET /api/health`: Provides a status check, returning local status and validating the availability of the CLI root.
 
 - `GET /api/workflows`: Lists all predefined workflows.
 
-- `GET /api/sessions`: Lists recent execution sessions from local storage.
-- `POST /api/workflows/plan`: Generates a pre-execution plan and requires explicit user confirmation.
+- `GET /api/sessions`: Lists recent execution sessions from local storage JSON files.
+- `POST /api/workflows/plan`: Generates a pre-execution plan and enforces explicit user confirmation.
 - `POST /api/runs`: Submits an approved execution, assigning a run ID.
 
 - `GET /api/runs/{run_id}`: Retrieves the static execution state of a specific run.
-- `WS /ws/runs/{run_id}`: Subscribes to real-time events (commands, outputs, completions) for a given run.
+- `WS /ws/runs/{run_id}`: Subscribes to real-time events (commands, outputs, process IDs, completions, errors) for a given run.
 - `WS /ws/terminal`: Establishes a raw pseudo-terminal session.
 
 ## Communication with CLI
 
-The backend delegates process creation to `CliBridge` (`core/cli_bridge.py`). It does not run shell strings. Instead, it carefully constructs `sys.executable` calls that invoke the `src.main` module of the `Sohail-Agent-CLI` codebase based on the selected workflow.
+The backend delegates process creation to `CliBridge` (`core/cli_bridge.py`). It does not run shell strings. Instead, it carefully constructs `sys.executable -m src.main` calls that invoke the `Sohail-Agent-CLI` codebase based on the selected workflow.
 
 ---
 
@@ -125,9 +133,9 @@ The backend delegates process creation to `CliBridge` (`core/cli_bridge.py`). It
 
 Sohail Studio integrates with `Sohail-Agent-CLI` strictly via process orchestration.
 
-- **Usage**: The studio resolves the CLI root via the `SOHAIL_AGENT_ROOT` environment variable (falling back to a default path).
+- **Usage**: The studio resolves the CLI root via the `SOHAIL_AGENT_ROOT` environment variable (falling back to a default path defined in `settings/default.json`).
 
-- **Integration**: The bridge maps the studio's workflow IDs (e.g., `kubernetes`) to the equivalent CLI commands (e.g., `k8s`). It constructs a secure argument list (`argv`) avoiding `shell=True` and capturing `stdout` and `stderr` asynchronously to feed the WebSocket connections.
+- **Integration**: The bridge maps the studio's workflow IDs (e.g., `kubernetes`) to the equivalent CLI commands (e.g., `k8s`). It constructs a secure argument list (`argv`) avoiding `shell=True`, and appends specific flags like `--dry-run` and `--overwrite`. It also passes `SOHAIL_AI_PROVIDER` and `SOHAIL_AI_MODEL` as environment variables. The stdout and stderr are captured asynchronously to feed the WebSocket connections.
 
 ---
 
@@ -135,7 +143,7 @@ Sohail Studio integrates with `Sohail-Agent-CLI` strictly via process orchestrat
 
 Sohail Studio provides raw interactive terminal access.
 
-- **Execution Model**: The backend establishes a pseudo-terminal (PTY) using `pty.fork()` and `os.execvp()`. The frontend terminal connects via WebSockets (`/ws/terminal`), continuously polling the PTY's file descriptor for output, and piping raw input directly to the running shell process.
+- **Execution Model**: The backend establishes a pseudo-terminal (PTY) using `pty.fork()` and `os.execvp()`. The frontend terminal connects via WebSockets (`/ws/terminal`), continuously polling the PTY's file descriptor for output, and piping raw input directly to the running shell process. If a specific "stop" payload is received, it sends a `SIGINT` to the shell process.
 
 - **Safety Rules**:
   - Execution relies strictly on local resources.
