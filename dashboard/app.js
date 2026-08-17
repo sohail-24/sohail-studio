@@ -82,6 +82,9 @@ function mentorCard(icon, title, copy, action = "Open") {
 
 function mentorPanel() {
   return `<section class="mentor-panel surface-card"><div class="panel-heading"><div><span class="panel-kicker">Senior platform engineer</span><h2>AI Mentor</h2></div><span class="neutral-badge">Guide</span></div>
+  <div class="mentor-actions">
+    <button id="mentor-play-btn" class="mentor-play-btn" type="button" aria-label="Play AI Mentor greeting">▶ Play</button>
+  </div>
   <div class="mentor-robot-container">
     <button id="mentor-robot-btn" class="mentor-robot-btn" aria-label="Open AI Mentor" title="Open AI Mentor">
       <div class="mentor-robot-wrapper">
@@ -412,8 +415,8 @@ function createAIMentorRobot() {
   function createArm(name, side, raised) {
     const armGroup = new THREE.Group();
     armGroup.name = name;
-    armGroup.position.set(side * 0.82, 0.31, 0.4);
-    armGroup.scale.setScalar(1.1);
+    armGroup.position.set(side * (raised ? 0.96 : 0.78), raised ? 0.42 : 0.28, 0.58);
+    armGroup.scale.setScalar(1.12);
     const shoulderGroup = new THREE.Group();
     shoulderGroup.name = `${name === "leftArmGroup" ? "left" : "right"}ShoulderGroup`;
     const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.23, 24, 16), whiteSoftMat);
@@ -422,11 +425,10 @@ function createAIMentorRobot() {
     const shoulderRing = new THREE.Mesh(new THREE.TorusGeometry(0.14, 0.023, 8, 20), cyanMat);
     shoulderRing.rotation.y = Math.PI / 2;
     shoulderGroup.add(shoulderRing);
-    armGroup.add(shoulderGroup);
 
     const upperArmGroup = new THREE.Group();
     upperArmGroup.name = `${name === "leftArmGroup" ? "left" : "right"}UpperArmGroup`;
-    upperArmGroup.rotation.z = side < 0 ? 3.14 : -0.75;
+    upperArmGroup.rotation.z = raised ? 0.85 : (side < 0 ? 0.4 : -0.4);
     const upperArm = roundedMesh(0.24, 0.44, 0.3, 0.09, whiteMat);
     upperArm.position.y = raised ? 0.22 : -0.22;
     upperArmGroup.add(upperArm);
@@ -434,12 +436,11 @@ function createAIMentorRobot() {
     upperAccent.rotation.x = Math.PI / 2;
     upperAccent.position.y = raised ? 0.22 : -0.22;
     upperArmGroup.add(upperAccent);
-    armGroup.add(upperArmGroup);
 
     const forearmGroup = new THREE.Group();
     forearmGroup.name = `${name === "leftArmGroup" ? "left" : "right"}ForearmGroup`;
-    forearmGroup.position.y = raised ? 0.43 : -0.43;
-    forearmGroup.rotation.z = side < 0 ? 0.5 : -0.1;
+    forearmGroup.position.set(raised ? -0.08 : 0, raised ? 0.43 : -0.43, 0);
+    forearmGroup.rotation.z = raised ? 0.1 : side * 1.05;
     const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.13, 18, 12), jointMat);
     forearmGroup.add(elbow);
     const forearm = roundedMesh(0.22, 0.42, 0.28, 0.08, whiteMat);
@@ -449,11 +450,10 @@ function createAIMentorRobot() {
     forearmAccent.rotation.x = Math.PI / 2;
     forearmAccent.position.y = raised ? 0.19 : -0.19;
     forearmGroup.add(forearmAccent);
-    armGroup.add(forearmGroup);
 
     const handGroup = new THREE.Group();
     handGroup.name = `${name === "leftArmGroup" ? "left" : "right"}HandGroup`;
-    handGroup.position.y = raised ? 0.84 : -0.84;
+    handGroup.position.set(raised ? -0.1 : 0, raised ? 0.42 : -0.42, 0);
     const palm = roundedMesh(0.3, 0.27, 0.25, 0.08, jointMat);
     handGroup.add(palm);
     const fingerY = raised ? 0.22 : -0.22;
@@ -463,11 +463,16 @@ function createAIMentorRobot() {
     palmAccent.rotation.x = Math.PI / 2;
     palmAccent.position.z = 0.13;
     handGroup.add(palmAccent);
+
+    // Keep the full arm articulated: shoulder -> upper arm -> forearm -> hand.
+    shoulderGroup.add(upperArmGroup);
+    upperArmGroup.add(forearmGroup);
     forearmGroup.add(handGroup);
-    return { armGroup, shoulderGroup, forearmGroup, handGroup };
+    armGroup.add(shoulderGroup);
+    return { armGroup, shoulderGroup, upperArmGroup, forearmGroup, handGroup };
   }
 
-  const leftArm = createArm("leftArmGroup", -1, true);
+  const leftArm = createArm("leftArmGroup", -1, false);
   const rightArm = createArm("rightArmGroup", 1, false);
   robotGroup.add(leftArm.armGroup, rightArm.armGroup);
 
@@ -500,10 +505,12 @@ function createAIMentorRobot() {
     bodyGroup,
     leftArmGroup: leftArm.armGroup,
     leftShoulderGroup: leftArm.shoulderGroup,
+    leftUpperArmGroup: leftArm.upperArmGroup,
     leftForearmGroup: leftArm.forearmGroup,
     leftHandGroup: leftArm.handGroup,
     rightArmGroup: rightArm.armGroup,
     rightShoulderGroup: rightArm.shoulderGroup,
+    rightUpperArmGroup: rightArm.upperArmGroup,
     rightForearmGroup: rightArm.forearmGroup,
     rightHandGroup: rightArm.handGroup,
     lowerHoverGroup
@@ -584,7 +591,7 @@ function initAIMentor3D() {
     parts,
     hasDragged: false,
     hovered: false,
-    animation: { startedAt: -10, busy: false },
+    animation: { startedAt: -10, busy: false, rotationStart: 0 },
     baseScale: 0.72
   };
 
@@ -595,6 +602,11 @@ function initAIMentor3D() {
   const mouse = new THREE.Vector2();
 
   const onPointerDown = (e) => {
+    // Manual drag always wins; stop an automatic greeting cleanly if the user takes over.
+    if (mentor3DScene.animation.busy) {
+      mentor3DScene.animation.busy = false;
+      mentor3DScene.animation.startedAt = -10;
+    }
     isDragging = true;
     mentor3DScene.hasDragged = false; // Reset on down
     const touch = e.touches && e.touches[0];
@@ -675,10 +687,22 @@ function initAIMentor3D() {
 
   // 7. Animation loop: idle float, hover response, and the click greeting sequence.
   const clock = new THREE.Clock();
+  const leftForearmRestRotation = parts.leftForearmGroup.rotation.z;
+  const leftHandRestRotation = parts.leftHandGroup.rotation.z;
+  const clamp01 = (value) => Math.max(0, Math.min(1, value));
+  const smoothstep = (value) => value * value * (3 - 2 * value);
+  const easeInOut = (value) => value < 0.5 ? 4 * value * value * value : 1 - Math.pow(-2 * value + 2, 3) / 2;
+  const resetWavePose = () => {
+    parts.leftArmGroup.rotation.z = 0;
+    parts.leftShoulderGroup.rotation.z = 0;
+    parts.leftForearmGroup.rotation.z = leftForearmRestRotation;
+    parts.leftHandGroup.rotation.z = leftHandRestRotation;
+  };
 
   mentor3DScene.playGreeting = () => {
     if (mentor3DScene.animation.busy) return;
     mentor3DScene.animation.startedAt = clock.getElapsedTime();
+    mentor3DScene.animation.rotationStart = group.rotation.y;
     mentor3DScene.animation.busy = true;
   };
 
@@ -689,26 +713,40 @@ function initAIMentor3D() {
     const time = clock.elapsedTime;
     const greetingTime = time - mentor3DScene.animation.startedAt;
     let jumpOffset = 0;
-    let waveAmount = 0;
+    resetWavePose();
 
     if (mentor3DScene.animation.busy) {
-      const jumpProgress = Math.min(greetingTime / 1.18, 1);
-      jumpOffset = Math.sin(jumpProgress * Math.PI) * 0.3;
-      if (greetingTime > 0.28) {
-        const waveProgress = Math.min((greetingTime - 0.28) / 0.86, 1);
-        const waveEnvelope = Math.sin(waveProgress * Math.PI);
-        waveAmount = Math.sin(waveProgress * Math.PI * 4) * 0.32 * waveEnvelope;
+      // One complete root rotation, followed by a soft jump and an articulated wave.
+      const rotationProgress = easeInOut(clamp01(greetingTime / 1.35));
+      group.rotation.y = mentor3DScene.animation.rotationStart + Math.PI * 2 * rotationProgress;
+
+      if (greetingTime < 1.25) {
+        jumpOffset = -smoothstep(clamp01(greetingTime / 0.2)) * 0.025;
+      } else {
+        const jumpProgress = clamp01((greetingTime - 1.25) / 1.15);
+        jumpOffset = Math.sin(jumpProgress * Math.PI) * 0.3;
       }
-      if (greetingTime > 1.42) {
+
+      if (greetingTime > 1.7) {
+        const waveProgress = clamp01((greetingTime - 1.7) / 1.05);
+        const waveEnvelope = Math.sin(waveProgress * Math.PI);
+        const waveSwing = Math.sin(waveProgress * Math.PI * 4) * waveEnvelope;
+        const raiseEnvelope = smoothstep(clamp01(waveProgress / 0.22));
+        parts.leftShoulderGroup.rotation.z = -1.7 * raiseEnvelope * (1 - smoothstep(clamp01((waveProgress - 0.78) / 0.22)));
+        parts.leftForearmGroup.rotation.z = leftForearmRestRotation + waveSwing * 0.36;
+        parts.leftHandGroup.rotation.z = leftHandRestRotation + waveSwing * 0.18;
+      }
+
+      if (greetingTime > 3.05) {
         mentor3DScene.animation.busy = false;
         mentor3DScene.animation.startedAt = -10;
+        resetWavePose();
       }
     }
 
     // Drag owns rotation; these animations only adjust vertical position and articulated parts.
     robot.position.y = -0.16 + Math.sin(time * 1.8) * 0.065 + jumpOffset;
     robot.scale.lerp(new THREE.Vector3(mentor3DScene.hovered ? 0.76 : mentor3DScene.baseScale, mentor3DScene.hovered ? 0.76 : mentor3DScene.baseScale, mentor3DScene.hovered ? 0.76 : mentor3DScene.baseScale), Math.min(delta * 8, 1));
-    parts.leftArmGroup.rotation.z = waveAmount;
     parts.headGroup.rotation.z = Math.sin(time * 1.2) * 0.012;
     parts.lowerHoverGroup.rotation.y += delta * 0.55;
     parts.lowerHoverGroup.position.y = -0.79 + Math.sin(time * 1.8 + 0.6) * 0.014;
@@ -783,24 +821,14 @@ function bindView() {
   if (promptForm) promptForm.addEventListener("submit", (event) => { event.preventDefault(); setRoute("chat"); });
 
   const mentorRobotBtn = document.getElementById("mentor-robot-btn");
+  const playMentorAnimation = () => {
+    if (mentor3DScene && mentor3DScene.playGreeting) mentor3DScene.playGreeting();
+  };
   if (mentorRobotBtn) {
-    mentorRobotBtn.addEventListener("click", () => {
-      if (mentor3DScene && mentor3DScene.playGreeting) mentor3DScene.playGreeting();
-      const wrapper = mentorRobotBtn.querySelector(".mentor-robot-wrapper");
-      if (wrapper) {
-        wrapper.classList.remove("is-jumping");
-        void wrapper.offsetWidth;
-        wrapper.classList.add("is-jumping");
-
-        setTimeout(() => {
-          wrapper.classList.remove("is-jumping");
-          setRoute("chat");
-        }, 1450);
-      } else {
-        setRoute("chat");
-      }
-    });
+    mentorRobotBtn.addEventListener("click", playMentorAnimation);
   }
+  const mentorPlayBtn = document.getElementById("mentor-play-btn");
+  if (mentorPlayBtn) mentorPlayBtn.addEventListener("click", playMentorAnimation);
 
   const planForm = document.getElementById("plan-form");
   if (planForm) planForm.addEventListener("submit", submitPlan);

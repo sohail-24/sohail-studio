@@ -81,7 +81,7 @@ button { border: 0; cursor: pointer; color: inherit; }
 .sphere-footer span:first-child { color: #9ca3ae; }
 
 /* Mentor */
-.mentor-panel { min-height: 0; flex: 1; padding: 16px; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; }
+.mentor-panel { position: relative; min-height: 0; flex: 1; padding: 16px; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; }
 .mentor-robot-container { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 200px; }
 .mentor-robot-btn { display: block; padding: 0; margin: 0; background: transparent; border-radius: 12px; cursor: pointer; border: none; outline: none; }
 .mentor-robot-btn:focus-visible { outline: 2px solid #5a7bd5; outline-offset: 4px; }
@@ -89,6 +89,9 @@ button { border: 0; cursor: pointer; color: inherit; }
 .mentor-robot-wrapper.is-jumping { animation: none; }
 .mentor-robot-3d { display: block; width: 180px; height: 180px; transition: transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), filter 0.3s ease; transform-origin: bottom center; touch-action: none; }
 .mentor-robot-btn:hover .mentor-robot-3d { transform: scale(1.05); filter: drop-shadow(0 0 15px rgba(90, 123, 213, 0.4)); }
+.mentor-actions { position: absolute; top: 16px; right: 76px; display: flex; align-items: center; justify-content: center; }
+.mentor-play-btn { padding: 6px 10px; border: 1px solid #243a70; border-radius: 999px; background: #0b1730; color: #75ddff; font-size: 9px; font-weight: 650; transition: border-color .2s, background .2s, color .2s; }
+.mentor-play-btn:hover { border-color: #3f86d9; background: #10234a; color: #fff; }
 .mentor-suggestion { text-align: center; margin-top: 10px; }
 .mentor-suggestion-btn { background: transparent; border: none; padding: 6px 12px; color: var(--subtle); font-size: 10px; transition: color 0.2s; cursor: pointer; }
 .mentor-suggestion-btn:hover { color: var(--text); }
