@@ -687,6 +687,7 @@ function initAIMentor3D() {
 
   // 7. Animation loop: idle float, hover response, and the click greeting sequence.
   const clock = new THREE.Clock();
+  const leftUpperArmRestRotation = parts.leftUpperArmGroup.rotation.z;
   const leftForearmRestRotation = parts.leftForearmGroup.rotation.z;
   const leftHandRestRotation = parts.leftHandGroup.rotation.z;
   const clamp01 = (value) => Math.max(0, Math.min(1, value));
@@ -695,6 +696,7 @@ function initAIMentor3D() {
   const resetWavePose = () => {
     parts.leftArmGroup.rotation.z = 0;
     parts.leftShoulderGroup.rotation.z = 0;
+    parts.leftUpperArmGroup.rotation.z = leftUpperArmRestRotation;
     parts.leftForearmGroup.rotation.z = leftForearmRestRotation;
     parts.leftHandGroup.rotation.z = leftHandRestRotation;
   };
@@ -728,13 +730,14 @@ function initAIMentor3D() {
       }
 
       if (greetingTime > 1.7) {
-        const waveProgress = clamp01((greetingTime - 1.7) / 1.05);
+        const waveProgress = clamp01((greetingTime - 1.8) / 1.04);
         const waveEnvelope = Math.sin(waveProgress * Math.PI);
         const waveSwing = Math.sin(waveProgress * Math.PI * 4) * waveEnvelope;
-        const raiseEnvelope = smoothstep(clamp01(waveProgress / 0.22));
-        parts.leftShoulderGroup.rotation.z = -2.63 * raiseEnvelope * (1 - smoothstep(clamp01((waveProgress - 0.78) / 0.22)));
-        parts.leftForearmGroup.rotation.z = leftForearmRestRotation + waveSwing * 0.36;
-        parts.leftHandGroup.rotation.z = leftHandRestRotation + waveSwing * 0.18;
+        const raiseEnvelope = smoothstep(clamp01(waveProgress / 0.40));
+        parts.leftShoulderGroup.rotation.z = -2.02 * raiseEnvelope * (1 - smoothstep(clamp01((waveProgress - 1.20) / 0.95)));
+        parts.leftUpperArmGroup.rotation.z = leftUpperArmRestRotation - 0.20 * raiseEnvelope * (1 - smoothstep(clamp01((waveProgress - 0.70) / 0.75)));
+        parts.leftForearmGroup.rotation.z = leftForearmRestRotation + waveSwing *  1.20;
+        parts.leftHandGroup.rotation.z = leftHandRestRotation + Math.PI / 2 + waveSwing * 0.90;
       }
 
       if (greetingTime > 3.05) {
