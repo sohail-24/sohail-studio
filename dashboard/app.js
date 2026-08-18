@@ -116,37 +116,6 @@ function workspaceCanvas() {
   return `<section class="workspace-canvas surface-card"><div class="canvas-header"><div><span class="panel-kicker">Workspace canvas</span><h1>Build with context</h1></div><span class="canvas-state"><span class="state-dot"></span> Ready</span></div><div class="workspace-tabs" role="tablist">${tabs.map(([id, label]) => `<button class="workspace-tab ${state.workspaceTab === id ? "active" : ""}" data-workspace-tab="${id}" role="tab" aria-selected="${state.workspaceTab === id}">${label}</button>`).join("")}</div><div class="canvas-content">${workspaceTabContent(state.workspaceTab)}</div>${commandBar()}</section>`;
 }
 
-function advancedPanel() {
-  const providerOpen = state.advancedOpen ? "" : "collapsed";
-  const models = aiModels[state.provider] || [];
-  return `<section class="advanced-panel surface-card ${providerOpen}">
-    <div class="advanced-heading"><div><span class="panel-kicker">AI settings</span><h2>Advanced Panel</h2></div><button class="collapse-button" id="advanced-toggle" aria-label="Toggle advanced panel">${state.advancedOpen ? "⌃" : "⌄"}</button></div>
-    <div class="advanced-content">
-      <div class="setting-group">
-        <label>AI Provider</label>
-        <div class="provider-list">
-          <button class="provider-option ${state.provider === 'ollama' ? 'selected' : ''}" data-provider="ollama"><span class="provider-radio"></span><span><strong>Ollama</strong><small>Connected</small></span><span class="provider-status connected">●</span></button>
-          <button class="provider-option ${state.provider === 'gemini' ? 'selected' : ''}" data-provider="gemini"><span class="provider-radio"></span><span><strong>Gemini</strong><small>Not configured</small></span><span class="provider-status">○</span></button>
-        </div>
-      </div>
-      <div class="setting-grid">
-        <label>Model
-          <select id="model-select" class="select-like" style="appearance: none; background: transparent; border: none; outline: none; width: 100%; color: inherit;">
-            ${models.map(m => `<option value="${m}" ${state.model === m ? 'selected' : ''}>${m}</option>`).join('')}
-          </select>
-        </label>
-        <label>Temperature<span class="range-like"><i style="width:42%"></i></span><small class="range-value">0.4</small></label>
-        <label>Workspace<span class="select-like">~/my-project <b>⌄</b></span></label>
-        <label>Planning mode<span class="select-like">Review first <b>⌄</b></span></label>
-        <label>Execution mode<span class="select-like">Approval required <b>⌄</b></span></label>
-        <label>Memory<span class="select-like">Session memory <b>⌄</b></span></label>
-        <label>Context<span class="select-like">Auto <b>⌄</b></span></label>
-        <label>Theme<span class="select-like">Dark <b>⌄</b></span></label>
-      </div>
-    </div>
-  </section>`;
-}
-
 function homeTerminalPanel() {
   return `<section class="terminal-panel surface-card"><div class="terminal-panel-header"><div><span class="panel-kicker">Execution engine</span><h2>Terminal</h2></div><div class="terminal-header-actions"><span class="terminal-connection"><span class="neutral-dot"></span>Available</span><button class="quiet-icon" title="Collapse terminal">⌃</button></div></div><div class="terminal-status-row"><span class="terminal-idle">Idle</span><span>No approved command</span></div><div class="terminal-preview"><div class="terminal-line terminal-muted">Sohail Studio terminal</div><div class="terminal-line"><span class="terminal-prompt">$</span> Waiting for an approved command…</div><div class="terminal-line terminal-muted">Output will stream here when execution begins.</div></div><div class="terminal-panel-footer"><span>PTY bridge ready</span><button class="text-button" data-route="terminal">Open terminal ↗</button></div></section>`;
 }
@@ -186,7 +155,7 @@ function commandBar() {
 }
 
 function homeView() {
-  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column">${knowledgeSphere()}${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}</div><div class="right-column">${advancedPanel()}${homeTerminalPanel()}</div></div></div>`;
+  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column"><div class="empty-top-panel" style="min-height: 330px;"></div>${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}</div><div class="right-column">${knowledgeSphere()}${homeTerminalPanel()}</div></div></div>`;
 }
 
 function workflowsView() {
@@ -798,20 +767,7 @@ function bindView() {
     state.workspaceTab = item.dataset.workspaceTab;
     render();
   }));
-  const advancedToggle = document.getElementById("advanced-toggle");
-  if (advancedToggle) advancedToggle.addEventListener("click", () => { state.advancedOpen = !state.advancedOpen; render(); });
-  document.querySelectorAll("[data-provider]").forEach((item) => item.addEventListener("click", () => {
-    state.provider = item.dataset.provider;
-    state.model = aiModels[state.provider][0];
-    render();
-  }));
-  const modelSelect = document.getElementById("model-select");
-  if (modelSelect) {
-    modelSelect.addEventListener("change", (e) => {
-      state.model = e.target.value;
-      render();
-    });
-  }
+
   document.querySelectorAll("[data-cmd-mode]").forEach((item) => item.addEventListener("click", () => {
     state.commandMode = item.dataset.cmdMode;
     render();
