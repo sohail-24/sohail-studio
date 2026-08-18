@@ -103,9 +103,9 @@ The dashboard (`dashboard/`) is a lightweight, dependency-free Single Page Appli
 - **Components**: UI is built using vanilla HTML and CSS (`index.html`, `styles.css`). Dynamic generation of components like workflow cards, terminal windows, and session lists is handled by `app.js`.
 
 - **Layout**: The UI utilizes a strict three-column layout designed for desktop viewports:
-  - **Left Column**: Contains the Workspace Memory / Knowledge Sphere and the **AI Mentor panel**. The AI Mentor panel includes a **3D AI robot visual element**, constructed programmatically using Vanilla Three.js primitives rather than external `.glb` files. This robot functions strictly as a visual UI element, not as an autonomous AI agent.
-  - **Center Column**: Contains the Workspace Canvas and Command Center (dynamic view content).
-  - **Right Column**: Contains the Advanced Panel and Execution Engine / Terminal.
+  - **Left Column**: Contains the **Recents task** placeholder (an empty boxed area with no functional API yet) and the **AI Mentor panel**. The AI Mentor panel includes a **3D AI robot visual element**, constructed programmatically using Vanilla Three.js primitives rather than external `.glb` files. This robot functions strictly as a visual UI element, not as an autonomous AI agent. The AI Mentor panel no longer uses the old large card-style presentation.
+  - **Center Column**: Contains the **Workspace Canvas** and Command Center. The workspace includes tabs like Overview, Plan, Files, Logs, Documentation, Architecture, Diff, and Timeline. Current workspace content also includes Welcome/workspace context, Current Task, Execution Plan, Recent Activity, Documentation Preview, Chat, Ask Sohail Studio input, and workflow quick actions.
+  - **Right Column**: Contains the **Engineering Knowledge Sphere** (moved from the left sidebar) and the **Execution Engine / Terminal** underneath it. The Engineering Knowledge Sphere visualizes the Workspace Memory and includes nodes for learning graph data. The **Advanced Panel** (previously AI Settings) has been completely removed from the dashboard.
 
 - **Header / Navigation**: Features a top navigation bar. The top-left branding area contains a personal avatar (`/assets/sohail-avatar.png`) that appears before the "Sohail Studio" title.
 
@@ -126,6 +126,19 @@ The terminal integration provides two distinct pathways: structured CLI executio
   - Incoming WebSocket messages containing input data are written directly to the PTY file descriptor.
   - Stop actions send a `SIGINT` to the shell process.
 
+
+---
+
+## CLI Bridge
+
+`core/cli_bridge.py` builds and executes commands using the existing `Sohail-Agent-CLI` entry point. It acts as a thin process adapter and never uses implicit shell strings, protecting against shell injection.
+
+- **Resolution:** Resolves the CLI using the `SOHAIL_AGENT_ROOT` environment variable, falling back to a default path.
+- **Workflow Mapping:** Maps specific workflows (e.g., `inspect-project`, `dockerize-project`) to their corresponding CLI commands (e.g., `inspect`, `dockerize`). Unmapped workflows cannot be executed.
+- **Command Construction:** Commands are explicitly constructed using a tuple argument list (e.g., `sys.executable`, `-m`, `src.main`).
+- **Options and Flags:** Automatically appends `--dry-run` and `--overwrite` flags if requested. It securely injects `SOHAIL_AI_PROVIDER` and `SOHAIL_AI_MODEL` environment variables based on the active run request configuration.
+- **Output Handling:** Uses `asyncio.create_subprocess_exec` to stream output and exit codes asynchronously from the real CLI process.
+
 ---
 
 ## Configuration
@@ -144,6 +157,19 @@ The application is configured through environment variables and local files:
 
 - **Runtime Requirements**: Python 3.11+, FastAPI, Uvicorn, and Pydantic. It requires a local installation of the `Sohail-Agent-CLI` to function for CLI-backed workflows.
 
+
+---
+
+## Security / Safety Model
+
+- **Local-first execution:** All processing and orchestration happen on the local machine.
+- **Explicit workflow approval:** The application enforces a manual approval workflow for all tasks; AI-generated plans must never execute silently without user approval.
+- **Transparent command execution:** The exact command and its purpose are displayed prior to execution.
+- **CLI command allowlisting/mapping:** Commands are strictly mapped; Sohail Studio only runs defined commands from `Sohail-Agent-CLI`.
+- **No implicit shell string execution:** To prevent shell injection vulnerabilities, structured workflows use explicit argument lists (via `CliBridge`) instead of running commands via `shell=True`.
+- **Local PTY access:** Provides direct terminal bridging without remote exposure.
+- **Session/run state:** Run states are isolated per execution and saved locally in JSON files for auditing.
+
 ---
 
 ## Design Principles
@@ -159,3 +185,22 @@ Sohail Studio adheres to the following principles:
 - **Minimal dependencies**: The frontend is built without frameworks (React, Vue, etc.) utilizing plain HTML/JS/CSS to ensure it remains fast and straightforward. 3D features are integrated via Three.js and GLTFLoader using CDN links, avoiding a frontend build step. The backend avoids complex ORMs, utilizing simple JSON files for state.
 
 - **No duplicated logic**: The Studio intentionally offloads all agent logic and business rules to the existing `Sohail-Agent-CLI`, acting purely as an orchestration and interface layer.
+
+---
+
+## Current Limitations
+
+- Workflows such as `debug-error`, `ai-chat`, and `create-project` are currently exposed in the UI but are not explicitly mapped to `Sohail-Agent-CLI` execution commands in the bridge, acting as placeholders.
+- The `Recents task` section in the left sidebar is currently only a visual placeholder with no task data, API, or persistence.
+- Terminal integration uses a relatively simple polling mechanism on non-blocking file descriptors for the PTY bridge, which works well for standard local use but is not built for high-throughput buffering over high latency networks.
+- The `Sohail-Agent-CLI` path is heavily dependent on a static default absolute path if not overwritten by the `SOHAIL_AGENT_ROOT` environment variable.
+- The local execution model strictly isolates workflows; there is currently no background daemon for continuous background processing.
+
+---
+
+## Future Extensions
+
+- Implementing the remaining placeholder workflows (`debug-error`, `ai-chat`, `create-project`).
+- Implementing the backend functionality and persistence for the `Recents task` feature.
+- Exposing broader configuration options directly from the UI.
+- Improved terminal UI handling (e.g. implementing xterm.js integration).
