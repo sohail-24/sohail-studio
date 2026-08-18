@@ -81,7 +81,7 @@ function mentorCard(icon, title, copy, action = "Open") {
 }
 
 function mentorPanel() {
-  return `<section class="mentor-panel surface-card"><div class="panel-heading"><div><span class="panel-kicker">Senior platform engineer</span><h2>AI Mentor</h2></div><span class="neutral-badge">Guide</span></div>
+  return `<section class="mentor-panel"><div class="panel-heading"><div><span class="panel-kicker">Senior platform engineer</span><h2>AI Mentor</h2></div><span class="neutral-badge">Guide</span></div>
   <div class="mentor-actions">
     <button id="mentor-play-btn" class="mentor-play-btn" type="button" aria-label="Play AI Mentor greeting">▶ Play</button>
   </div>
