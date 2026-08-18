@@ -732,7 +732,7 @@ function initAIMentor3D() {
         const waveEnvelope = Math.sin(waveProgress * Math.PI);
         const waveSwing = Math.sin(waveProgress * Math.PI * 4) * waveEnvelope;
         const raiseEnvelope = smoothstep(clamp01(waveProgress / 0.22));
-        parts.leftShoulderGroup.rotation.z = -1.7 * raiseEnvelope * (1 - smoothstep(clamp01((waveProgress - 0.78) / 0.22)));
+        parts.leftShoulderGroup.rotation.z = 1.7 * raiseEnvelope * (1 - smoothstep(clamp01((waveProgress - 0.78) / 0.22)));
         parts.leftForearmGroup.rotation.z = leftForearmRestRotation + waveSwing * 0.36;
         parts.leftHandGroup.rotation.z = leftHandRestRotation + waveSwing * 0.18;
       }
