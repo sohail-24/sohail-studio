@@ -65,9 +65,18 @@ The Dashboard provides a UI constructed purely from plain web technologies (HTML
 
 - **Top-left avatar**: The top-left branding area contains a personal avatar (loaded from `/assets/sohail-avatar.png`). It appears before the "Sohail Studio" title.
 
-### Workspace Elements
+## Current Dashboard Layout
 
-- **AI Mentor 3D robot**: Located in the left-side AI Mentor panel. The 3D robot is constructed programmatically with Three.js. It acts purely as a visual UI element and is not an autonomous AI agent.
+The UI utilizes a strict three-column layout designed for desktop viewports:
+
+- **Left Column**: Contains the **Recents task** placeholder and the **AI Mentor panel**.
+  - **Recents task**: An empty placeholder box with no current task data, API, or persistence.
+  - **AI Mentor**: Features the 3D AI robot constructed programmatically with Three.js. It acts purely as a visual UI element and is not an autonomous AI agent. It also contains Play and Guide actions, and does not use the old large card-style presentation.
+- **Center Column**: Contains the **Workspace Canvas** and Command Center. The workspace includes tabs (Overview, Plan, Files, Logs, Documentation, Architecture, Diff, Timeline), execution context, and quick actions like Chat, Terminal shortcut, Inspect shortcut, and "Ask Sohail Studio" input.
+- **Right Column**: Contains the **Engineering Knowledge Sphere** (moved from the left sidebar) and the **Terminal** underneath it.
+  - **Engineering Knowledge Sphere**: Visualizes the Workspace Memory and includes nodes for learning graph data (Docs, Python, FastAPI, Docker, Kubernetes, Git, CI/CD, Sessions).
+  - The "Advanced Panel" has been completely removed.
+
 
 ## Navigation
 
@@ -127,6 +136,23 @@ The backend orchestrates the dashboard's needs and communicates with the underly
 
 The backend delegates process creation to `CliBridge` (`core/cli_bridge.py`). It does not run shell strings. Instead, it carefully constructs `sys.executable -m src.main` calls that invoke the `Sohail-Agent-CLI` codebase based on the selected workflow.
 
+
+---
+
+## Configuration
+
+Sohail Studio uses local configuration files and environment variables.
+
+- **`settings/default.json`**:
+  - `workspace_root`: The default path for terminal sessions.
+  - `cli_root`: Fallback path for the CLI if `SOHAIL_AGENT_ROOT` is unset.
+  - `shell`: Default shell for the PTY bridge (e.g. `/bin/bash`).
+  - `local_only`: Flag enforcing local execution rules.
+
+- **Environment Variables**:
+  - `SOHAIL_AGENT_ROOT`: Specifies the root directory of the `Sohail-Agent-CLI` installation.
+  - `SOHAIL_STUDIO_SHELL`: Shell to be used by the terminal.
+
 ---
 
 ## CLI Bridge
@@ -149,6 +175,19 @@ Sohail Studio provides raw interactive terminal access.
   - Execution relies strictly on local resources.
   - Commands executed via workflows are read-only or strictly user-approved first via the plan mechanism.
   - The CLI bridge refuses to run unmapped workflows or execute shell injections implicitly. Output logic strictly streams without intervening or inferring beyond what the underlying tool does.
+
+
+---
+
+## Security / Safety Model
+
+- **Local-first execution:** All processing and orchestration happen on the local machine.
+- **Explicit workflow approval:** The application enforces a manual approval workflow for all tasks; AI-generated plans must never execute silently without user approval.
+- **Transparent command execution:** The exact command and its purpose are displayed prior to execution.
+- **CLI command allowlisting/mapping:** Commands are strictly mapped; Sohail Studio only runs defined commands from `Sohail-Agent-CLI`.
+- **No implicit shell string execution:** To prevent shell injection vulnerabilities, structured workflows use explicit argument lists (via `CliBridge`) instead of running commands via `shell=True`.
+- **Local PTY access:** Provides direct terminal bridging without remote exposure.
+- **Session/run state:** Run states are isolated per execution and saved locally in JSON files for auditing.
 
 ---
 
@@ -186,13 +225,15 @@ Endpoints are defined in `backend/main.py`. Define standard REST endpoints using
 ## Current Limitations
 
 - Workflows such as `Create New Project`, `Debug Error`, and `AI Chat` are currently exposed in the UI but are not explicitly mapped to `Sohail-Agent-CLI` execution commands in the bridge, acting as placeholders.
+- The `Recents task` section is currently only a visual placeholder with no task data, API, or persistence.
 - Terminal integration uses a relatively simple polling mechanism on non-blocking file descriptors for the PTY bridge, which works well for standard local use but is not built for high-throughput buffering over high latency networks.
-- The `Sohail-Agent-CLI` path is heavily dependent on a static default absolute path (`/Users/sohal/Downloads/testing-project/Sohail-Agent-CLI`) if not overwritten by the `SOHAIL_AGENT_ROOT` environment variable.
-
+- The `Sohail-Agent-CLI` path is dependent on the `SOHAIL_AGENT_ROOT` environment variable or the fallback static default path.
+- The local execution model strictly isolates workflows; there is currently no background daemon for continuous background processing.
 ---
 
 ## Future Extensions
 
-- Implementing remaining workflows.
+- Implementing the remaining placeholder workflows (`Create New Project`, `Debug Error`, `AI Chat`).
+- Building out backend API and task history functionality for the `Recents task` feature.
 - Exposing broader configuration options directly from the UI.
 - Improved terminal UI handling (e.g. implementing xterm.js integration).
