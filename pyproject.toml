@@ -1,14 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "sohail-studio"
 version = "0.1.0"
-description = "Local-first AI engineering workspace for Sohail-Agent-CLI"
+description = "Local-first AI engineering workspace with an integrated Sohail-Agent-CLI engine"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.0.0",
+    "pyyaml>=6.0",
+    "jinja2>=3.1.0",
+    "httpx>=0.25.0",
+    "rich>=13.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+
+[project.scripts]
+sohail-agent = "sohail_agent_cli.main:main"
 
 [tool.ruff]
 line-length = 100
 select = ["E", "F", "I", "W"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["sohail_agent_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

@@ -1,239 +1,229 @@
-# Installation
+# Sohail Studio Documentation
 
-Sohail Studio runs locally and relies on a local environment to orchestrate its tasks.
+Sohail Studio is a local-first AI engineering workspace. It combines a browser dashboard, a raw local terminal, workflow planning and approval, and the integrated Sohail-Agent-CLI implementation in one project.
 
 ## Requirements
 
-- **Python Version**: `>=3.11`
+- macOS or another local Unix-like environment with a usable shell and PTY support.
+- Python 3.11 or newer.
+- The dependencies declared in `pyproject.toml` or `requirements.txt`.
+- Ollama installed locally for Ollama-backed generation. Studio does not install or start the Ollama service.
 
-- **Virtual Environment**: It is highly recommended to use a virtual environment.
+No separate CLI checkout, CLI virtual environment, cloud service, or hosted asset is required for normal Studio operation.
 
-- **Dependencies**: The core backend relies on `fastapi`, `uvicorn[standard]`, and `pydantic`. The frontend has no external dependencies.
+## Installation
 
-- **Sohail-Agent-CLI**: The system requires a local copy of the `Sohail-Agent-CLI`. Ensure it is accessible.
-
-### Running Locally
-
-To run the application locally:
+From the Sohail Studio project root:
 
 ```bash
-# 1. Navigate to the directory
-cd path/to/sohail-studio
-
-# 2. Create and activate a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Run the development server
-uvicorn backend.main:app --reload
+python3 -m venv .venv                 # only when .venv does not exist
+.venv/bin/python -m pip install -e .
 ```
 
-Then, open your browser to `http://127.0.0.1:8000`.
+For development and tests:
 
----
+```bash
+.venv/bin/python -m pip install -e '.[dev]'
+```
 
-## Project Structure
+The editable install places the `sohail-agent` console entry point in the same `.venv` used by FastAPI and the embedded terminal.
 
-The project separates the logic into clearly defined boundaries:
+## Running Studio
 
-- `backend/`: FastAPI application acting as the main API and WebSocket server.
-- `core/`: Integration components, including the session storage layer and the process bridge to the underlying CLI.
-- `dashboard/`: A purely static set of HTML, CSS, and JS files defining the interface.
-- `logs/`, `sessions/`, `workspace/`: Local runtime storage for output, run records, and a default terminal environment.
-- `settings/`: Basic configuration templates.
+Start the local backend from the project root:
 
----
+```bash
+.venv/bin/uvicorn backend.main:app --reload
+```
 
-## Running the application
+Then open <http://127.0.0.1:8000>. Bind only to loopback for local use.
 
-During development, use the reload flag with uvicorn:
-`uvicorn backend.main:app --reload`
+## Embedded terminal
 
-**Production Notes:**
-This application is designed specifically as a "local-first" engineering tool. It is not currently intended for deployment to public internet-facing production environments. It relies on executing system commands and assumes single-user local access.
+The Terminal page connects to `WS /ws/terminal`. The backend creates a PTY and starts the configured shell at the Studio project root by default. A caller can still supply an explicit `cwd` query parameter for a selected local target, including `workspace/`.
 
----
+The PTY receives its environment directly from Studio:
 
-## Dashboard
+- `PATH` has `sohail-studio/.venv/bin` first.
+- `VIRTUAL_ENV` points to `sohail-studio/.venv`.
+- `PWD` is the selected terminal working directory.
+- `SOHAIL_STUDIO_ROOT` identifies the Studio root.
+- `PYTHONPATH` includes the Studio root.
 
-The Dashboard provides a UI constructed purely from plain web technologies (HTML/JS/CSS).
+Therefore the embedded terminal immediately supports:
 
-### Header Elements
+```bash
+pwd
+which python
+which sohail-agent
+sohail-agent --help
+ollama list
+```
 
-- **Top-left avatar**: The top-left branding area contains a personal avatar (loaded from `/assets/sohail-avatar.png`). It appears before the "Sohail Studio" title.
+No manual `source .venv/bin/activate`, directory switch, or shell startup-file change is required.
 
-## Current Dashboard Layout
+## Integrated CLI
 
-The UI utilizes a strict three-column layout designed for desktop viewports:
+The project entry point is configured as:
 
-- **Left Column**: Contains the **Recents task** placeholder and the **AI Mentor panel**.
-  - **Recents task**: An empty placeholder box with no current task data, API, or persistence.
-  - **AI Mentor**: Features the 3D AI robot constructed programmatically with Three.js. It acts purely as a visual UI element and is not an autonomous AI agent. It also contains Play and Guide actions, and does not use the old large card-style presentation.
-- **Center Column**: Contains the **Workspace Canvas** and Command Center. The workspace includes tabs (Overview, Plan, Files, Logs, Documentation, Architecture, Diff, Timeline), execution context, and quick actions like Chat, Terminal shortcut, Inspect shortcut, and "Ask Sohail Studio" input.
-- **Right Column**: Contains the **Engineering Knowledge Sphere** (moved from the left sidebar) and the **Terminal** underneath it.
-  - **Engineering Knowledge Sphere**: Visualizes the Workspace Memory and includes nodes for learning graph data (Docs, Python, FastAPI, Docker, Kubernetes, Git, CI/CD, Sessions).
-  - The "Advanced Panel" has been completely removed.
+```text
+sohail-agent = sohail_agent_cli.main:main
+```
 
+Use it from the Studio environment:
 
-## Navigation
+```bash
+.venv/bin/sohail-agent --help
+.venv/bin/sohail-agent --version
+```
 
-The top navigation lets users jump between key views:
+Available commands:
 
-- **Home**: The central view summarizing current workspace state.
+```text
+inspect
+dockerize
+k8s
+cicd
+docs
+interview
+plan
+plan-v2
+bootstrap
+stack
+specification
+blueprint
+all
+```
 
-- **Workflows**: Available actions that the user can orchestrate.
+Global options are `--version`, `--verbose`, `--dry-run`, `--overwrite`, and `--ollama`.
 
-- **Terminal**: A direct terminal connection (PTY) view.
+## Workflows
 
-- **Sessions**: History of past CLI runs and their outputs.
+The five current CLI-backed Studio workflows map to the integrated CLI as follows:
 
-## Current Workflows
+| UI workflow | CLI command |
+| --- | --- |
+| Inspect Project | `inspect` |
+| Dockerize Project | `dockerize` |
+| Kubernetes | `k8s` |
+| CI/CD | `cicd` |
+| Generate Documentation | `docs` |
 
-The UI exposes several configured workflows that either act independently or bridge to the CLI:
+The lifecycle is:
 
-- **Inspect Project** (CLI backed)
+1. Select a workflow and local target.
+2. Request a plan.
+3. Review the proposed steps.
+4. Approve the plan explicitly.
+5. Start the CLI-backed run.
+6. Watch command, output, process, completion, and error events.
+7. Review the persisted run in Sessions.
 
-- **Create New Project** (Placeholder)
+Create New Project, Debug Error, and AI Chat remain visible placeholders and are not silently executed.
 
-- **Dockerize Project** (CLI backed)
+## HTTP API
 
-- **Kubernetes** (CLI backed)
+- `GET /` — serves the dashboard.
+- `GET /api/health` — reports local health and integrated CLI availability.
+- `GET /api/workflows` — returns the workflow catalog.
+- `GET /api/sessions` — returns recent locally persisted runs.
+- `POST /api/workflows/plan` — validates a workflow and creates its approval plan.
+- `POST /api/runs` — starts a run only when `approved` is `true` and the target exists.
+- `GET /api/runs/{run_id}` — returns buffered run state and events.
 
-- **CI/CD** (CLI backed)
+Example plan request:
 
-- **Generate Documentation** (CLI backed)
+```json
+{
+  "workflow": "inspect-project",
+  "target": "/path/to/local/project",
+  "provider": "",
+  "model": ""
+}
+```
 
-- **Debug Error** (Placeholder)
+Run requests additionally support `approved`, `dry_run`, and `overwrite`.
 
-- **AI Chat** (Placeholder)
+## WebSockets
 
----
+### `WS /ws/runs/{run_id}`
 
-## Backend
+Streams the real CLI run. Events include:
 
-The backend orchestrates the dashboard's needs and communicates with the underlying execution layer.
+- `command` — the structured command preview and purpose.
+- `output` — CLI stdout/stderr output.
+- `process` — child process information.
+- `complete` — success/failure and exit code.
+- `error` — an execution or validation error.
+- `closed` — the run stream has finished.
 
-## Available Endpoints
+### `WS /ws/terminal`
 
-- `GET /`: Serves the main `index.html` file.
-
-- `GET /api/health`: Provides a status check, returning local status and validating the availability of the CLI root.
-
-- `GET /api/workflows`: Lists all predefined workflows.
-
-- `GET /api/sessions`: Lists recent execution sessions from local storage JSON files.
-- `POST /api/workflows/plan`: Generates a pre-execution plan and enforces explicit user confirmation.
-- `POST /api/runs`: Submits an approved execution, assigning a run ID.
-
-- `GET /api/runs/{run_id}`: Retrieves the static execution state of a specific run.
-- `WS /ws/runs/{run_id}`: Subscribes to real-time events (commands, outputs, process IDs, completions, errors) for a given run.
-- `WS /ws/terminal`: Establishes a raw pseudo-terminal session.
-
-## Communication with CLI
-
-The backend delegates process creation to `CliBridge` (`core/cli_bridge.py`). It does not run shell strings. Instead, it carefully constructs `sys.executable -m src.main` calls that invoke the `Sohail-Agent-CLI` codebase based on the selected workflow.
-
-
----
+Provides the raw PTY. Input messages can be plain text or JSON with `action: "input"`; a `stop` action sends SIGINT to the shell process.
 
 ## Configuration
 
-Sohail Studio uses local configuration files and environment variables.
+`settings/default.json` contains the current local defaults:
 
-- **`settings/default.json`**:
-  - `workspace_root`: The default path for terminal sessions.
-  - `cli_root`: Fallback path for the CLI if `SOHAIL_AGENT_ROOT` is unset.
-  - `shell`: Default shell for the PTY bridge (e.g. `/bin/bash`).
-  - `local_only`: Flag enforcing local execution rules.
+```json
+{
+  "terminal_cwd": ".",
+  "venv_path": ".venv",
+  "shell": "/bin/bash",
+  "local_only": true
+}
+```
 
-- **Environment Variables**:
-  - `SOHAIL_AGENT_ROOT`: Specifies the root directory of the `Sohail-Agent-CLI` installation.
-  - `SOHAIL_STUDIO_SHELL`: Shell to be used by the terminal.
+`SOHAIL_STUDIO_SHELL` can override the PTY shell. The CLI and workflows preserve these local AI settings:
 
----
+- `SOHAIL_AI_PROVIDER`
+- `SOHAIL_AI_MODEL`
+- `OLLAMA_BASE_URL`
+- `OLLAMA_MODEL`
 
-## CLI Bridge
+Provider/model fields supplied in a workflow request are passed to the CLI process as environment variables. Ollama remains an external local service; do not run another Ollama server if the existing service is already running.
 
-Sohail Studio integrates with `Sohail-Agent-CLI` strictly via process orchestration.
+## Storage and project layout
 
-- **Usage**: The studio resolves the CLI root via the `SOHAIL_AGENT_ROOT` environment variable (falling back to a default path defined in `settings/default.json`).
+```text
+backend/            FastAPI application and workflow execution
+core/               CliBridge and session store
+dashboard/          Static UI and local assets
+terminal/           Terminal integration boundary
+settings/           Runtime defaults
+sohail_agent_cli/   Integrated CLI source
+tests/              Studio and integrated CLI tests
+sessions/           Local run JSON records
+workspace/          Available local workspace directory
+logs/               Local log directory
+.venv/              Single Python environment
+```
 
-- **Integration**: The bridge maps the studio's workflow IDs (e.g., `kubernetes`) to the equivalent CLI commands (e.g., `k8s`). It constructs a secure argument list (`argv`) avoiding `shell=True`, and appends specific flags like `--dry-run` and `--overwrite`. It also passes `SOHAIL_AI_PROVIDER` and `SOHAIL_AI_MODEL` as environment variables. The stdout and stderr are captured asynchronously to feed the WebSocket connections.
+Sessions and logs are local. The CLI writes generated files only to the approved target and according to its flags.
 
----
+## Security model
 
-## Terminal
+- Studio is local-first and intended for loopback use.
+- Plan review and explicit approval are required before workflow execution.
+- Workflow IDs are allowlisted in `core/cli_bridge.py`.
+- Workflow commands use structured argument lists with `asyncio.create_subprocess_exec`; workflow execution does not use `shell=True`.
+- User values are passed as arguments or environment variables rather than concatenated into shell strings.
+- The command preview is streamed before process output.
+- Run state remains in local session storage.
+- The raw PTY is a local WebSocket bridge, not a remote hosted shell.
 
-Sohail Studio provides raw interactive terminal access.
+## Testing
 
-- **Execution Model**: The backend establishes a pseudo-terminal (PTY) using `pty.fork()` and `os.execvp()`. The frontend terminal connects via WebSockets (`/ws/terminal`), continuously polling the PTY's file descriptor for output, and piping raw input directly to the running shell process. If a specific "stop" payload is received, it sends a `SIGINT` to the shell process.
+Run the integrated suite from the project root:
 
-- **Safety Rules**:
-  - Execution relies strictly on local resources.
-  - Commands executed via workflows are read-only or strictly user-approved first via the plan mechanism.
-  - The CLI bridge refuses to run unmapped workflows or execute shell injections implicitly. Output logic strictly streams without intervening or inferring beyond what the underlying tool does.
+```bash
+.venv/bin/python -m pytest -q
+```
 
+The Phase 4 baseline is 146 passing tests. Safe CLI checks include:
 
----
-
-## Security / Safety Model
-
-- **Local-first execution:** All processing and orchestration happen on the local machine.
-- **Explicit workflow approval:** The application enforces a manual approval workflow for all tasks; AI-generated plans must never execute silently without user approval.
-- **Transparent command execution:** The exact command and its purpose are displayed prior to execution.
-- **CLI command allowlisting/mapping:** Commands are strictly mapped; Sohail Studio only runs defined commands from `Sohail-Agent-CLI`.
-- **No implicit shell string execution:** To prevent shell injection vulnerabilities, structured workflows use explicit argument lists (via `CliBridge`) instead of running commands via `shell=True`.
-- **Local PTY access:** Provides direct terminal bridging without remote exposure.
-- **Session/run state:** Run states are isolated per execution and saved locally in JSON files for auditing.
-
----
-
-## Development Guide
-
-## Coding Style
-
-- Standard Python formats are enforced using `ruff` with a line length of 100 characters.
-- Frontend uses plain JavaScript (ES6+), HTML, and CSS without transpilers or external build chains.
-
-## Folder Conventions
-
-- Keep static assets entirely within `dashboard/`.
-- Fast API orchestration should remain within `backend/`.
-- Process-level boundary logic belongs strictly in `core/`.
-
-## Adding new Workflows
-
-1. Add the new workflow definition to the `WORKFLOWS` list in `backend/main.py`.
-2. Define the workflow's step plan in the `create_plan` endpoint mapping.
-3. If it requires underlying CLI execution, add the command mapping to `WORKFLOW_COMMANDS` in `core/cli_bridge.py`.
-
-## Adding new API Endpoints
-
-Endpoints are defined in `backend/main.py`. Define standard REST endpoints using Pydantic models for validation. Ensure any logic requiring storage utilizes the `SessionStore` inside `core/`.
-
-## Adding Dashboard Pages
-
-1. Update `app.js` routing logic (`setRoute`, rendering switch statement).
-2. Create standard render functions in `app.js`.
-3. Update HTML IDs and styles in `dashboard/index.html` and `dashboard/styles.css` if necessary.
-
----
-
-## Current Limitations
-
-- Workflows such as `Create New Project`, `Debug Error`, and `AI Chat` are currently exposed in the UI but are not explicitly mapped to `Sohail-Agent-CLI` execution commands in the bridge, acting as placeholders.
-- The `Recents task` section is currently only a visual placeholder with no task data, API, or persistence.
-- Terminal integration uses a relatively simple polling mechanism on non-blocking file descriptors for the PTY bridge, which works well for standard local use but is not built for high-throughput buffering over high latency networks.
-- The `Sohail-Agent-CLI` path is dependent on the `SOHAIL_AGENT_ROOT` environment variable or the fallback static default path.
-- The local execution model strictly isolates workflows; there is currently no background daemon for continuous background processing.
----
-
-## Future Extensions
-
-- Implementing the remaining placeholder workflows (`Create New Project`, `Debug Error`, `AI Chat`).
-- Building out backend API and task history functionality for the `Recents task` feature.
-- Exposing broader configuration options directly from the UI.
-- Improved terminal UI handling (e.g. implementing xterm.js integration).
+```bash
+.venv/bin/sohail-agent --help
+.venv/bin/sohail-agent --version
+.venv/bin/sohail-agent --dry-run inspect .
+```

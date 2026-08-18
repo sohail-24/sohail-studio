@@ -1,7 +1,7 @@
-"""A thin process adapter around the existing Sohail-Agent-CLI.
+"""A thin process adapter around the integrated Sohail-Agent-CLI.
 
 This module intentionally owns process wiring only. Agent behavior, analysis,
-generators, and business rules stay in the existing CLI repository.
+generators, and business rules stay in the integrated CLI package.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 
-DEFAULT_CLI_ROOT = Path("/Users/sohal/Downloads/testing-project/Sohail-Agent-CLI")
+DEFAULT_CLI_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,7 @@ class CliCommand:
 
 
 class CliBridge:
-    """Build and execute commands using the existing CLI entry point."""
+    """Build and execute commands using the integrated CLI entry point."""
 
     WORKFLOW_COMMANDS = {
         "inspect-project": ("inspect", "Understand repository structure, stack, and deployment readiness."),
@@ -37,9 +37,9 @@ class CliBridge:
         "documentation": ("docs", "Generate project documentation through Sohail-Agent-CLI."),
     }
 
-    def __init__(self, cli_root: Path | None = None) -> None:
-        configured = os.getenv("SOHAIL_AGENT_ROOT")
-        self.cli_root = Path(configured).expanduser() if configured else (cli_root or DEFAULT_CLI_ROOT)
+    def __init__(self) -> None:
+        """Use the CLI package integrated into this Studio checkout."""
+        self.cli_root = DEFAULT_CLI_ROOT
 
     def build_command(
         self,
@@ -55,7 +55,7 @@ class CliBridge:
         if workflow not in self.WORKFLOW_COMMANDS:
             raise ValueError(f"Workflow is not CLI-backed yet: {workflow}")
         command, purpose = self.WORKFLOW_COMMANDS[workflow]
-        args = [sys.executable, "-m", "src.main"]
+        args = [sys.executable, "-m", "sohail_agent_cli.main"]
         if dry_run:
             args.append("--dry-run")
         if overwrite:
@@ -77,8 +77,9 @@ class CliBridge:
         on_start: callable,
     ) -> AsyncIterator[tuple[str, str]]:
         """Yield `(stream, chunk)` pairs from the real CLI process."""
-        if not self.cli_root.exists():
-            raise FileNotFoundError(f"Sohail-Agent-CLI not found at {self.cli_root}")
+        package_root = self.cli_root / "sohail_agent_cli"
+        if not package_root.is_dir():
+            raise FileNotFoundError(f"Integrated sohail_agent_cli package not found at {package_root}")
 
         env = {**os.environ, "PYTHONPATH": str(self.cli_root)}
         if provider:

@@ -1,0 +1,8 @@
+decisions/001_frontend.md
+decisions/002_backend.md
+decisions/003_database.md
+decisions/004_authentication.md
+decisions/005_deployment.md
+REQUIREMENTS.md
+ARCHITECTURE.md
+TASK.md

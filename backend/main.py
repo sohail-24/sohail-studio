@@ -23,6 +23,19 @@ from core.session_store import SessionStore
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "dashboard"
+SETTINGS_PATH = ROOT / "settings" / "default.json"
+
+
+def _load_settings() -> dict[str, Any]:
+    try:
+        return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+SETTINGS = _load_settings()
+STUDIO_VENV = (ROOT / SETTINGS.get("venv_path", ".venv")).resolve()
+DEFAULT_TERMINAL_CWD = (ROOT / SETTINGS.get("terminal_cwd", ".")).resolve()
 store = SessionStore(ROOT / "sessions")
 cli = CliBridge()
 
@@ -231,15 +244,25 @@ async def run_socket(websocket: WebSocket, run_id: str) -> None:
 @app.websocket("/ws/terminal")
 async def terminal_socket(websocket: WebSocket) -> None:
     await websocket.accept()
-    target = websocket.query_params.get("cwd") or str(ROOT / "workspace")
+    target = websocket.query_params.get("cwd") or str(DEFAULT_TERMINAL_CWD)
     cwd = Path(target).expanduser().resolve()
     if not cwd.exists() or not cwd.is_dir():
-        cwd = ROOT / "workspace"
-    shell = os.getenv("SOHAIL_STUDIO_SHELL", "/bin/bash")
+        cwd = DEFAULT_TERMINAL_CWD
+    shell = os.getenv("SOHAIL_STUDIO_SHELL") or SETTINGS.get("shell") or "/bin/bash"
+    terminal_env = {**os.environ}
+    terminal_env["VIRTUAL_ENV"] = str(STUDIO_VENV)
+    terminal_env["PATH"] = os.pathsep.join(
+        [str(STUDIO_VENV / "bin"), terminal_env.get("PATH", "")]
+    )
+    terminal_env["PWD"] = str(cwd)
+    terminal_env["SOHAIL_STUDIO_ROOT"] = str(ROOT)
+    terminal_env["PYTHONPATH"] = os.pathsep.join(
+        [str(ROOT), terminal_env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(cwd)
-        os.execvp(shell, [shell])
+        os.execvpe(shell, [shell, "-i"], terminal_env)
 
     os.set_blocking(fd, False)
 

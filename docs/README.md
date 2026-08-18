@@ -12,9 +12,9 @@ It is a **visual engineering workspace** that allows developers to collaborate w
 
 Instead of copying the functionality of ChatGPT, Cursor, or VS Code, Sohail Studio combines the best parts of each into a single engineering environment focused on **planning, building, debugging, and deploying software**.
 
-The existing **Sohail-Agent-CLI** remains the engineering engine.
+The integrated **Sohail-Agent-CLI** implementation in `sohail_agent_cli/` remains the engineering engine.
 
-Sohail Studio is simply the visual layer.
+Sohail Studio provides the visual layer, orchestration, terminal, and local runtime around that package.
 
 Everything runs locally.
 
@@ -96,7 +96,7 @@ Browser UI
   CLI Bridge
       │
       ▼
-Sohail-Agent-CLI
+sohail_agent_cli/
       │
       ▼
  Local Terminal
@@ -365,9 +365,7 @@ This allows the Studio to work offline whenever possible.
 
 # 🔗 CLI Integration
 
-Sohail Studio never replaces Sohail-Agent-CLI.
-
-The Studio only orchestrates it.
+Sohail Studio includes the Sohail-Agent-CLI implementation and orchestrates it through `CliBridge`.
 
 Responsibilities
 
@@ -380,7 +378,7 @@ Studio
 * AI Provider
 * Workspace
 
-CLI
+Integrated CLI package
 
 * Project Inspection
 * Docker Generation
@@ -503,7 +501,7 @@ Backend
 
 Core
 
-* Sohail-Agent-CLI
+* `sohail_agent_cli/`
 
 AI
 
@@ -587,4 +585,3 @@ Every action is explainable.
 Every session becomes knowledge.
 
 **Welcome to Sohail Studio — your local-first AI Engineering Workspace.**
-
