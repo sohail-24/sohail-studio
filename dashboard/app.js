@@ -76,6 +76,12 @@ function knowledgeSphere() {
   </section>`;
 }
 
+function recentsTaskPanel() {
+  return `<section class="recents-task-panel surface-card">
+    <div class="panel-heading"><h2>Recents task</h2></div>
+  </section>`;
+}
+
 function mentorCard(icon, title, copy, action = "Open") {
   return `<button class="mentor-card" data-mentor="${title}"><span class="mentor-icon">${icon}</span><span class="mentor-copy"><strong>${title}</strong><small>${copy}</small></span><span class="mentor-arrow">↗</span></button>`;
 }
@@ -155,7 +161,7 @@ function commandBar() {
 }
 
 function homeView() {
-  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column"><div class="empty-top-panel" style="min-height: 330px;"></div>${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}</div><div class="right-column">${knowledgeSphere()}${homeTerminalPanel()}</div></div></div>`;
+  return `<div class="home-dashboard"><div class="home-columns"><div class="left-column">${recentsTaskPanel()}${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}</div><div class="right-column">${knowledgeSphere()}${homeTerminalPanel()}</div></div></div>`;
 }
 
 function workflowsView() {
