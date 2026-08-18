@@ -428,7 +428,7 @@ function createAIMentorRobot() {
 
     const upperArmGroup = new THREE.Group();
     upperArmGroup.name = `${name === "leftArmGroup" ? "left" : "right"}UpperArmGroup`;
-    upperArmGroup.rotation.z = raised ? 0.85 : (side < 0 ? 0.4 : -0.4);
+    upperArmGroup.rotation.z = raised ? 0.85 : (side < 0 ? -0.45 : 0.45);
     const upperArm = roundedMesh(0.24, 0.44, 0.3, 0.09, whiteMat);
     upperArm.position.y = raised ? 0.22 : -0.22;
     upperArmGroup.add(upperArm);
@@ -440,7 +440,7 @@ function createAIMentorRobot() {
     const forearmGroup = new THREE.Group();
     forearmGroup.name = `${name === "leftArmGroup" ? "left" : "right"}ForearmGroup`;
     forearmGroup.position.set(raised ? -0.08 : 0, raised ? 0.43 : -0.43, 0);
-    forearmGroup.rotation.z = raised ? 0.1 : side * 1.05;
+    forearmGroup.rotation.z = raised ? 0.1 : side * -0.73;
     const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.13, 18, 12), jointMat);
     forearmGroup.add(elbow);
     const forearm = roundedMesh(0.22, 0.42, 0.28, 0.08, whiteMat);
@@ -732,7 +732,7 @@ function initAIMentor3D() {
         const waveEnvelope = Math.sin(waveProgress * Math.PI);
         const waveSwing = Math.sin(waveProgress * Math.PI * 4) * waveEnvelope;
         const raiseEnvelope = smoothstep(clamp01(waveProgress / 0.22));
-        parts.leftShoulderGroup.rotation.z = -1.7 * raiseEnvelope * (1 - smoothstep(clamp01((waveProgress - 0.78) / 0.22)));
+        parts.leftShoulderGroup.rotation.z = -2.63 * raiseEnvelope * (1 - smoothstep(clamp01((waveProgress - 0.78) / 0.22)));
         parts.leftForearmGroup.rotation.z = leftForearmRestRotation + waveSwing * 0.36;
         parts.leftHandGroup.rotation.z = leftHandRestRotation + waveSwing * 0.18;
       }
