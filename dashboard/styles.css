@@ -103,6 +103,15 @@ button { border: 0; cursor: pointer; color: inherit; }
 .workspace-canvas { min-height: 100%; display: flex; flex-direction: column; overflow: hidden; }
 .canvas-header { min-height: 75px; padding: 19px 20px 15px; align-items: center; }
 .canvas-header h1 { margin: 5px 0 0; color: #eef0f4; font-size: 19px; letter-spacing: -.035em; font-weight: 680; }
+
+.chat-workspace-header { min-height: 75px; padding: 19px 20px 15px; display: flex; align-items: center; justify-content: center; }
+.chat-workspace-header h1 { margin: 5px 0 0; color: #eef0f4; font-size: 19px; letter-spacing: -.035em; font-weight: 680; }
+.chat-history-content { flex: 1; min-height: 0; padding: 18px 20px; overflow: auto; display: flex; flex-direction: column; gap: 18px; }
+.chat-message { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border-radius: 10px; max-width: 90%; }
+.chat-message.user { align-self: flex-end; background: #121e3d; border: 1px solid var(--line); }
+.chat-message.assistant { align-self: flex-start; background: transparent; }
+.chat-message-role { font-weight: 600; color: var(--subtle); font-size: 10px; margin-bottom: 2px; }
+.chat-message-content { color: #d1d5dc; font-size: 12px; line-height: 1.5; }
 .canvas-state { color: #929aa5; }
 .workspace-tabs { display: flex; align-items: center; gap: 2px; padding: 0 14px; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line); overflow-x: auto; }
 .workspace-tab { position: relative; padding: 12px 9px 11px; background: transparent; color: var(--subtle); font-size: 10px; white-space: nowrap; }
