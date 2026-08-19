@@ -116,6 +116,27 @@ async def test_ollama_provider_uses_chat_api_and_extracts_message_content():
 
 
 @pytest.mark.asyncio
+async def test_ollama_provider_preserves_conversation_messages():
+    client = FakeClient()
+    provider = OllamaProvider(
+        ProviderConfig(base_url="http://localhost:11434", default_model="qwen3.5:latest")
+    )
+
+    provider._client = client
+    request = GenerationRequest(
+        prompt="What did I ask?",
+        messages=[
+            {"role": "user", "content": "Remember this."},
+            {"role": "assistant", "content": "I will."},
+            {"role": "user", "content": "What did I ask?"},
+        ],
+    )
+    await provider.generate(request)
+
+    assert client.posts[0][1]["messages"] == request.messages
+
+
+@pytest.mark.asyncio
 async def test_ollama_provider_preserves_json_mode_and_options():
     client = FakeClient()
     provider = OllamaProvider(

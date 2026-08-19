@@ -42,6 +42,7 @@ class GenerationRequest:
     stream: bool = False
     context: list[int] | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    messages: list[dict[str, str]] | None = None
     
     def to_dict(self) -> dict[str, Any]:
         """Convert request to dictionary."""
@@ -50,6 +51,8 @@ class GenerationRequest:
             "temperature": self.temperature,
             "stream": self.stream,
         }
+        if self.messages:
+            data["messages"] = self.messages
         if self.model:
             data["model"] = self.model
         if self.system:

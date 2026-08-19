@@ -7,17 +7,28 @@ const state = {
   runId: null,
   runSocket: null,
   terminalSocket: null,
+  chatSocket: null,
   terminalCwd: "",
+  terminalBuffer: "",
+  terminalConnection: "Available",
+  terminalStatus: "Idle",
+  terminalCaptureIndex: null,
+  pendingTerminalInputs: [],
+  terminalBannerAdded: false,
+  chatConnection: "Available",
+  chatStatus: "Idle",
+  chatCaptureIndex: null,
+  pendingChatInputs: [],
   workspaceTab: "overview",
   advancedOpen: true,
   provider: "ollama",
-  model: "qwen3.5",
-  commandMode: "chat",
+  model: "devops-qwen:latest",
+  commandMode: "terminal",
   chatHistory: [],
 };
 
 const aiModels = {
-  ollama: ["qwen3.5", "llama3", "mistral"],
+  ollama: ["devops-qwen:latest", "qwen3.5", "llama3", "mistral"],
   gemini: ["gemini-pro", "gemini-flash"]
 };
 
@@ -105,12 +116,12 @@ function mentorPanel() {
 }
 
 function workspaceCanvas() {
-  const messagesHtml = state.chatHistory.map(msg => {
+  const messagesHtml = state.chatHistory.map((msg, index) => {
     const isUser = msg.role === "user";
     const roleName = isUser ? "You" : "Sohail Studio";
     return `<div class="chat-message ${isUser ? 'user' : 'assistant'}">
       <div class="chat-message-role">${escapeHtml(roleName)}:</div>
-      <div class="chat-message-content">${escapeHtml(msg.content).replace(/\\n/g, '<br>')}</div>
+      <div class="chat-message-content" data-chat-index="${index}">${escapeHtml(msg.content).replace(/\n/g, '<br>')}</div>
     </div>`;
   }).join("");
 
@@ -126,11 +137,12 @@ function workspaceCanvas() {
 }
 
 function homeTerminalPanel() {
-  return `<section class="terminal-panel surface-card"><div class="terminal-panel-header"><div><span class="panel-kicker">Execution engine</span><h2>Terminal</h2></div><div class="terminal-header-actions"><span class="terminal-connection"><span class="neutral-dot"></span>Available</span><button class="quiet-icon" title="Collapse terminal">⌃</button></div></div><div class="terminal-status-row"><span class="terminal-idle">Idle</span><span>No approved command</span></div><div class="terminal-preview"><div class="terminal-line terminal-muted">Sohail Studio terminal</div><div class="terminal-line"><span class="terminal-prompt">$</span> Waiting for an approved command…</div><div class="terminal-line terminal-muted">Output will stream here when execution begins.</div></div><div class="terminal-panel-footer"><span>PTY bridge ready</span><button class="text-button" data-route="terminal">Open terminal ↗</button></div></section>`;
+  const preview = state.terminalBuffer || "Sohail Studio terminal\r\nWaiting for a command…";
+  return `<section class="terminal-panel surface-card"><div class="terminal-panel-header"><div><span class="panel-kicker">Execution engine</span><h2>Terminal</h2></div><div class="terminal-header-actions"><span class="terminal-connection"><span class="neutral-dot"></span><span id="terminal-connection-label">${escapeHtml(state.terminalConnection)}</span></span><button class="quiet-icon" title="Collapse terminal">⌃</button></div></div><div class="terminal-status-row"><span class="terminal-idle" id="terminal-home-status">${escapeHtml(state.terminalStatus)}</span><span>Real shell PTY bridge</span></div><pre class="terminal-preview" id="terminal-preview">${escapeHtml(preview)}</pre><div class="terminal-panel-footer"><span>Real shell PTY bridge</span><button class="text-button" data-route="terminal">Open terminal ↗</button></div></section>`;
 }
 
 function commandBar() {
-  const examples = ["Inspect project", "Generate Docker", "Generate Kubernetes", "Generate CI/CD", "Review Repository", "Generate README"];
+  const examples = ["pwd", "ls", "whoami", "cd backend", "command-that-does-not-exist"];
 
   const placeholders = {
     chat: "Ask Sohail Studio...",
@@ -141,7 +153,7 @@ function commandBar() {
 
   const buttonLabels = {
     chat: "Send",
-    terminal: "Execute",
+    terminal: "Send",
     inspect: "Inspect",
     workflow: "Generate Plan"
   };
@@ -759,14 +771,18 @@ function render() {
   else app.innerHTML = placeholderView("Settings", "Keep local paths, shell preferences, and integrations explicit.");
   bindView();
   if (route === "run" && state.runId) connectRun(state.runId);
-  if (route === "terminal") connectTerminal();
+  if (route === "home" || route === "terminal") connectTerminal();
+  if (state.commandMode === "chat") connectChat();
 
   // Initialize or re-attach the 3D robot if its container exists in the current view
   setTimeout(() => { initAIMentor3D(); }, 0);
 }
 
 function bindView() {
-  document.querySelectorAll("[data-route]").forEach((item) => item.addEventListener("click", () => setRoute(item.dataset.route)));
+  document.querySelectorAll("[data-route]").forEach((item) => item.addEventListener("click", () => {
+    if (item.dataset.route === "terminal") state.commandMode = "terminal";
+    setRoute(item.dataset.route);
+  }));
   document.querySelectorAll("[data-workflow]").forEach((item) => item.addEventListener("click", () => {
     state.selectedWorkflow = state.workflows.find((workflow) => workflow.id === item.dataset.workflow);
     state.route = "plan";
@@ -792,22 +808,9 @@ function bindView() {
       const input = document.getElementById("prompt-input");
       const val = input.value.trim();
       if (!val) return;
-
-      state.chatHistory.push({ role: "user", content: val });
       input.value = "";
-      render();
-
-      // Scroll to bottom
-      const content = document.getElementById("chat-history-content");
-      if (content) content.scrollTop = content.scrollHeight;
-
-      // Mock AI response
-      setTimeout(() => {
-        state.chatHistory.push({ role: "assistant", content: "Hello! How can I help you?" });
-        render();
-        const contentAfter = document.getElementById("chat-history-content");
-        if (contentAfter) contentAfter.scrollTop = contentAfter.scrollHeight;
-      }, 500);
+      if (state.commandMode === "chat") sendChatMessage(val);
+      else sendTerminalCommand(val, true);
     });
   }
 
@@ -878,25 +881,188 @@ function handleRunEvent(event) {
 }
 
 function connectTerminal() {
-  const screen = document.getElementById("terminal-screen");
-  const status = document.getElementById("terminal-status");
-  if (!screen) return;
+  if (state.terminalSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.terminalSocket.readyState)) {
+    syncTerminalView();
+    return;
+  }
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws/terminal`);
   state.terminalSocket = socket;
-  socket.onopen = () => { status.textContent = "PTY connected · local shell"; screen.textContent += "Sohail Studio terminal\r\n"; };
-  socket.onmessage = (event) => { const data = JSON.parse(event.data); if (data.message) { screen.textContent += data.message; screen.scrollTop = screen.scrollHeight; } };
-  socket.onclose = () => { if (status) status.textContent = "Disconnected"; };
-  socket.onerror = () => { if (status) status.textContent = "WebSocket error"; };
-  document.getElementById("terminal-input")?.focus();
+  socket.onopen = () => {
+    state.terminalConnection = "Available";
+    state.terminalStatus = "Idle";
+    if (!state.terminalBannerAdded) {
+      state.terminalBuffer = "Sohail Studio terminal\r\n";
+      state.terminalBannerAdded = true;
+    }
+    syncTerminalView();
+    while (state.pendingTerminalInputs.length && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ action: "input", data: state.pendingTerminalInputs.shift() }));
+    }
+    document.getElementById("terminal-input")?.focus();
+  };
+  socket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === "output" || data.type === "system") appendTerminalOutput(data.message || "");
+    if (data.type === "status") {
+      state.terminalConnection = data.status === "running" ? "Available" : data.status;
+      if (data.status === "running" && state.terminalStatus !== "Running") state.terminalStatus = "Idle";
+      syncTerminalView();
+    }
+    if (data.type === "error") {
+      state.terminalStatus = "Error";
+      appendTerminalOutput(`\r\n${data.message}\r\n`);
+    }
+  };
+  socket.onclose = () => {
+    state.terminalSocket = null;
+    state.terminalConnection = "Disconnected";
+    state.terminalStatus = "Exited";
+    syncTerminalView();
+  };
+  socket.onerror = () => {
+    state.terminalConnection = "Error";
+    state.terminalStatus = "Error";
+    syncTerminalView();
+  };
+  syncTerminalView();
 }
 
 function sendTerminalInput(event) {
   event.preventDefault();
   const input = document.getElementById("terminal-input");
-  if (!input || !state.terminalSocket || state.terminalSocket.readyState !== WebSocket.OPEN) return;
-  state.terminalSocket.send(JSON.stringify({ action: "input", data: `${input.value}\n` }));
+  if (!input || !input.value.trim()) return;
+  sendTerminalCommand(input.value, false);
   input.value = "";
+}
+
+function sendTerminalCommand(command, showInChat) {
+  const data = `${command}\n`;
+  state.terminalStatus = "Running";
+  if (showInChat) {
+    state.chatHistory.push({ role: "user", content: command });
+    state.chatHistory.push({ role: "assistant", content: "" });
+    state.terminalCaptureIndex = state.chatHistory.length - 1;
+    render();
+    const content = document.getElementById("chat-history-content");
+    if (content) content.scrollTop = content.scrollHeight;
+  } else {
+    state.terminalCaptureIndex = null;
+    syncTerminalView();
+  }
+  if (state.terminalSocket && state.terminalSocket.readyState === WebSocket.OPEN) {
+    state.terminalSocket.send(JSON.stringify({ action: "input", data }));
+  } else {
+    state.pendingTerminalInputs.push(data);
+    connectTerminal();
+  }
+}
+
+function appendTerminalOutput(message) {
+  state.terminalBuffer += message;
+  if (state.terminalCaptureIndex !== null) {
+    state.chatHistory[state.terminalCaptureIndex].content += message;
+  }
+  syncTerminalView();
+}
+
+function connectChat() {
+  if (state.chatSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.chatSocket.readyState)) {
+    syncTerminalView();
+    return;
+  }
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${protocol}://${window.location.host}/ws/chat`);
+  state.chatSocket = socket;
+  state.chatConnection = "Starting";
+  state.chatStatus = "Starting";
+  syncTerminalView();
+  socket.onopen = () => {
+    state.chatConnection = "Available";
+    state.chatStatus = "Idle";
+    syncTerminalView();
+    while (state.pendingChatInputs.length && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ action: "input", data: state.pendingChatInputs.shift() }));
+    }
+  };
+  socket.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === "output") appendChatOutput(data.message || "");
+    if (data.type === "system") appendChatOutput(data.message || "");
+    if (data.type === "status") {
+      state.chatConnection = ["ready", "running"].includes(data.status) ? "Available" : data.status;
+      if (["ready", "running"].includes(data.status) && state.chatStatus !== "Running") state.chatStatus = "Idle";
+      syncTerminalView();
+    }
+    if (data.type === "complete") {
+      state.chatStatus = "Idle";
+      syncTerminalView();
+    }
+    if (data.type === "error") {
+      state.chatStatus = "Error";
+      appendChatOutput(`\r\n${data.message}\r\n`);
+    }
+  };
+  socket.onclose = () => {
+    state.chatSocket = null;
+    state.chatConnection = "Disconnected";
+    state.chatStatus = "Exited";
+    syncTerminalView();
+  };
+  socket.onerror = () => {
+    state.chatConnection = "Error";
+    state.chatStatus = "Error";
+    syncTerminalView();
+  };
+}
+
+function sendChatMessage(message) {
+  const data = `${message}\n`;
+  state.chatStatus = "Running";
+  state.chatHistory.push({ role: "user", content: message });
+  state.chatHistory.push({ role: "assistant", content: "" });
+  state.chatCaptureIndex = state.chatHistory.length - 1;
+  render();
+  const content = document.getElementById("chat-history-content");
+  if (content) content.scrollTop = content.scrollHeight;
+  if (state.chatSocket && state.chatSocket.readyState === WebSocket.OPEN) {
+    state.chatSocket.send(JSON.stringify({ action: "input", data }));
+  } else {
+    state.pendingChatInputs.push(data);
+    connectChat();
+  }
+}
+
+function appendChatOutput(message) {
+  if (state.chatCaptureIndex !== null) {
+    state.chatHistory[state.chatCaptureIndex].content += message;
+  }
+  syncTerminalView();
+}
+
+function syncTerminalView() {
+  const screen = document.getElementById("terminal-screen");
+  const preview = document.getElementById("terminal-preview");
+  const status = document.getElementById("terminal-status");
+  const homeStatus = document.getElementById("terminal-home-status");
+  const connection = document.getElementById("terminal-connection-label");
+  const buffer = state.terminalBuffer;
+  const activeStatus = state.terminalStatus;
+  const activeConnection = state.terminalConnection;
+  const captureIndex = state.commandMode === "chat" ? state.chatCaptureIndex : state.terminalCaptureIndex;
+  if (screen) { screen.textContent = buffer; screen.scrollTop = screen.scrollHeight; }
+  if (preview) { preview.textContent = buffer || "Sohail Studio terminal\r\nWaiting for a command…"; preview.scrollTop = preview.scrollHeight; }
+  if (status) status.textContent = activeStatus;
+  if (homeStatus) homeStatus.textContent = activeStatus;
+  if (connection) connection.textContent = activeConnection;
+  if (captureIndex !== null) {
+    const content = document.querySelector(`[data-chat-index="${captureIndex}"]`);
+    if (content) {
+      content.innerHTML = escapeHtml(state.chatHistory[captureIndex].content).replace(/\n/g, "<br>");
+      const history = document.getElementById("chat-history-content");
+      if (history) history.scrollTop = history.scrollHeight;
+    }
+  }
 }
 
 async function loadSessions() { try { state.sessions = await api("/api/sessions"); if (state.route === "home" || state.route === "sessions") render(); } catch (_) {} }

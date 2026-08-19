@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import pty
+import shutil
 import signal
+from time import perf_counter
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from core.cli_bridge import CliBridge
 from core.session_store import SessionStore
+from sohail_agent_cli.providers import GenerationRequest, OllamaProvider, ProviderConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +42,18 @@ STUDIO_VENV = (ROOT / SETTINGS.get("venv_path", ".venv")).resolve()
 DEFAULT_TERMINAL_CWD = (ROOT / SETTINGS.get("terminal_cwd", ".")).resolve()
 store = SessionStore(ROOT / "sessions")
 cli = CliBridge()
+CHAT_MODEL = SETTINGS.get("ollama_model", "devops-qwen:latest")
+chat_provider = OllamaProvider(ProviderConfig(default_model=CHAT_MODEL))
+MAX_CHAT_MESSAGES = 12
+CHAT_SYSTEM_PROMPT = """You are the Sohail Studio assistant.
+Chat mode is conversational only; no tools are available. Never execute or claim
+to execute shell commands, create or delete files, modify systems, run Docker,
+Git, Kubernetes, Terraform, or install software. When a user provides a command,
+explain what it would do and describe manual steps as suggestions. Never claim
+that an action happened unless an authorized tool result explicitly confirms it.
+Answer concise technical questions clearly. Do not reveal internal reasoning or
+claim access to live system time; if asked for today's date, say you do not have
+live time access."""
 
 app = FastAPI(title="Sohail Studio", version="0.1.0")
 app.mount("/assets", StaticFiles(directory=DASHBOARD), name="assets")
@@ -241,14 +257,7 @@ async def run_socket(websocket: WebSocket, run_id: str) -> None:
         state.subscribers.discard(queue)
 
 
-@app.websocket("/ws/terminal")
-async def terminal_socket(websocket: WebSocket) -> None:
-    await websocket.accept()
-    target = websocket.query_params.get("cwd") or str(DEFAULT_TERMINAL_CWD)
-    cwd = Path(target).expanduser().resolve()
-    if not cwd.exists() or not cwd.is_dir():
-        cwd = DEFAULT_TERMINAL_CWD
-    shell = os.getenv("SOHAIL_STUDIO_SHELL") or SETTINGS.get("shell") or "/bin/bash"
+def _terminal_environment(cwd: Path) -> dict[str, str]:
     terminal_env = {**os.environ}
     terminal_env["VIRTUAL_ENV"] = str(STUDIO_VENV)
     terminal_env["PATH"] = os.pathsep.join(
@@ -259,12 +268,40 @@ async def terminal_socket(websocket: WebSocket) -> None:
     terminal_env["PYTHONPATH"] = os.pathsep.join(
         [str(ROOT), terminal_env.get("PYTHONPATH", "")]
     ).rstrip(os.pathsep)
+    return terminal_env
+
+
+async def _pty_socket(
+    websocket: WebSocket,
+    *,
+    cwd: Path,
+    command: tuple[str, ...],
+    session: str,
+) -> None:
+    await websocket.accept()
+    terminal_env = _terminal_environment(cwd)
+    if shutil.which(command[0], path=terminal_env.get("PATH")) is None:
+        await websocket.send_json({
+            "type": "error",
+            "message": f"Executable not found for {session} session: {command[0]}",
+        })
+        await websocket.close()
+        return
+
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(cwd)
-        os.execvpe(shell, [shell, "-i"], terminal_env)
+        os.execvpe(command[0], list(command), terminal_env)
 
     os.set_blocking(fd, False)
+    await websocket.send_json({
+        "type": "status",
+        "status": "running",
+        "session": session,
+        "pid": pid,
+        "cwd": str(cwd),
+        "command": list(command),
+    })
 
     async def read_pty() -> None:
         while True:
@@ -277,7 +314,18 @@ async def terminal_socket(websocket: WebSocket) -> None:
                 continue
             except asyncio.CancelledError:
                 raise
-            except (OSError, WebSocketDisconnect):
+            except OSError as exc:
+                if exc.errno != errno.EIO:  # PTY masters report child exit as EIO on macOS.
+                    try:
+                        await websocket.send_json({"type": "error", "message": f"PTY read failed: {exc}"})
+                    except (RuntimeError, WebSocketDisconnect):
+                        pass
+                try:
+                    await websocket.send_json({"type": "status", "status": "exited"})
+                except (RuntimeError, WebSocketDisconnect):
+                    pass
+                break
+            except WebSocketDisconnect:
                 break
 
     reader = asyncio.create_task(read_pty())
@@ -290,7 +338,10 @@ async def terminal_socket(websocket: WebSocket) -> None:
                 payload = {"action": "input", "data": raw}
             action = payload.get("action")
             if action == "input" and payload.get("data"):
-                os.write(fd, payload["data"].encode())
+                try:
+                    os.write(fd, payload["data"].encode())
+                except OSError as exc:
+                    await websocket.send_json({"type": "error", "message": f"PTY write failed: {exc}"})
             elif action == "stop":
                 try:
                     os.kill(pid, signal.SIGINT)
@@ -305,3 +356,107 @@ async def terminal_socket(websocket: WebSocket) -> None:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+@app.websocket("/ws/terminal")
+async def terminal_socket(websocket: WebSocket) -> None:
+    target = websocket.query_params.get("cwd") or str(DEFAULT_TERMINAL_CWD)
+    cwd = Path(target).expanduser().resolve()
+    if not cwd.exists() or not cwd.is_dir():
+        cwd = DEFAULT_TERMINAL_CWD
+    shell = os.getenv("SOHAIL_STUDIO_SHELL") or SETTINGS.get("shell") or "/bin/bash"
+    await _pty_socket(
+        websocket,
+        cwd=cwd,
+        command=(shell, "-i"),
+        session="terminal",
+    )
+
+
+@app.websocket("/ws/chat")
+async def chat_socket(websocket: WebSocket) -> None:
+    await websocket.accept()
+    history: list[dict[str, str]] = []
+    await websocket.send_json({
+        "type": "status",
+        "status": "ready",
+        "session": "chat",
+        "transport": "ollama-api",
+        "model": CHAT_MODEL,
+    })
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = {"action": "input", "data": raw}
+
+            if payload.get("action") not in {"input", "message"}:
+                continue
+            message = str(payload.get("data") or "").rstrip("\r\n")
+            if not message.strip():
+                continue
+
+            history.append({"role": "user", "content": message})
+            if len(history) > MAX_CHAT_MESSAGES:
+                history = history[-MAX_CHAT_MESSAGES:]
+            request = GenerationRequest(
+                prompt=message,
+                model=CHAT_MODEL,
+                system=CHAT_SYSTEM_PROMPT,
+                messages=list(history),
+                stream=True,
+            )
+            started = perf_counter()
+            first_token_ms: float | None = None
+            response_parts: list[str] = []
+            completed_result = None
+            failed = False
+
+            async for result in chat_provider.generate_stream(request):
+                if result.error:
+                    failed = True
+                    await websocket.send_json({"type": "error", "message": result.error})
+                    break
+                if result.text:
+                    if first_token_ms is None:
+                        first_token_ms = (perf_counter() - started) * 1000
+                    response_parts.append(result.text)
+                    await websocket.send_json({
+                        "type": "output",
+                        "message": result.text,
+                        "transport": "ollama-api",
+                    })
+                if result.done:
+                    completed_result = result
+                    break
+
+            if failed:
+                history.pop()
+                continue
+
+            assistant_text = "".join(response_parts)
+            if assistant_text:
+                history.append({"role": "assistant", "content": assistant_text})
+            total_ms = (perf_counter() - started) * 1000
+            await websocket.send_json({
+                "type": "complete",
+                "status": "completed",
+                "model": CHAT_MODEL,
+                "timing": {
+                    "first_token_ms": round(first_token_ms, 2) if first_token_ms is not None else None,
+                    "server_ms": round(total_ms, 2),
+                    "ollama_total_duration_ms": getattr(completed_result, "total_duration_ms", None),
+                    "load_duration_ms": getattr(completed_result, "load_duration_ms", None),
+                    "prompt_eval_count": getattr(completed_result, "prompt_eval_count", None),
+                    "eval_count": getattr(completed_result, "eval_count", None),
+                },
+            })
+    except WebSocketDisconnect:
+        pass

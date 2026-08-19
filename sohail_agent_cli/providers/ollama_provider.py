@@ -123,8 +123,12 @@ class OllamaProvider(BaseProvider):
 
                     try:
                         data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+                    except json.JSONDecodeError as exc:
+                        yield GenerationResult.error_result(
+                            f"Ollama returned malformed streaming JSON: {exc}",
+                            model=model,
+                        )
+                        return
 
                     message = data.get("message") or {}
                     yield GenerationResult(
@@ -132,11 +136,20 @@ class OllamaProvider(BaseProvider):
                         model=data.get("model") or model,
                         done=data.get("done", False),
                         total_duration_ms=data.get("total_duration", 0) / 1_000_000,
+                        load_duration_ms=data.get("load_duration", 0) / 1_000_000,
+                        prompt_eval_count=data.get("prompt_eval_count"),
+                        eval_count=data.get("eval_count"),
                     )
 
         except httpx.HTTPStatusError as exc:
             yield GenerationResult.error_result(
                 self._http_error_message(exc, model),
+                model=model,
+            )
+        except httpx.ConnectError:
+            yield GenerationResult.error_result(
+                f"Cannot connect to Ollama at {self.config.base_url}. "
+                f"Is Ollama running? Model requested: {model}",
                 model=model,
             )
         except Exception as exc:
@@ -158,10 +171,14 @@ class OllamaProvider(BaseProvider):
         if request.max_tokens is not None:
             options.setdefault("num_predict", request.max_tokens)
 
-        messages: list[dict[str, str]] = []
-        if request.system:
-            messages.append({"role": "system", "content": request.system})
-        messages.append({"role": "user", "content": request.prompt})
+        messages: list[dict[str, str]] = [
+            {"role": message["role"], "content": message["content"]}
+            for message in (request.messages or [])
+        ]
+        if request.system and not any(message.get("role") == "system" for message in messages):
+            messages.insert(0, {"role": "system", "content": request.system})
+        if not messages:
+            messages.append({"role": "user", "content": request.prompt})
 
         payload: dict[str, Any] = {
             "model": model,
