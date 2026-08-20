@@ -23,7 +23,36 @@ Sohail Studio is a local-first AI engineering workspace.
 - The embedded terminal operates through `/ws/terminal`.
 - The terminal environment automatically maps `VIRTUAL_ENV` to `.venv`.
 - The embedded terminal requires no manual `source` activation.
+- Terminal is the execution interface for actual local commands (e.g. `pwd`, `ls`, `whoami`).
 - Access the integrated commands directly via `sohail-agent --help`.
+
+## Chat Interface
+
+- Chat currently uses the existing Ollama HTTP provider (streaming `/api/chat`).
+- The default model is `devops-qwen:latest`.
+- Chat is for conversational AI only and must NOT execute local shell commands.
+- The AI may explain commands, but Chat itself does not execute those commands, providing an important safety boundary.
+
+## Phase 1 Results & Performance
+
+Phase 1 focused on:
+* moving Chat to the existing Ollama HTTP provider
+* streaming Chat responses
+* keeping Terminal on the real PTY
+* concise Chat safety instructions
+* limiting unnecessary Chat history/context
+* preserving Chat/Terminal separation
+* testing the provider and Chat/Terminal behavior
+
+Verified results:
+- 151 tests passed
+- Chat smoke test passed
+- Terminal smoke test passed
+
+Current performance baseline (model generation time is the main latency factor):
+- first token: ~3.76 seconds
+- total: ~4.05 seconds
+- Real dashboard experience: 7–8 seconds
 
 ## Interface Layout
 
@@ -52,3 +81,17 @@ All other visual placeholders, such as "Create New Project" or "Debug Error", do
 5. The application securely triggers the command in the integrated `.venv`.
 6. Watch real-time command output and CLI results.
 7. Logs are permanently kept in the `sessions/` directory.
+
+## Future Phases
+
+### Phase 2
+Read-only local tools, beginning with time/date.
+
+### Later
+Project inspection and project knowledge.
+
+### Later
+Safe Docker/Git/Kubernetes read-only context.
+
+### Later
+AI Control Plane orchestration and more advanced engineering workflows.
