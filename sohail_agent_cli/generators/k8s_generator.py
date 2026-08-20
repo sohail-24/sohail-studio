@@ -75,6 +75,7 @@ class K8sGenerator:
             StackType.GO: 8080,
             StackType.RUST: 8080,
             StackType.PYTHON: 8000,
+            StackType.JAVA: 8080,
         }
         return ports.get(stack, 8080)
 

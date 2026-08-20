@@ -2,11 +2,45 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .stack_detector import DetectedStack, StackDetector
+from .stack_detector import DetectedStack, StackDetector, StackType
+
+
+@dataclass
+class ComponentAnalysis:
+    """Evidence-backed context for one independently buildable component."""
+
+    name: str
+    path: Path
+    stack: DetectedStack
+    package_manager: str = "unknown"
+    framework: str = "unknown"
+    scripts: dict[str, str] = field(default_factory=dict)
+    runtime: str = "unknown"
+    ports: list[int] = field(default_factory=list)
+    source_dirs: list[str] = field(default_factory=list)
+    important_files: list[str] = field(default_factory=list)
+    has_dockerfile: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "path": str(self.path),
+            "stack": self.stack.to_dict(),
+            "package_manager": self.package_manager,
+            "framework": self.framework,
+            "scripts": self.scripts,
+            "runtime": self.runtime,
+            "ports": self.ports,
+            "source_dirs": self.source_dirs,
+            "important_files": self.important_files,
+            "has_dockerfile": self.has_dockerfile,
+        }
 
 
 @dataclass
@@ -23,6 +57,8 @@ class RepoAnalysis:
     has_docker_compose: bool = False
     has_tests: bool = False
     has_ci_cd: bool = False
+    ci_cd_files: list[str] = field(default_factory=list)
+    important_files: list[str] = field(default_factory=list)
     has_readme: bool = False
     has_k8s: bool = False
     has_helm: bool = False
@@ -31,6 +67,7 @@ class RepoAnalysis:
     has_env_example: bool = False
     missing_devops_files: list[str] = field(default_factory=list)
     structure_summary: str = ""
+    components: list[ComponentAnalysis] = field(default_factory=list)
     
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -46,6 +83,8 @@ class RepoAnalysis:
             "has_docker_compose": self.has_docker_compose,
             "has_tests": self.has_tests,
             "has_ci_cd": self.has_ci_cd,
+            "ci_cd_files": self.ci_cd_files,
+            "important_files": self.important_files,
             "has_readme": self.has_readme,
             "has_k8s": self.has_k8s,
             "has_helm": self.has_helm,
@@ -53,6 +92,7 @@ class RepoAnalysis:
             "has_makefile": self.has_makefile,
             "has_env_example": self.has_env_example,
             "missing_devops_files": self.missing_devops_files,
+            "components": [component.to_dict() for component in self.components],
         }
 
 
@@ -87,7 +127,8 @@ class RepoAnalyzer:
         has_docker_compose = (directory / "docker-compose.yml").exists() or \
                              (directory / "docker-compose.yaml").exists()
         has_tests = (directory / "tests").exists() or (directory / "test").exists()
-        has_ci_cd = (directory / ".github" / "workflows").exists()
+        ci_cd_files = self._find_ci_cd_files(directory)
+        has_ci_cd = bool(ci_cd_files)
         has_readme = (directory / "README.md").exists() or (directory / "README.rst").exists()
         has_k8s = (directory / "k8s").exists() or (directory / "kubernetes").exists()
         has_helm = (directory / "helm").exists() or (directory / "charts").exists()
@@ -126,6 +167,8 @@ class RepoAnalyzer:
             has_docker_compose=has_docker_compose,
             has_tests=has_tests,
             has_ci_cd=has_ci_cd,
+            ci_cd_files=ci_cd_files,
+            important_files=self._find_important_files(directory),
             has_readme=has_readme,
             has_k8s=has_k8s,
             has_helm=has_helm,
@@ -134,7 +177,168 @@ class RepoAnalyzer:
             has_env_example=has_env_example,
             missing_devops_files=missing,
             structure_summary=structure,
+            components=self._find_components(directory),
         )
+
+    def _find_components(self, directory: Path) -> list[ComponentAnalysis]:
+        """Find buildable child components from manifests, not folder names."""
+        manifest_names = {
+            "package.json", "pyproject.toml", "requirements.txt", "pom.xml",
+            "build.gradle", "build.gradle.kts", "go.mod", "Cargo.toml",
+        }
+        components: list[ComponentAnalysis] = []
+        for candidate in sorted(directory.iterdir(), key=lambda item: item.name):
+            if not candidate.is_dir() or candidate.name.startswith("."):
+                continue
+            if not any((candidate / manifest).is_file() for manifest in manifest_names):
+                continue
+            stack = self.stack_detector.detect(candidate)
+            package_manager = self._package_manager(candidate)
+            scripts: dict[str, str] = {}
+            framework = stack.framework
+            package_json = candidate / "package.json"
+            if package_json.exists():
+                try:
+                    data = json.loads(package_json.read_text(encoding="utf-8"))
+                    scripts = {str(key): str(value) for key, value in data.get("scripts", {}).items()}
+                    dependencies = {
+                        str(key).lower()
+                        for key in [*data.get("dependencies", {}).keys(), *data.get("devDependencies", {}).keys()]
+                    }
+                    if "vite" in dependencies:
+                        framework = "Vite"
+                    if "react" in dependencies or "react-dom" in dependencies:
+                        framework = "React / Vite" if "vite" in dependencies else "React"
+                        stack.primary = StackType.REACT
+                    if "express" in dependencies:
+                        framework = "Express"
+                except (OSError, json.JSONDecodeError, AttributeError):
+                    pass
+            source_dirs = [name for name in ("src", "public", "app", "test", "tests") if (candidate / name).is_dir()]
+            important = self._component_important_files(candidate)
+            ports = self._component_ports(candidate, scripts, framework)
+            components.append(
+                ComponentAnalysis(
+                    name=candidate.name,
+                    path=candidate,
+                    stack=stack,
+                    package_manager=package_manager,
+                    framework=framework,
+                    scripts=scripts,
+                    runtime=stack.runtime,
+                    ports=ports,
+                    source_dirs=source_dirs,
+                    important_files=important,
+                    has_dockerfile=(candidate / "Dockerfile").is_file(),
+                )
+            )
+        compose_text = ""
+        for compose_name in ("docker-compose.yml", "docker-compose.yaml"):
+            compose_path = directory / compose_name
+            if compose_path.exists():
+                try:
+                    compose_text = compose_path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    pass
+                break
+        if compose_text:
+            for component in components:
+                block = re.search(rf"(?ms)^  {re.escape(component.name)}:\s*(.*?)(?=^  \w[\w-]*:|\Z)", compose_text)
+                if not block:
+                    continue
+                for port_text in re.findall(r"(?:PORT=|[-\"])(\d{2,5}):(\d{2,5})", block.group(1)):
+                    for value in port_text:
+                        port = int(value)
+                        if port not in component.ports and 1 <= port <= 65535:
+                            component.ports.append(port)
+                for value in re.findall(r"(?:PORT=|port:\s*)(\d{2,5})", block.group(1), flags=re.IGNORECASE):
+                    port = int(value)
+                    if port not in component.ports and 1 <= port <= 65535:
+                        component.ports.append(port)
+        return components
+
+    @staticmethod
+    def _package_manager(directory: Path) -> str:
+        if (directory / "pnpm-lock.yaml").exists():
+            return "pnpm"
+        if (directory / "yarn.lock").exists():
+            return "yarn"
+        if (directory / "package-lock.json").exists():
+            return "npm"
+        if (directory / "Pipfile").exists():
+            return "pipenv"
+        if (directory / "pyproject.toml").exists() or (directory / "requirements.txt").exists():
+            return "pip"
+        if (directory / "pom.xml").exists() or (directory / "mvnw").exists():
+            return "maven"
+        if (directory / "go.mod").exists():
+            return "go modules"
+        if (directory / "Cargo.toml").exists():
+            return "cargo"
+        return "unknown"
+
+    @staticmethod
+    def _component_important_files(directory: Path) -> list[str]:
+        names = [
+            "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+            "vite.config.js", "vite.config.ts", "tailwind.config.js", "nginx.conf",
+            "pyproject.toml", "requirements.txt", "pom.xml", "mvnw", "Dockerfile",
+        ]
+        return [name for name in names if (directory / name).exists()]
+
+    @staticmethod
+    def _component_ports(directory: Path, scripts: dict[str, str], framework: str) -> list[int]:
+        """Extract explicit ports from scripts/config/source with conservative defaults."""
+        text_parts: list[str] = list(scripts.values())
+        for candidate in ("vite.config.js", "vite.config.ts", "nginx.conf", "src/index.js", "src/index.ts", "src/main.js", "src/main.ts"):
+            path = directory / candidate
+            if path.exists():
+                try:
+                    text_parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+                except OSError:
+                    pass
+        text = "\n".join(text_parts)
+        values: list[int] = []
+        patterns = [
+            r"(?:PORT|port)\s*(?:[:=]|\|\|)\s*(\d{2,5})",
+            r"listen\s+(\d{2,5})",
+            r"--port\s*(?:=|\s)\s*(\d{2,5})",
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                port = int(match.group(1))
+                if 1 <= port <= 65535 and port not in values:
+                    values.append(port)
+        if not values and framework == "React / Vite" and (directory / "nginx.conf").exists():
+            values.append(80)
+        return values
+
+    def _find_ci_cd_files(self, directory: Path) -> list[str]:
+        """Find common CI/CD configuration without treating a directory alone as a file."""
+        candidates = [
+            "Jenkinsfile",
+            ".gitlab-ci.yml",
+            ".circleci/config.yml",
+        ]
+        found = [item for item in candidates if (directory / item).is_file()]
+        workflows = directory / ".github" / "workflows"
+        if workflows.is_dir():
+            found.extend(str(path.relative_to(directory)) for path in sorted(workflows.glob("*")) if path.is_file())
+        return found
+
+    def _find_important_files(self, directory: Path) -> list[str]:
+        """Return high-signal manifests and deployment files for inspection output."""
+        names = [
+            "pom.xml", "mvnw", "mvnw.cmd", "build.gradle", "build.gradle.kts", "gradlew",
+            "pyproject.toml", "requirements.txt", "setup.py", "Pipfile",
+            "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "go.mod", "Cargo.toml",
+            "Dockerfile", "docker-compose.yml", "docker-compose.yaml", "README.md", "Jenkinsfile",
+        ]
+        found = [name for name in names if (directory / name).exists()]
+        for name in ("src", "tests", "test", "k8s", "kubernetes"):
+            if (directory / name).is_dir():
+                found.append(f"{name}/")
+        return found
     
     def _get_project_name(self, directory: Path) -> str:
         """Get project name from common sources."""

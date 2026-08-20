@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
-from sohail_agent_cli.analyzers import StackType
+from sohail_agent_cli.analyzers import DetectedStack, StackType
 
 
 @dataclass
@@ -24,6 +25,11 @@ class DockerConfig:
     node_version: str | None = None
     use_gunicorn: bool = False
     settings_module: str | None = None
+    artifact_glob: str | None = None
+    install_command: str | None = None
+    build_command: str | None = None
+    static_output: str | None = None
+    runtime_image: str | None = None
 
 
 class DockerGenerator:
@@ -41,13 +47,15 @@ class DockerGenerator:
             StackType.VUE: self._generate_node,
             StackType.GO: self._generate_go,
             StackType.RUST: self._generate_rust,
+            StackType.JAVA: self._generate_java,
         }
 
     def generate(
         self,
-        stack: StackType,
+        stack: StackType | DetectedStack,
         project_path: Path,
         port: int | None = None,
+        stack_context: DetectedStack | None = None,
     ) -> tuple[str, str, str]:
         """
         Generate Docker files.
@@ -55,12 +63,18 @@ class DockerGenerator:
         Returns:
             Tuple of (dockerfile, dockerignore, docker_compose)
         """
-        generator = self.templates.get(stack, self._generate_python)
-        config = generator(project_path, port)
+        stack_type = stack.primary if isinstance(stack, DetectedStack) else stack
+        if stack_type == StackType.JAVA and stack_context is not None:
+            config = self._generate_java_from_context(project_path, stack_context, port)
+        else:
+            generator = self.templates.get(stack_type, self._generate_python)
+            config = generator(project_path, port)
+            if port is None and stack_context and stack_context.port:
+                config.port = stack_context.port
 
-        dockerfile = self._render_dockerfile(config, stack)
-        dockerignore = self._render_dockerignore(stack)
-        docker_compose = self._render_docker_compose(config, stack)
+        dockerfile = self._render_dockerfile(config, stack_type)
+        dockerignore = self._render_dockerignore(stack_type)
+        docker_compose = self._render_docker_compose(config, stack_type)
 
         return dockerfile, dockerignore, docker_compose
 
@@ -136,30 +150,61 @@ class DockerGenerator:
     def _generate_node(self, path: Path, port: int | None = None) -> DockerConfig:
         """Generate config for Node.js."""
         node_version = "20"
-
-        entry = "index.js"
-        for candidate in ["server.js", "app.js", "index.js", "main.js"]:
-            if (path / candidate).exists():
-                entry = candidate
-                break
+        package: dict = {}
+        package_path = path / "package.json"
+        if package_path.exists():
+            try:
+                package = json.loads(package_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                package = {}
+        scripts = package.get("scripts", {}) if isinstance(package, dict) else {}
+        manager = "pnpm" if (path / "pnpm-lock.yaml").exists() else "yarn" if (path / "yarn.lock").exists() else "npm"
+        install = f"{manager} install --frozen-lockfile" if manager in {"pnpm", "yarn"} else "npm ci" if (path / "package-lock.json").exists() else "npm install"
+        entry = str(package.get("main", "src/index.js")) if isinstance(package, dict) else "src/index.js"
+        if not (path / entry).exists():
+            for candidate in ["server.js", "app.js", "index.js", "main.js", "src/index.js"]:
+                if (path / candidate).exists():
+                    entry = candidate
+                    break
+        start_command = [manager, "run", "start"] if "start" in scripts else ["node", entry]
+        build_command = f"{manager} run build" if "build" in scripts else None
+        configured_port = port or self._detect_node_port(path) or 3000
 
         return DockerConfig(
             base_image=f"node:{node_version}-alpine",
-            port=port or 3000,
-            cmd=["node", entry],
+            port=configured_port,
+            cmd=start_command,
             node_version=node_version,
+            install_command=install,
+            build_command=build_command,
         )
 
     def _generate_react(self, path: Path, port: int | None = None) -> DockerConfig:
         """Generate config for React."""
         node_version = "20"
-
+        configured_port = port or self._detect_node_port(path) or 80
         return DockerConfig(
-            base_image=f"node:{node_version}-alpine",
-            port=port or 80,
-            cmd=["serve", "-s", "build", "-l", "80"],
+            base_image=f"node:{node_version}-alpine AS build",
+            port=configured_port,
+            cmd=["nginx", "-g", "daemon off;"],
             node_version=node_version,
+            install_command="npm ci" if (path / "package-lock.json").exists() else "npm install",
+            build_command="npm run build",
+            static_output="dist" if (path / "vite.config.js").exists() or (path / "vite.config.ts").exists() else "build",
+            runtime_image="nginx:alpine",
         )
+
+    def _detect_node_port(self, path: Path) -> int | None:
+        import re
+        candidates = [path / "vite.config.js", path / "vite.config.ts", path / "nginx.conf", path / "src" / "index.js", path / "src" / "index.ts"]
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            content = candidate.read_text(encoding="utf-8", errors="ignore")
+            match = re.search(r"(?:PORT|port|listen|--port|:)(?:\s*[:=]?\s*)(\d{2,5})", content)
+            if match:
+                return int(match.group(1))
+        return None
 
     def _generate_nextjs(self, path: Path, port: int | None = None) -> DockerConfig:
         """Generate config for Next.js."""
@@ -187,6 +232,76 @@ class DockerGenerator:
             port=port or 8080,
             cmd=["./app"],
         )
+
+    def _generate_java(self, path: Path, port: int | None = None) -> DockerConfig:
+        """Generate a Maven/Java image for a packaged application."""
+        java_version = self._detect_java_version(path)
+        configured_port = port or self._detect_java_port(path) or 8080
+        is_maven = (path / "pom.xml").exists() or (path / "mvnw").exists()
+        build_image = f"maven:3.8.6-eclipse-temurin-{java_version} AS build" if is_maven else f"gradle:8.5-jdk{java_version} AS build"
+        build_command = "./mvnw clean package -DskipTests" if (path / "mvnw").exists() else "mvn clean package -DskipTests" if is_maven else "./gradlew build -x test" if (path / "gradlew").exists() else "gradle build -x test"
+        return DockerConfig(
+            base_image=build_image,
+            port=configured_port,
+            cmd=["java", "-jar", "app.jar", f"--server.port={configured_port}"],
+            build_deps=[build_command],
+            env_vars={"SERVER_PORT": str(configured_port)},
+            artifact_glob="target/*.jar" if is_maven else "build/libs/*.jar",
+        )
+
+    def _generate_java_from_context(
+        self,
+        path: Path,
+        context: DetectedStack,
+        port: int | None = None,
+    ) -> DockerConfig:
+        """Build Java configuration from the shared repository inspection."""
+        runtime_digits = "".join(char for char in context.runtime if char.isdigit())
+        java_version = runtime_digits or "17"
+        is_maven = context.build_system.lower() == "maven"
+        configured_port = port or context.port or 8080
+        wrapper = (path / "mvnw").exists() if is_maven else (path / "gradlew").exists()
+        if is_maven:
+            build_image = f"maven:3.8.6-eclipse-temurin-{java_version} AS build"
+            build_command = "./mvnw clean package -DskipTests" if wrapper else "mvn clean package -DskipTests"
+            artifact = "target/*.jar"
+        else:
+            build_image = f"gradle:8.5-jdk{java_version} AS build"
+            build_command = "./gradlew build -x test" if wrapper else "gradle build -x test"
+            artifact = "build/libs/*.jar"
+        return DockerConfig(
+            base_image=build_image,
+            port=configured_port,
+            cmd=["java", "-jar", "app.jar", f"--server.port={configured_port}"],
+            build_deps=[build_command],
+            env_vars={"SERVER_PORT": str(configured_port)},
+            artifact_glob=artifact,
+        )
+
+    def _detect_java_version(self, path: Path) -> str:
+        import re
+        pom = path / "pom.xml"
+        if pom.exists():
+            content = pom.read_text(encoding="utf-8", errors="ignore")
+            match = re.search(r"<java\.version>\s*([^<]+)\s*</java\.version>", content)
+            if match:
+                return match.group(1).strip()
+        return "17"
+
+    def _detect_java_port(self, path: Path) -> int | None:
+        import re
+        candidates = [
+            path / "src" / "main" / "resources" / "application.properties",
+            path / "src" / "main" / "resources" / "application.yml",
+            path / "src" / "main" / "resources" / "application.yaml",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                content = candidate.read_text(encoding="utf-8", errors="ignore")
+                match = re.search(r"(?:^|\n)\s*(?:server\.port|SERVER_PORT)\s*[:=]\s*(\d+)", content)
+                if match:
+                    return int(match.group(1))
+        return None
 
     def _detect_python_version(self, path: Path) -> str:
         """Detect Python version from pyproject.toml if possible."""
@@ -288,8 +403,58 @@ class DockerGenerator:
     EXPOSE {config.port}
 
     # Production server
-    CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:{config.port}"]
+            CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:{config.port}"]
     """
+        if stack == StackType.JAVA:
+            build_command = (config.build_deps or ["mvn clean package -DskipTests"])[0]
+            java_version = config.base_image.split("-")[-1].split()[0]
+            runtime_image = f"eclipse-temurin:{java_version}-jre-alpine"
+            artifact = config.artifact_glob or "target/*.jar"
+            return f"""# Stage 1 - Build the JAR
+
+FROM {config.base_image}
+
+WORKDIR /app
+
+COPY . .
+
+RUN {build_command}
+
+# Stage 2 - Runtime image
+
+FROM {runtime_image}
+
+WORKDIR /app
+
+COPY --from=build /app/{artifact} app.jar
+
+ENV SERVER_PORT={config.port}
+
+EXPOSE {config.port}
+
+ENTRYPOINT [\"java\", \"-jar\", \"app.jar\", \"--server.port={config.port}\"]
+"""
+        if stack == StackType.REACT and config.static_output:
+            install = config.install_command or "npm ci"
+            build = config.build_command or "npm run build"
+            runtime = config.runtime_image or "nginx:alpine"
+            nginx_copy = "COPY nginx.conf /etc/nginx/conf.d/default.conf\n" if config.port == 80 else ""
+            return f"""# Build the frontend from its package manifest
+
+FROM {config.base_image}
+
+WORKDIR /app
+COPY package*.json ./
+RUN {install}
+COPY . .
+RUN {build}
+
+# Serve the repository's built frontend with a small runtime image
+FROM {runtime}
+COPY --from=build /app/{config.static_output} /usr/share/nginx/html
+{nginx_copy}EXPOSE {config.port}
+CMD [\"nginx\", \"-g\", \"daemon off;\"]
+"""
         # 🔥 DEFAULT (ALL OTHER STACKS)
         lines = [f"FROM {config.base_image}", ""]
 
@@ -332,6 +497,11 @@ class DockerGenerator:
                 "",
             ]
         )
+
+        if stack == StackType.NODE:
+            lines = [f"FROM {config.base_image}", "", f"WORKDIR {config.workdir}", "", "COPY package*.json ./", f"RUN {config.install_command or 'npm install'}", "", "COPY . .", ""]
+            if config.build_command:
+                lines.extend([f"RUN {config.build_command}", ""])
 
         if config.env_vars:
             for key, value in config.env_vars.items():
@@ -637,6 +807,13 @@ CMD ["serve", "-s", "build", "-l", "80"]
                 "Cargo.lock",
                 "**/*.rs.bk",
                 "*.pdb",
+                "",
+            ]
+        elif stack == StackType.JAVA:
+            stack_specific = [
+                "# Java/Maven",
+                "target/",
+                ".mvn/timing.properties",
                 "",
             ]
 

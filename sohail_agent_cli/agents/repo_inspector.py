@@ -53,6 +53,11 @@ class RepoInspectorAgent(BaseAgent):
         console.print(f"\n[bold cyan]Repository:[/bold cyan] {analysis.name}")
         console.print(f"[bold cyan]Path:[/bold cyan] {analysis.path}")
         console.print(f"[bold cyan]Primary Stack:[/bold cyan] {analysis.stack.primary.value}")
+        console.print(f"[bold cyan]Build System:[/bold cyan] {analysis.stack.build_system}")
+        console.print(f"[bold cyan]Framework:[/bold cyan] {analysis.stack.framework}")
+        console.print(f"[bold cyan]Runtime:[/bold cyan] {analysis.stack.runtime}")
+        if analysis.stack.port:
+            console.print(f"[bold cyan]Detected Port:[/bold cyan] {analysis.stack.port}")
         
         if analysis.stack.secondary:
             console.print(f"[bold cyan]Secondary:[/bold cyan] {', '.join(s.value for s in analysis.stack.secondary)}")
@@ -76,6 +81,25 @@ class RepoInspectorAgent(BaseAgent):
         table.add_row(".env.example", "✅" if analysis.has_env_example else "❌")
         
         console.print(table)
+
+        if analysis.important_files:
+            console.print("\n[bold]Important Files:[/bold]")
+            console.print("  " + ", ".join(analysis.important_files))
+        if analysis.ci_cd_files:
+            console.print(f"[bold]CI/CD Configuration:[/bold] {', '.join(analysis.ci_cd_files)}")
+        if analysis.components:
+            console.print("\n[bold cyan]Detected Components:[/bold cyan]")
+            for component in analysis.components:
+                details = [component.stack.primary.value, component.package_manager]
+                if component.framework != "unknown":
+                    details.append(component.framework)
+                if component.ports:
+                    details.append(f"ports {', '.join(str(port) for port in component.ports)}")
+                console.print(f"  • {component.name}/: {' · '.join(details)}")
+                if component.important_files:
+                    console.print(f"    Files: {', '.join(component.important_files)}")
+                if component.source_dirs:
+                    console.print(f"    Sources: {', '.join(f'{source}/' for source in component.source_dirs)}")
         
         # Readiness score
         score_color = "green" if readiness.score >= 80 else "yellow" if readiness.score >= 60 else "red"

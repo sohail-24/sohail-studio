@@ -26,6 +26,9 @@ class DockerAgent(BaseAgent):
         path: Path,
         port: int | None = None,
         overwrite: bool = False,
+        components: list[str] | None = None,
+        compose: bool = True,
+        compose_action: str = "keep",
         **kwargs: Any,
     ) -> AgentResult:
         """Execute Docker generation."""
@@ -37,11 +40,67 @@ class DockerAgent(BaseAgent):
         
         self.info(f"Detected stack: {stack.value}")
         
-        # Generate Docker files
+        selected_components = [
+            component for component in analysis.components
+            if not components or component.name in components
+        ]
+        if components and not selected_components:
+            return AgentResult.failure("No requested components were found in the inspected repository")
+
+        # Generate component Dockerfiles from each component's own inspection context.
+        if selected_components:
+            files_created: list[Path] = []
+            files_skipped: list[Path] = []
+            compose_services: list[tuple[str, int]] = []
+            for component in selected_components:
+                dockerfile, dockerignore, _ = self.generator.generate(
+                    stack=component.stack,
+                    project_path=component.path,
+                    port=component.ports[0] if component.ports else None,
+                    stack_context=component.stack,
+                )
+                for filename, content in (("Dockerfile", dockerfile), (".dockerignore", dockerignore)):
+                    success, msg, is_dry_run = await self.write_file(
+                        component.path / filename,
+                        content,
+                        overwrite=overwrite,
+                    )
+                    if success:
+                        self.info(msg) if is_dry_run else self.success(msg)
+                        files_created.append(component.path / filename)
+                    else:
+                        self.warning(msg)
+                        files_skipped.append(component.path / filename)
+                compose_services.append((component.name, component.ports[0] if component.ports else 3000))
+
+            if compose and compose_action != "keep":
+                compose_path = path / "docker-compose.yml"
+                compose_content = self._component_compose(compose_services)
+                success, msg, is_dry_run = await self.write_file(
+                    compose_path,
+                    compose_content,
+                    overwrite=overwrite,
+                )
+                if success:
+                    self.info(msg) if is_dry_run else self.success(msg)
+                    files_created.append(compose_path)
+                else:
+                    self.warning(msg)
+                    files_skipped.append(compose_path)
+            return AgentResult(
+                success=True,
+                message=f"Docker configuration generated for {', '.join(component.name for component in selected_components)}",
+                files_created=files_created,
+                files_skipped=files_skipped,
+                data={"components": [component.to_dict() for component in selected_components], "files_created": len(files_created), "files_skipped": len(files_skipped)},
+            )
+
+        # Generate root-level Docker files when no independently buildable components exist.
         dockerfile, dockerignore, docker_compose = self.generator.generate(
-            stack=stack,
+            stack=analysis.stack,
             project_path=path,
             port=port,
+            stack_context=analysis.stack,
         )
         
         # Write files
@@ -108,3 +167,15 @@ class DockerAgent(BaseAgent):
                 "files_skipped": len(files_skipped),
             },
         )
+
+    @staticmethod
+    def _component_compose(services: list[tuple[str, int]]) -> str:
+        lines = ["services:"]
+        for name, port in services:
+            lines.extend([
+                f"  {name}:",
+                f"    build: ./{name}",
+                f"    ports:",
+                f"      - \"{port}:{port}\"",
+            ])
+        return "\n".join(lines) + "\n"

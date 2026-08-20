@@ -44,6 +44,10 @@ class DetectedStack:
     project_type: str = "unknown"
     architecture: str = "unknown"
     deployment_hints: list[str] = field(default_factory=list)
+    build_system: str = "unknown"
+    framework: str = "unknown"
+    runtime: str = "unknown"
+    port: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -55,6 +59,10 @@ class DetectedStack:
             "project_type": self.project_type,
             "architecture": self.architecture,
             "deployment_hints": self.deployment_hints,
+            "build_system": self.build_system,
+            "framework": self.framework,
+            "runtime": self.runtime,
+            "port": self.port,
         }
 
 
@@ -133,7 +141,7 @@ class StackDetector:
             "indicators": ["Rust project detected"],
         },
         StackType.JAVA: {
-            "files": ["pom.xml", "build.gradle", "gradlew"],
+            "files": ["pom.xml", "mvnw", "mvnw.cmd", "build.gradle", "build.gradle.kts", "gradlew"],
             "patterns_in_files": {},
             "indicators": ["Java project detected"],
         },
@@ -226,17 +234,20 @@ class StackDetector:
 
         # 4. Sort by score
         sorted_stacks = sorted(detected.items(), key=lambda x: x[1], reverse=True)
-        primary = sorted_stacks[0][0]
-        primary_score = sorted_stacks[0][1]
+        manifest_primary = self._manifest_primary(directory)
+        primary = manifest_primary or sorted_stacks[0][0]
+        primary_score = detected.get(primary, sorted_stacks[0][1])
         total_score = sum(detected.values())
 
         # 5. Better confidence calculation
         confidence = round(min(max(primary_score / max(total_score, 1.0), 0.35), 0.98), 2)
+        if manifest_primary:
+            confidence = max(confidence, 0.9)
 
         # 6. Secondary stacks
         secondary = [
             stack for stack, score in sorted_stacks[1:]
-            if score >= primary_score * 0.35
+            if stack != primary and score >= primary_score * 0.35
         ]
 
         # 7. Infer project metadata
@@ -245,6 +256,7 @@ class StackDetector:
             primary,
             secondary,
         )
+        build_system, framework, runtime, port = self._infer_build_context(directory, primary)
 
         return DetectedStack(
             primary=primary,
@@ -254,7 +266,83 @@ class StackDetector:
             project_type=project_type,
             architecture=architecture,
             deployment_hints=deployment_hints,
+            build_system=build_system,
+            framework=framework,
+            runtime=runtime,
+            port=port,
         )
+
+    def _manifest_primary(self, directory: Path) -> StackType | None:
+        """Return the strongest root-level build-system signal."""
+        if any((directory / name).exists() for name in ("pom.xml", "mvnw", "mvnw.cmd", "build.gradle", "build.gradle.kts", "gradlew")):
+            return StackType.JAVA
+        if (directory / "go.mod").exists():
+            return StackType.GO
+        if (directory / "Cargo.toml").exists():
+            return StackType.RUST
+        if (directory / "package.json").exists():
+            return StackType.NODE
+        if any((directory / name).exists() for name in ("pyproject.toml", "requirements.txt", "setup.py", "Pipfile")):
+            return StackType.PYTHON
+        return None
+
+    def _infer_build_context(
+        self,
+        directory: Path,
+        primary: StackType,
+    ) -> tuple[str, str, str, int | None]:
+        """Infer build system, framework, runtime, and configured port once."""
+        build_system = "unknown"
+        framework = "unknown"
+        runtime = "unknown"
+        port: int | None = None
+
+        if primary == StackType.JAVA:
+            if (directory / "pom.xml").exists() or (directory / "mvnw").exists():
+                build_system = "Maven"
+            elif any((directory / name).exists() for name in ("build.gradle", "build.gradle.kts", "gradlew")):
+                build_system = "Gradle"
+            pom = directory / "pom.xml"
+            if pom.exists():
+                content = pom.read_text(encoding="utf-8", errors="ignore")
+                if "spring-boot" in content.lower():
+                    framework = "Spring Boot"
+                import re
+                java_version = re.search(r"<java\.version>\s*([^<]+)\s*</java\.version>", content)
+                if java_version:
+                    runtime = f"Java {java_version.group(1).strip()}"
+            if runtime == "unknown":
+                runtime = "Java"
+        elif primary in (StackType.PYTHON, StackType.DJANGO, StackType.FASTAPI, StackType.FLASK):
+            build_system = "Python packaging"
+            runtime = "Python"
+        elif primary in (StackType.NODE, StackType.REACT, StackType.NEXTJS, StackType.VUE):
+            build_system = "npm" if (directory / "package-lock.json").exists() else "Node.js"
+            runtime = "Node.js"
+        elif primary == StackType.GO:
+            build_system = "Go modules"
+            runtime = "Go"
+        elif primary == StackType.RUST:
+            build_system = "Cargo"
+            runtime = "Rust"
+
+        for candidate in (
+            directory / "src" / "main" / "resources" / "application.properties",
+            directory / "src" / "main" / "resources" / "application.yml",
+            directory / "src" / "main" / "resources" / "application.yaml",
+            directory / "application.properties",
+            directory / "application.yml",
+            directory / "application.yaml",
+        ):
+            if not candidate.exists():
+                continue
+            import re
+            content = candidate.read_text(encoding="utf-8", errors="ignore")
+            match = re.search(r"(?:^|\n)\s*(?:server\.port|SERVER_PORT)\s*[:=]\s*(\d+)", content)
+            if match:
+                port = int(match.group(1))
+                break
+        return build_system, framework, runtime, port
 
     def _apply_structure_detection(
         self,
@@ -444,6 +532,16 @@ class StackDetector:
             architecture = "backend/service"
             deployment_hints.append("Use virtual environment or containerized runtime")
 
+        elif primary == StackType.JAVA:
+            project_type = "Java application"
+            architecture = "backend service" if (directory / "src" / "main").exists() else "Java application"
+            deployment_hints.extend([
+                "Build with the detected Java build system",
+                "Package and run the generated JAR when available",
+            ])
+            if (directory / "src" / "main" / "resources" / "application.properties").exists():
+                deployment_hints.append("Spring application configuration detected")
+
         if has_github_actions:
             deployment_hints.append("CI/CD workflow directory detected")
 
@@ -470,12 +568,23 @@ class StackDetector:
             deps = self._get_go_deps(directory)
         elif stack == StackType.RUST:
             deps = self._get_rust_deps(directory)
+        elif stack == StackType.JAVA:
+            deps = self._get_java_deps(directory)
         elif stack in (StackType.RUBY, StackType.RAILS):
             deps = self._get_ruby_deps(directory)
         elif stack in (StackType.PHP, StackType.LARAVEL):
             deps = self._get_php_deps(directory)
 
         return deps[:20]
+
+    def _get_java_deps(self, directory: Path) -> list[str]:
+        """Extract Maven artifact IDs for a useful dependency summary."""
+        pom = directory / "pom.xml"
+        if not pom.exists():
+            return []
+        import re
+        content = pom.read_text(encoding="utf-8", errors="ignore")
+        return list(dict.fromkeys(re.findall(r"<artifactId>\s*([^<]+)\s*</artifactId>", content)))[:20]
 
     def _get_python_deps(self, directory: Path) -> list[str]:
         """Get Python dependencies."""

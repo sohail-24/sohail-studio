@@ -10,11 +10,36 @@ const state = {
   chatSocket: null,
   terminalCwd: "",
   terminalBuffer: "",
+  terminalRenderer: null,
+  terminalPreviewRenderer: null,
+  terminalRenderedLength: 0,
+  terminalPreviewRenderedLength: 0,
   terminalConnection: "Available",
   terminalStatus: "Idle",
   terminalCaptureIndex: null,
   pendingTerminalInputs: [],
   terminalBannerAdded: false,
+  terminalEngine: null,
+  agentOperations: [],
+  selectedAgentOperation: "inspect",
+  agentRunId: null,
+  agentRunSocket: null,
+  agentConsoleInput: "",
+  agentContext: null,
+  agentChoices: {
+    components: [],
+    compose: true,
+    composeAction: "keep",
+    organization: "automatic",
+    cicdAction: "analyze",
+    cicdPlatform: "jenkins",
+  },
+  agentOutput: "",
+  agentStatus: "Idle",
+  agentCommand: "",
+  agentInputs: { target: "", goal: "", plan_dir: "", spec_dir: "", output_dir: "" },
+  agentDryRun: false,
+  agentOverwrite: false,
   chatConnection: "Available",
   chatStatus: "Idle",
   chatCaptureIndex: null,
@@ -104,6 +129,13 @@ function showToast(message) {
 
 function setRoute(route) {
   state.route = route;
+  if (route === "terminal") {
+    state.terminalEngine = null;
+    if (state.terminalSocket) state.terminalSocket.close();
+    if (state.agentRunSocket) state.agentRunSocket.close();
+    state.terminalSocket = null;
+    state.agentRunSocket = null;
+  }
   state.plan = null;
   state.selectedWorkflow = null;
   state.runId = null;
@@ -185,8 +217,8 @@ function workspaceCanvas() {
 }
 
 function homeTerminalPanel() {
-  const preview = state.terminalBuffer || "Sohail Studio terminal\r\nWaiting for a command…";
-  return `<section class="terminal-panel surface-card"><div class="terminal-panel-header"><div><span class="panel-kicker">Execution engine</span><h2>Terminal</h2></div><div class="terminal-header-actions"><span class="terminal-connection"><span class="neutral-dot"></span><span id="terminal-connection-label">${escapeHtml(state.terminalConnection)}</span></span><button class="quiet-icon" title="Collapse terminal">⌃</button></div></div><div class="terminal-status-row"><span class="terminal-idle" id="terminal-home-status">${escapeHtml(state.terminalStatus)}</span><span>Real shell PTY bridge</span></div><pre class="terminal-preview" id="terminal-preview">${escapeHtml(preview)}</pre><div class="terminal-panel-footer"><span>Real shell PTY bridge</span><button class="text-button" data-route="terminal">Open terminal ↗</button></div></section>`;
+  const preview = state.terminalBuffer ? "Raw PTY connected\nOpen terminal to view live output." : "Sohail Studio terminal\nWaiting for a command…";
+  return `<section class="terminal-panel surface-card"><div class="terminal-panel-header"><div><span class="panel-kicker">Execution engine</span><h2>Terminal</h2></div><div class="terminal-header-actions"><span class="terminal-connection"><span class="neutral-dot"></span><span id="terminal-connection-label">${escapeHtml(state.terminalConnection)}</span></span><button class="quiet-icon" title="Collapse terminal">⌃</button></div></div><div class="terminal-status-row"><span class="terminal-idle" id="terminal-home-status">${escapeHtml(state.terminalStatus)}</span><span>Real shell PTY bridge</span></div><div class="terminal-preview" id="terminal-preview" aria-label="Terminal preview">${escapeHtml(preview)}</div><div class="terminal-panel-footer"><span>Real shell PTY bridge</span><button class="text-button" data-route="terminal">Open terminal ↗</button></div></section>`;
 }
 
 function commandBar() {
@@ -256,7 +288,39 @@ function runView() {
 }
 
 function terminalView() {
-  return `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>A real local PTY, embedded as a first-class part of the workspace.</p></div><section class="terminal-shell"><div class="terminal-toolbar"><div class="terminal-toolbar-title"><span class="terminal-dots"><i></i><i></i><i></i></span><strong>sohail-studio / terminal</strong></div><div class="terminal-toolbar-status"><span class="status-dot"></span><span id="terminal-status">Connecting…</span><button class="quiet-icon" data-route="home" title="Collapse terminal">⌃</button></div></div><div class="terminal-execution-row"><span>Execution status</span><strong>Interactive shell</strong><span>Command output is live</span></div><div class="terminal-screen" id="terminal-screen"></div><form class="terminal-input-row" id="terminal-form"><span>›</span><input class="terminal-input" id="terminal-input" placeholder="Type a command and press Enter" autocomplete="off" /><span class="terminal-hint">Ctrl+C supported</span></form></section>`;
+  if (!state.terminalEngine) return terminalEngineChooser();
+  const engineTabs = `<div class="terminal-engine-tabs" role="tablist" aria-label="Terminal engine"><button class="terminal-engine-tab ${state.terminalEngine === "pty" ? "active" : ""}" data-terminal-engine="pty">Raw PTY</button><button class="terminal-engine-tab ${state.terminalEngine === "agent" ? "active" : ""}" data-terminal-engine="agent">Sohail-Agent</button></div>`;
+  const body = state.terminalEngine === "agent" ? agentTerminalView() : rawTerminalView();
+  return `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>Choose a local shell or the existing Sohail-Agent engineering CLI.</p></div>${engineTabs}${body}`;
+}
+
+function terminalEngineChooser() {
+  return `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>Choose how you want to work in this local workspace.</p></div><section class="terminal-engine-picker"><div class="terminal-engine-picker-heading"><span class="panel-kicker">Terminal</span><h2>Choose execution engine</h2><p>Your choice stays inside Sohail Studio and can be changed at any time.</p></div><div class="terminal-engine-picker-grid"><button type="button" class="terminal-engine-card" data-terminal-engine="pty"><span class="terminal-engine-card-icon">›_</span><span><strong>Raw PTY</strong><small>Real zsh terminal</small></span><span class="terminal-engine-card-arrow">→</span></button><button type="button" class="terminal-engine-card" data-terminal-engine="agent"><span class="terminal-engine-card-icon">✦</span><span><strong>Sohail-Agent</strong><small>AI engineering workflows</small></span><span class="terminal-engine-card-arrow">→</span></button></div></section>`;
+}
+
+function rawTerminalView() {
+  return `<section class="terminal-shell"><div class="terminal-toolbar"><div class="terminal-toolbar-title"><span class="terminal-dots"><i></i><i></i><i></i></span><strong>sohail-studio / raw pty</strong></div><div class="terminal-toolbar-status"><span class="status-dot"></span><span id="terminal-status">Connecting…</span><button class="quiet-icon" data-route="home" title="Collapse terminal">⌃</button></div></div><div class="terminal-execution-row"><span>Execution status</span><strong>Interactive zsh</strong><span>Command output is live</span></div><div class="terminal-screen" id="terminal-screen" aria-label="Raw PTY terminal"></div><form class="terminal-input-row" id="terminal-form"><span>›</span><input class="terminal-input" id="terminal-input" placeholder="Type a command and press Enter" autocomplete="off" /><span class="terminal-hint">Ctrl+C supported</span></form></section>`;
+}
+
+function agentTerminalView() {
+  const operation = state.agentOperations.find((item) => item.id === state.selectedAgentOperation) || state.agentOperations[0];
+  const requires = operation?.requires || [];
+  const field = (key, label, placeholder) => `<label class="agent-field"><span>${label}</span><input data-agent-input="${key}" value="${escapeHtml(state.agentInputs[key])}" placeholder="${placeholder}" autocomplete="off" /></label>`;
+  const fields = [
+    requires.includes("target") ? field("target", "Project path", "/Users/sohal/Projects/my-app") : "",
+    requires.includes("goal") ? field("goal", "Planning goal", "Build a local-first service") : "",
+    requires.includes("plan_dir") ? field("plan_dir", "Plan directory", "./project-plan") : "",
+    requires.includes("spec_dir") ? field("spec_dir", "Specification directory", "./specifications") : "",
+    ["plan", "blueprint"].includes(operation?.id) ? field("output_dir", "Output directory", operation.id === "plan" ? "./project-plan" : "./blueprints") : "",
+  ].join("");
+  const cards = state.agentOperations.map((item) => `<button type="button" class="agent-operation-card ${item.id === state.selectedAgentOperation ? "active" : ""}" data-agent-operation="${item.id}"><strong>${item.label}</strong><span>${item.description}</span></button>`).join("");
+  const components = state.agentContext?.components || [];
+  const componentChoices = components.length ? components.map((component) => `<label class="agent-choice"><input type="checkbox" data-agent-choice="component" value="${escapeHtml(component.name)}" ${state.agentChoices.components.includes(component.name) ? "checked" : ""} /><span><strong>${escapeHtml(component.name)}</strong><small>${escapeHtml(component.framework || component.stack?.primary || "Detected component")} · ${escapeHtml(component.package_manager || "package manager")}</small></span></label>`).join("") : `<p class="agent-guidance">Run Inspect first to discover independently buildable components from repository manifests.</p>`;
+  const guidedQuestions = operation?.id === "dockerize" ? `<section class="agent-question-block"><h4>Dockerization target</h4><p>Choose components from the shared inspection context.</p><div class="agent-choice-grid">${componentChoices}</div><h4>Docker Compose</h4><div class="agent-inline-choices"><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="keep" ${state.agentChoices.composeAction === "keep" ? "checked" : ""} /> Keep existing unchanged</label><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="analyze" ${state.agentChoices.composeAction === "analyze" ? "checked" : ""} /> Analyze existing</label><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="improve" ${state.agentChoices.composeAction === "improve" ? "checked" : ""} /> Improve existing</label><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="generate" ${state.agentChoices.composeAction === "generate" ? "checked" : ""} /> Generate new</label></div>${state.agentContext?.has_docker_compose ? `<p class="agent-guidance">Existing docker-compose.yml detected. Generation still follows the overwrite/dry-run safety controls.</p>` : ""}</section>` : operation?.id === "kubernetes" ? `<section class="agent-question-block"><h4>Kubernetes targets</h4><p>Use the same inspected components for manifest generation.</p><div class="agent-choice-grid">${componentChoices}</div><h4>Manifest organization</h4><div class="agent-inline-choices"><label><input type="radio" name="organization" data-agent-choice="organization" value="automatic" ${state.agentChoices.organization === "automatic" ? "checked" : ""} /> Automatic / recommended</label><label><input type="radio" name="organization" data-agent-choice="organization" value="single" ${state.agentChoices.organization === "single" ? "checked" : ""} /> Single manifest</label><label><input type="radio" name="organization" data-agent-choice="organization" value="separate" ${state.agentChoices.organization === "separate" ? "checked" : ""} /> Separate resource files</label></div></section>` : operation?.id === "cicd" ? `<section class="agent-question-block"><h4>Detected CI/CD</h4><p>${state.agentContext?.ci_cd_files?.length ? `✓ ${escapeHtml(state.agentContext.ci_cd_files.join(", "))}` : "No existing CI/CD configuration detected."}</p><div class="agent-inline-choices"><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="analyze" ${state.agentChoices.cicdAction === "analyze" ? "checked" : ""} /> Analyze existing</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="improve" ${state.agentChoices.cicdAction === "improve" ? "checked" : ""} /> Improve existing</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="generate" ${state.agentChoices.cicdAction === "generate" ? "checked" : ""} /> Generate new</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="keep" ${state.agentChoices.cicdAction === "keep" ? "checked" : ""} /> Keep unchanged</label></div><h4>CI/CD platform</h4><div class="agent-inline-choices"><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="jenkins" ${state.agentChoices.cicdPlatform === "jenkins" ? "checked" : ""} /> Jenkins</label><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="github-actions" ${state.agentChoices.cicdPlatform === "github-actions" ? "checked" : ""} /> GitHub Actions</label><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="both" ${state.agentChoices.cicdPlatform === "both" ? "checked" : ""} /> Both</label></div></section>` : "";
+  const output = state.agentOutput || "Select an operation, provide its required inputs, and run the existing Sohail-Agent capability.";
+  const consoleBusy = ["Running", "Starting"].includes(state.agentStatus);
+  const nextActions = state.selectedAgentOperation === "inspect" && state.agentStatus === "Completed" ? `<div class="agent-next-actions"><strong>Inspection complete.</strong><span>Choose the next engineering operation from the controls above or continue here:</span><button type="button" data-agent-operation="dockerize">Dockerize</button><button type="button" data-agent-operation="kubernetes">Kubernetes</button><button type="button" data-agent-operation="cicd">CI/CD</button></div>` : "";
+  return `<section class="agent-shell"><div class="agent-shell-header"><div><span class="panel-kicker">Existing engineering CLI</span><h2>Sohail-Agent</h2><p class="agent-prompt">What would you like to do?</p></div><span class="agent-status" id="agent-status">${escapeHtml(state.agentStatus)}</span></div><div class="agent-operation-grid">${cards}</div><form class="agent-form" id="agent-form"><div class="agent-workspace-heading"><div><span class="panel-kicker">Operation workspace</span><h3>${escapeHtml(operation?.label || "Choose an operation")}</h3></div><span>Guided workflow</span></div><div class="agent-fields">${fields}</div>${guidedQuestions}<div class="agent-options"><label><input type="checkbox" id="agent-dry-run" ${state.agentDryRun ? "checked" : ""} /> Dry run</label><label><input type="checkbox" id="agent-overwrite" ${state.agentOverwrite ? "checked" : ""} /> Allow overwrite</label><button class="primary-button" id="agent-run-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run ${escapeHtml(operation?.label || "operation")} →</button></div></form>${nextActions}<section class="agent-live-terminal"><div class="agent-live-terminal-header"><div><span class="panel-kicker">Live execution</span><h3>Sohail-Agent Terminal</h3></div><div class="agent-live-terminal-meta"><span id="agent-command">${escapeHtml(state.agentCommand || "Waiting for a run")}</span><span id="agent-live-status">${escapeHtml(state.agentStatus)}</span></div></div><pre class="agent-output" id="agent-output">${escapeHtml(output)}</pre><form class="agent-console-form" id="agent-console-form"><span class="agent-console-prompt">$</span><input id="agent-console-input" value="${escapeHtml(state.agentConsoleInput)}" placeholder="sohail-agent --help" autocomplete="off" ${consoleBusy ? "disabled" : ""} /><button class="quiet-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run CLI</button></form><p class="agent-console-note">Only the existing <code>sohail-agent</code> CLI is accepted here; use Raw PTY for shell commands.</p></section></section>`;
 }
 
 function sessionRows(sessions) {
@@ -799,6 +863,7 @@ function initAIMentor3D() {
 }
 function render() {
   const route = state.route;
+  disposeTerminalRenderers();
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.route === (["plan", "approved-plan", "run"].includes(route) ? "workflows" : route)));
   const titles = { home: "Home", workflows: "Workflows", plan: "Plan", "approved-plan": "Plan", run: "Run", terminal: "Terminal", sessions: "Sessions", settings: "Settings", chat: "AI Chat" };
   pageTitle.textContent = titles[route] || "Home";
@@ -817,9 +882,11 @@ function render() {
   else if (route === "sessions") app.innerHTML = sessionsView();
   else if (route === "chat") app.innerHTML = placeholderView("AI Chat", "Bring a question, a tradeoff, or a design decision.");
   else app.innerHTML = placeholderView("Settings", "Keep local paths, shell preferences, and integrations explicit.");
+  if (route === "home" || (route === "terminal" && state.terminalEngine === "pty")) initTerminalRenderers();
   bindView();
   if (route === "run" && state.runId) connectRun(state.runId);
-  if (route === "home" || route === "terminal") connectTerminal();
+  if (route === "home" || (route === "terminal" && state.terminalEngine === "pty")) connectTerminal();
+  if (route === "terminal" && state.terminalEngine === "agent" && state.agentRunId) connectAgentRun(state.agentRunId);
   if (state.commandMode === "chat") connectChat();
 
   // Initialize or re-attach the 3D robot if its container exists in the current view
@@ -844,6 +911,33 @@ function bindView() {
   document.querySelectorAll("[data-cmd-mode]").forEach((item) => item.addEventListener("click", () => {
     state.commandMode = item.dataset.cmdMode;
     render();
+  }));
+  document.querySelectorAll("[data-terminal-engine]").forEach((item) => item.addEventListener("click", () => {
+    state.terminalEngine = item.dataset.terminalEngine;
+    if (state.terminalEngine === "pty") {
+      state.agentRunId = null;
+      if (state.agentRunSocket) state.agentRunSocket.close();
+      state.agentRunSocket = null;
+    } else if (state.terminalSocket) {
+      state.terminalSocket.close();
+      state.terminalSocket = null;
+    }
+    render();
+  }));
+  document.querySelectorAll("[data-agent-operation]").forEach((item) => item.addEventListener("click", () => {
+    state.selectedAgentOperation = item.dataset.agentOperation;
+    if (state.agentChoices.components.length === 0 && state.agentContext?.components?.length) state.agentChoices.components = state.agentContext.components.map((component) => component.name);
+    render();
+  }));
+  document.querySelectorAll("[data-agent-input]").forEach((item) => item.addEventListener("input", () => {
+    state.agentInputs[item.dataset.agentInput] = item.value;
+  }));
+  document.querySelectorAll("[data-agent-choice]").forEach((item) => item.addEventListener("change", () => {
+    const choice = item.dataset.agentChoice;
+    if (choice === "component") {
+      state.agentChoices.components = Array.from(document.querySelectorAll('[data-agent-choice="component"]:checked')).map((input) => input.value);
+    } else if (choice === "compose") state.agentChoices.compose = item.value === "true";
+    else state.agentChoices[choice] = item.value;
   }));
   document.querySelectorAll("[data-command-example]").forEach((item) => item.addEventListener("click", () => {
     const input = document.getElementById("prompt-input");
@@ -878,6 +972,122 @@ function bindView() {
   if (approveButton) approveButton.addEventListener("click", approveRun);
   const terminalForm = document.getElementById("terminal-form");
   if (terminalForm) terminalForm.addEventListener("submit", sendTerminalInput);
+  const terminalInput = document.getElementById("terminal-input");
+  if (terminalInput) terminalInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    sendTerminalInput(event);
+  });
+  const agentForm = document.getElementById("agent-form");
+  if (agentForm) agentForm.addEventListener("submit", submitAgentRun);
+  if (state.selectedAgentOperation === "dockerize") {
+    const agentOptions = document.querySelector("#agent-form .agent-options");
+    if (agentOptions && !document.getElementById("agent-compose-choice")) {
+      const composeChoice = document.createElement("div");
+      composeChoice.id = "agent-compose-choice";
+      composeChoice.className = "agent-compose-choice agent-inline-choices";
+      composeChoice.innerHTML = `<span>Docker Compose:</span><label><input type="radio" name="compose" value="true" ${state.agentChoices.compose ? "checked" : ""} /> Yes</label><label><input type="radio" name="compose" value="false" ${!state.agentChoices.compose ? "checked" : ""} /> No</label>`;
+      agentOptions.parentNode.insertBefore(composeChoice, agentOptions);
+      composeChoice.querySelectorAll("input").forEach((input) => input.addEventListener("change", () => { state.agentChoices.compose = input.value === "true"; }));
+    }
+  }
+  const agentConsoleForm = document.getElementById("agent-console-form");
+  if (agentConsoleForm) agentConsoleForm.addEventListener("submit", submitAgentConsole);
+}
+
+async function submitAgentRun(event) {
+  event.preventDefault();
+  const liveInputs = { ...state.agentInputs };
+  document.querySelectorAll("[data-agent-input]").forEach((input) => {
+    liveInputs[input.dataset.agentInput] = input.value;
+  });
+  state.agentInputs = liveInputs;
+  const dryRun = document.getElementById("agent-dry-run");
+  const overwrite = document.getElementById("agent-overwrite");
+  state.agentDryRun = Boolean(dryRun?.checked);
+  state.agentOverwrite = Boolean(overwrite?.checked);
+  state.agentStatus = "Starting";
+  state.agentOutput = "";
+  state.agentCommand = "";
+  state.agentRunId = null;
+  if (state.agentRunSocket) state.agentRunSocket.close();
+  try {
+    if (state.selectedAgentOperation === "inspect" && liveInputs.target) {
+      try { state.agentContext = await api(`/api/agent/context?target=${encodeURIComponent(liveInputs.target)}`); } catch (contextError) { state.agentContext = null; }
+    }
+    const result = await api("/api/agent/runs", { method: "POST", body: JSON.stringify({ operation: state.selectedAgentOperation, target: liveInputs.target, goal: liveInputs.goal, plan_dir: liveInputs.plan_dir, spec_dir: liveInputs.spec_dir, output_dir: liveInputs.output_dir, dry_run: state.agentDryRun, overwrite: state.agentOverwrite, components: state.agentChoices.components, compose: state.agentChoices.compose, compose_action: state.agentChoices.composeAction, organization: state.agentChoices.organization, cicd_action: state.agentChoices.cicdAction, cicd_platform: state.agentChoices.cicdPlatform }) });
+    state.agentRunId = result.run_id;
+    state.agentStatus = "Running";
+    render();
+  } catch (error) {
+    state.agentStatus = "Error";
+    state.agentOutput = error.message;
+    render();
+  }
+}
+
+async function submitAgentConsole(event) {
+  event.preventDefault();
+  const input = document.getElementById("agent-console-input");
+  const command = input?.value.trim() || "";
+  if (!command) return;
+  state.agentConsoleInput = "";
+  state.agentStatus = "Starting";
+  state.agentOutput = "";
+  state.agentCommand = `$ ${command}`;
+  state.agentRunId = null;
+  if (state.agentRunSocket) state.agentRunSocket.close();
+  try {
+    const result = await api("/api/agent/console", { method: "POST", body: JSON.stringify({ command }) });
+    state.agentRunId = result.run_id;
+    state.agentStatus = "Running";
+    render();
+  } catch (error) {
+    state.agentStatus = "Error";
+    state.agentOutput = error.message;
+    render();
+  }
+}
+
+function connectAgentRun(runId) {
+  if (state.agentRunSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.agentRunSocket.readyState)) return;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${protocol}://${window.location.host}/ws/agent-runs/${runId}`);
+  state.agentRunSocket = socket;
+  socket.onmessage = (event) => handleAgentRunEvent(JSON.parse(event.data));
+  socket.onclose = () => { state.agentRunSocket = null; if (state.agentStatus === "Running") state.agentStatus = "Exited"; syncAgentView(); };
+  socket.onerror = () => { state.agentStatus = "Error"; syncAgentView(); };
+}
+
+function handleAgentRunEvent(event) {
+  if (event.type === "command") { state.agentCommand = event.command; state.agentStatus = "Running"; }
+  if (event.type === "output") state.agentOutput += event.message || "";
+  if (event.type === "complete") {
+    state.agentStatus = event.status === "completed" ? "Completed" : "Failed";
+    state.agentOutput += `\n[${state.agentStatus} · exit code ${event.exit_code}]\n`;
+    render();
+    return;
+  }
+  if (event.type === "error") { state.agentStatus = "Error"; state.agentOutput += `\n${event.message}\n`; }
+  syncAgentView();
+}
+
+function syncAgentView() {
+  const status = document.getElementById("agent-status");
+  const command = document.getElementById("agent-command");
+  const liveStatus = document.getElementById("agent-live-status");
+  const output = document.getElementById("agent-output");
+  const runButton = document.getElementById("agent-run-button");
+  const consoleInput = document.getElementById("agent-console-input");
+  const consoleButton = document.querySelector("#agent-console-form button[type=submit]");
+  if (status) status.textContent = state.agentStatus;
+  if (command) command.textContent = state.agentCommand || "Waiting for a run";
+  if (liveStatus) liveStatus.textContent = state.agentStatus;
+  if (output) { output.textContent = state.agentOutput || "Select an operation, provide its required inputs, and run the existing Sohail-Agent capability."; output.scrollTop = output.scrollHeight; }
+  const busy = ["Running", "Starting"].includes(state.agentStatus);
+  if (runButton) runButton.disabled = busy;
+  if (consoleInput) consoleInput.disabled = busy;
+  if (consoleButton) consoleButton.disabled = busy;
 }
 
 async function submitPlan(event) {
@@ -1098,8 +1308,10 @@ function syncTerminalView() {
   const activeStatus = state.terminalStatus;
   const activeConnection = state.terminalConnection;
   const captureIndex = state.commandMode === "chat" ? state.chatCaptureIndex : state.terminalCaptureIndex;
-  if (screen) { screen.textContent = buffer; screen.scrollTop = screen.scrollHeight; }
-  if (preview) { preview.textContent = buffer || "Sohail Studio terminal\r\nWaiting for a command…"; preview.scrollTop = preview.scrollHeight; }
+  syncTerminalRenderer("terminalRenderer", "terminalRenderedLength");
+  syncTerminalRenderer("terminalPreviewRenderer", "terminalPreviewRenderedLength");
+  if (screen && !state.terminalRenderer) screen.textContent = buffer;
+  if (preview && !state.terminalPreviewRenderer) preview.textContent = buffer ? "Raw PTY connected\nOpen terminal to view live output." : "Sohail Studio terminal\nWaiting for a command…";
   if (status) status.textContent = activeStatus;
   if (homeStatus) homeStatus.textContent = activeStatus;
   if (connection) connection.textContent = activeConnection;
@@ -1113,11 +1325,55 @@ function syncTerminalView() {
   }
 }
 
+function disposeTerminalRenderers() {
+  if (state.terminalRenderer) state.terminalRenderer.dispose();
+  if (state.terminalPreviewRenderer) state.terminalPreviewRenderer.dispose();
+  state.terminalRenderer = null;
+  state.terminalPreviewRenderer = null;
+  state.terminalRenderedLength = 0;
+  state.terminalPreviewRenderedLength = 0;
+}
+
+function createTerminalRenderer(element, { preview = false } = {}) {
+  if (!element || typeof window.Terminal !== "function") return null;
+  const terminal = new window.Terminal({
+    convertEol: true,
+    cursorBlink: !preview,
+    disableStdin: preview,
+    fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
+    fontSize: preview ? 10 : 13,
+    scrollback: 5000,
+    theme: { background: "#08090c", foreground: "#c9cfd8", cursor: "#c9cfd8" },
+  });
+  terminal.open(element);
+  return terminal;
+}
+
+function initTerminalRenderers() {
+  disposeTerminalRenderers();
+  const screen = document.getElementById("terminal-screen");
+  if (screen) state.terminalRenderer = createTerminalRenderer(screen);
+  syncTerminalView();
+}
+
+function syncTerminalRenderer(rendererKey, lengthKey) {
+  const renderer = state[rendererKey];
+  if (!renderer) return;
+  if (state[lengthKey] > state.terminalBuffer.length) state[lengthKey] = 0;
+  const pending = state.terminalBuffer.slice(state[lengthKey]);
+  if (pending) {
+    renderer.write(pending);
+    state[lengthKey] = state.terminalBuffer.length;
+  }
+}
+
 async function loadSessions() { try { state.sessions = await api("/api/sessions"); if (state.route === "home" || state.route === "sessions") render(); } catch (_) {} }
 async function boot() {
   try {
-    const [workflows] = await Promise.all([api("/api/workflows"), loadSessions()]);
+    const [workflows, agentOperations] = await Promise.all([api("/api/workflows"), api("/api/agent/operations"), loadSessions()]);
     state.workflows = workflows;
+    state.agentOperations = agentOperations;
+    state.selectedAgentOperation = agentOperations[0]?.id || "inspect";
     connectionLabel.textContent = "Local API connected";
   } catch (error) { connectionLabel.textContent = "API unavailable"; showToast(error.message); }
   render();

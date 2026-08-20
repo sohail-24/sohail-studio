@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sohail_agent_cli.analyzers import StackType
+from sohail_agent_cli.analyzers import DetectedStack, StackType
 
 
 class CicdGenerator:
@@ -12,12 +12,15 @@ class CicdGenerator:
 
     def generate(
         self,
-        stack: StackType,
+        stack: StackType | DetectedStack,
         project_path: Path,
         has_docker: bool = False,
+        stack_context: DetectedStack | None = None,
     ) -> tuple[str, str | None, str]:
         """Generate CI/CD workflows."""
-        ci = self._generate_ci(stack, project_path, has_docker)
+        context = stack if isinstance(stack, DetectedStack) else stack_context
+        stack_type = context.primary if context else stack
+        ci = self._generate_ci(stack_type, project_path, has_docker, context)
         docker = self._generate_docker() if has_docker else None
         release = self._generate_release()
 
@@ -26,7 +29,13 @@ class CicdGenerator:
     # -----------------------------
     # CI GENERATION
     # -----------------------------
-    def _generate_ci(self, stack: StackType, project_path: Path, has_docker: bool) -> str:
+    def _generate_ci(
+        self,
+        stack: StackType,
+        project_path: Path,
+        has_docker: bool,
+        stack_context: DetectedStack | None = None,
+    ) -> str:
         if stack == StackType.DJANGO:
             return self._generate_django_ci(project_path, has_docker)
 
@@ -36,7 +45,46 @@ class CicdGenerator:
         if stack in (StackType.NODE, StackType.REACT, StackType.NEXTJS, StackType.VUE):
             return self._generate_node_ci(has_docker)
 
+        if stack == StackType.JAVA:
+            return self._generate_java_ci(project_path, has_docker, stack_context)
+
         return self._generate_generic_ci(has_docker)
+
+    def _generate_java_ci(
+        self,
+        project_path: Path,
+        has_docker: bool,
+        stack_context: DetectedStack | None = None,
+    ) -> str:
+        wrapper = "./mvnw" if (project_path / "mvnw").exists() else "mvn"
+        docker_section = self._docker_section() if has_docker else ""
+        runtime = stack_context.runtime if stack_context else "Java 17"
+        java_version = "".join(char for char in runtime if char.isdigit()) or "17"
+        return f"""name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  java-ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '{java_version}'
+          cache: maven
+
+      - name: Build and test
+        run: {wrapper} clean verify
+{docker_section}
+"""
 
     # -----------------------------
     # DJANGO CI (🔥 SMART)

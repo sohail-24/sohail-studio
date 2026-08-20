@@ -1,6 +1,6 @@
 {
   "terminal_cwd": ".",
   "venv_path": ".venv",
-  "shell": "/bin/bash",
+  "shell": "/bin/zsh",
   "local_only": true
 }

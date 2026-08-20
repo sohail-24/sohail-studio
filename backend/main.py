@@ -24,6 +24,7 @@ from core.cli_bridge import CliBridge
 from core.control_plane import ControlPlane
 from core.session_store import SessionStore
 from sohail_agent_cli.providers import GenerationRequest, OllamaProvider, ProviderConfig
+from sohail_agent_cli.analyzers import RepoAnalyzer
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +88,27 @@ class RunRequest(PlanRequest):
     overwrite: bool = False
 
 
+class AgentRunRequest(BaseModel):
+    operation: str
+    target: str = ""
+    goal: str = ""
+    plan_dir: str = ""
+    spec_dir: str = ""
+    output_dir: str = ""
+    dry_run: bool = False
+    overwrite: bool = False
+    components: list[str] = Field(default_factory=list)
+    compose_action: str = "keep"
+    organization: str = "automatic"
+    cicd_action: str = "analyze"
+    cicd_platform: str = "jenkins"
+    compose: bool = True
+
+
+class AgentConsoleRequest(BaseModel):
+    command: str = Field(default="", description="A command for the integrated sohail-agent CLI")
+
+
 @dataclass
 class RunState:
     run_id: str
@@ -115,6 +137,43 @@ class RunManager:
         asyncio.create_task(self._execute(state, request))
         return state
 
+    def create_agent(self, request: AgentRunRequest) -> RunState:
+        run_id = uuid.uuid4().hex[:12]
+        state = RunState(run_id, request.operation, request.target or request.output_dir)
+        self.runs[run_id] = state
+        asyncio.create_task(self._execute_agent(state, request))
+        return state
+
+    def create_console(self, request: AgentConsoleRequest) -> RunState:
+        run_id = uuid.uuid4().hex[:12]
+        state = RunState(run_id, "agent-console", request.command)
+        self.runs[run_id] = state
+        asyncio.create_task(self._execute_console(state, request))
+        return state
+
+    async def _stream_command(self, state: RunState, command_request: Any, command: Any) -> None:
+        await state.publish({"type": "command", "command": command.display, "purpose": command.purpose})
+        output: list[str] = []
+        async for kind, chunk in cli.stream(command, getattr(command_request, "provider", ""), getattr(command_request, "model", "")):
+            if kind == "output":
+                output.append(chunk)
+                await state.publish({"type": "output", "message": chunk})
+            else:
+                code = int(chunk)
+                status = "completed" if code == 0 else "failed"
+                await state.publish({"type": "complete", "status": status, "exit_code": code})
+                store.write(
+                    state.run_id,
+                    {
+                        "run_id": state.run_id,
+                        "workflow": state.workflow,
+                        "target": state.target,
+                        "status": status,
+                        "exit_code": code,
+                        "output": "".join(output),
+                    },
+                )
+
     async def _execute(self, state: RunState, request: RunRequest) -> None:
         target = Path(request.target).expanduser().resolve()
         try:
@@ -126,37 +185,51 @@ class RunManager:
                 provider=request.provider,
                 model=request.model,
             )
-            await state.publish({"type": "command", "command": command.display, "purpose": command.purpose})
-
-            pid: int | None = None
-
-            def record_pid(process_id: int) -> None:
-                nonlocal pid
-                pid = process_id
-
-            output: list[str] = []
-            async for kind, chunk in cli.stream(command, request.provider, request.model, on_start=record_pid):
-                if kind == "output":
-                    output.append(chunk)
-                    await state.publish({"type": "output", "message": chunk})
-                else:
-                    code = int(chunk)
-                    status = "completed" if code == 0 else "failed"
-                    await state.publish({"type": "complete", "status": status, "exit_code": code})
-                    store.write(
-                        state.run_id,
-                        {
-                            "run_id": state.run_id,
-                            "workflow": state.workflow,
-                            "target": state.target,
-                            "status": status,
-                            "exit_code": code,
-                            "output": "".join(output),
-                        },
-                    )
-            if pid is not None:
-                await state.publish({"type": "process", "pid": pid})
+            await self._stream_command(state, request, command)
         except Exception as exc:  # surfaced to the UI; no fake success
+            await state.publish({"type": "error", "message": str(exc)})
+            store.write(
+                state.run_id,
+                {"run_id": state.run_id, "workflow": state.workflow, "target": state.target, "status": "error", "error": str(exc)},
+            )
+        finally:
+            state.complete = True
+            await state.publish({"type": "closed"})
+
+    async def _execute_agent(self, state: RunState, request: AgentRunRequest) -> None:
+        try:
+            command = cli.build_agent_command(
+                request.operation,
+                target=request.target,
+                goal=request.goal,
+                plan_dir=request.plan_dir,
+                spec_dir=request.spec_dir,
+                output_dir=request.output_dir,
+                dry_run=request.dry_run,
+                overwrite=request.overwrite,
+                components=request.components,
+                compose_action=request.compose_action,
+                organization=request.organization,
+                cicd_action=request.cicd_action,
+                cicd_platform=request.cicd_platform,
+                compose=request.compose,
+            )
+            await self._stream_command(state, request, command)
+        except Exception as exc:
+            await state.publish({"type": "error", "message": str(exc)})
+            store.write(
+                state.run_id,
+                {"run_id": state.run_id, "workflow": state.workflow, "target": state.target, "status": "error", "error": str(exc)},
+            )
+        finally:
+            state.complete = True
+            await state.publish({"type": "closed"})
+
+    async def _execute_console(self, state: RunState, request: AgentConsoleRequest) -> None:
+        try:
+            command = cli.build_console_command(request.command)
+            await self._stream_command(state, request, command)
+        except Exception as exc:
             await state.publish({"type": "error", "message": str(exc)})
             store.write(
                 state.run_id,
@@ -183,6 +256,27 @@ async def health() -> dict[str, Any]:
 @app.get("/api/workflows")
 async def workflows() -> list[dict[str, Any]]:
     return WORKFLOWS
+
+
+@app.get("/api/agent/operations")
+async def agent_operations() -> list[dict[str, Any]]:
+    return [
+        {"id": "inspect", "label": "Inspect", "description": "Read repository structure, stack, and deployment signals.", "requires": ["target"]},
+        {"id": "dockerize", "label": "Dockerize", "description": "Generate Docker configuration for a local project.", "requires": ["target"]},
+        {"id": "kubernetes", "label": "Kubernetes", "description": "Generate Kubernetes manifests for a local project.", "requires": ["target"]},
+        {"id": "cicd", "label": "CI/CD", "description": "Generate CI/CD workflows for a local project.", "requires": ["target"]},
+        {"id": "plan", "label": "Plan", "description": "Create a persistent planning package from a project goal.", "requires": ["goal"]},
+        {"id": "blueprint", "label": "Blueprint", "description": "Generate implementation blueprints from plan and specification packages.", "requires": ["plan_dir", "spec_dir"]},
+    ]
+
+
+@app.get("/api/agent/context")
+async def agent_context(target: str) -> dict[str, Any]:
+    """Return one read-only, reusable inspection context for the GUI."""
+    path = Path(target).expanduser().resolve()
+    if not path.exists() or not path.is_dir():
+        raise HTTPException(status_code=400, detail="Target folder does not exist")
+    return RepoAnalyzer().analyze(path).to_dict()
 
 
 @app.get("/api/sessions")
@@ -228,6 +322,43 @@ async def create_run(request: RunRequest) -> dict[str, str]:
     return {"run_id": state.run_id}
 
 
+@app.post("/api/agent/runs")
+async def create_agent_run(request: AgentRunRequest) -> dict[str, str]:
+    if request.operation not in cli.AGENT_OPERATIONS:
+        raise HTTPException(status_code=400, detail="Unknown Sohail-Agent operation")
+    try:
+        cli.build_agent_command(
+            request.operation,
+            target=request.target,
+            goal=request.goal,
+            plan_dir=request.plan_dir,
+            spec_dir=request.spec_dir,
+            output_dir=request.output_dir,
+            dry_run=request.dry_run,
+            overwrite=request.overwrite,
+            components=request.components,
+            compose_action=request.compose_action,
+            organization=request.organization,
+            cicd_action=request.cicd_action,
+            cicd_platform=request.cicd_platform,
+            compose=request.compose,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    state = runs.create_agent(request)
+    return {"run_id": state.run_id}
+
+
+@app.post("/api/agent/console")
+async def create_agent_console_run(request: AgentConsoleRequest) -> dict[str, str]:
+    try:
+        cli.build_console_command(request.command)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    state = runs.create_console(request)
+    return {"run_id": state.run_id}
+
+
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str) -> dict[str, Any]:
     state = runs.runs.get(run_id)
@@ -258,6 +389,11 @@ async def run_socket(websocket: WebSocket, run_id: str) -> None:
         pass
     finally:
         state.subscribers.discard(queue)
+
+
+@app.websocket("/ws/agent-runs/{run_id}")
+async def agent_run_socket(websocket: WebSocket, run_id: str) -> None:
+    await run_socket(websocket, run_id)
 
 
 def _terminal_environment(cwd: Path) -> dict[str, str]:

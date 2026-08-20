@@ -123,6 +123,26 @@ Examples:
         default=None,
         help="Port to expose",
     )
+    dockerize_parser.add_argument(
+        "--component",
+        action="append",
+        choices=["frontend", "backend"],
+        default=None,
+        help="Component to containerize; may be repeated",
+    )
+    dockerize_parser.add_argument(
+        "--compose-action",
+        choices=["analyze", "improve", "generate", "keep"],
+        default="keep",
+        help="How to handle repository Docker Compose configuration",
+    )
+    dockerize_parser.add_argument(
+        "--no-compose",
+        dest="compose",
+        action="store_false",
+        default=True,
+        help="Do not create or update Docker Compose configuration",
+    )
     
     # k8s command
     k8s_parser = subparsers.add_parser(
@@ -147,6 +167,19 @@ Examples:
         default=None,
         help="Port to expose",
     )
+    k8s_parser.add_argument(
+        "--component",
+        action="append",
+        choices=["frontend", "backend"],
+        default=None,
+        help="Component to target; may be repeated",
+    )
+    k8s_parser.add_argument(
+        "--organization",
+        choices=["automatic", "single", "separate"],
+        default="automatic",
+        help="Manifest organization strategy",
+    )
     
     # cicd command
     cicd_parser = subparsers.add_parser(
@@ -158,6 +191,18 @@ Examples:
         nargs="?",
         default=".",
         help="Path to repository (default: current directory)",
+    )
+    cicd_parser.add_argument(
+        "--action",
+        choices=["analyze", "improve", "generate", "keep"],
+        default="analyze",
+        help="How to handle existing CI/CD configuration",
+    )
+    cicd_parser.add_argument(
+        "--platform",
+        choices=["jenkins", "github-actions", "both"],
+        default="jenkins",
+        help="CI/CD platform for generated workflows",
     )
     
     # docs command
@@ -358,6 +403,9 @@ async def cmd_dockerize(args: argparse.Namespace) -> int:
         path,
         port=args.port,
         overwrite=args.overwrite,
+        components=args.component,
+        compose_action=args.compose_action,
+        compose=args.compose,
     )
     
     return 0 if result.success else 1
@@ -380,6 +428,8 @@ async def cmd_k8s(args: argparse.Namespace) -> int:
         app_name=args.app_name,
         port=args.port,
         overwrite=args.overwrite,
+        components=args.component,
+        organization=args.organization,
     )
     
     return 0 if result.success else 1
@@ -400,6 +450,8 @@ async def cmd_cicd(args: argparse.Namespace) -> int:
     result = await agent.execute(
         path,
         overwrite=args.overwrite,
+        action=args.action,
+        platform=args.platform,
     )
     
     return 0 if result.success else 1
