@@ -1,54 +1,45 @@
 # Sohail Studio Documentation
 
-Sohail Studio is a local-first AI engineering workspace.
+## Project Overview
+Sohail Studio is a local-first AI engineering workspace. There is no separate CLI installation required. The project runs entirely on one Python environment (`.venv`), and seamlessly integrates a dashboard, a secure AI Chat module, an AI Control Plane, and a raw PTY Terminal.
 
-- There is no separate CLI installation.
-- The project runs entirely on one environment (`.venv`).
-- The dashboard, raw PTY terminal, and embedded `sohail-agent` operate in harmony.
+## Running the Project
+- **Setup:** Run `python3 -m venv .venv` and then `.venv/bin/python -m pip install -e .` to setup the single environment. Use `.venv/bin/python -m pip install -e '.[dev]'` for test dependencies.
+- **Execution:** Start the server using `.venv/bin/uvicorn backend.main:app --reload`. Access the studio via `http://127.0.0.1:8000`. Ollama must be running locally to process AI generations.
 
-## Installation
+## Chat
+The Chat workspace serves two main behaviors using `devops-qwen:latest`:
+1. **Normal Knowledge Questions:** Answers technical and factual queries using standard Ollama generation (e.g., "What is Docker?").
+2. **Local-Environment Questions:** Understands when local context is needed and calls the Control Plane (e.g., "show pwd", "find my folder named sms").
 
-- Run `python3 -m venv .venv` to set up the single environment.
-- Run `.venv/bin/python -m pip install -e .` to install the studio and integrated CLI.
-- Run `.venv/bin/python -m pip install -e '.[dev]'` for local test dependencies.
+## Control Plane
+Introduced in Phase 2, the Control Plane ensures Chat can inspect local resources safely. It intercepts requests for local environment insight, runs explicitly allowed read-only capabilities, and packages the result for Ollama. The Control Plane runs purely read-only commands without a shell (`shell=False`) and is very lightweight (~4.8 ms overhead).
 
-## Execution
+## Terminal
+The raw Terminal is architecturally isolated from the Chat. It operates via `/ws/terminal` connecting directly to a real local PTY. The terminal loads `.venv` natively (no manual source required). This allows users full execution rights while keeping Chat safely restricted.
 
-- Start the server using `.venv/bin/uvicorn backend.main:app --reload`.
-- Access the local studio interface via `http://127.0.0.1:8000`.
-- The workspace requires Ollama running locally for AI generation capabilities.
+## Ollama
+Ollama is the local inference engine driving all AI generation.
+The configured model is `devops-qwen:latest`. There is no cloud-hosted component.
 
-## Embedded Terminal
+## Supported Read-Only Operations
+The AI Control Plane supports the following read-only CLI abstractions for Chat:
+- `pwd`
+- `ls`
+- Safe filesystem and folder search
+- Local time and date extraction
+- Read-only Docker status (e.g., `docker ps`, `docker info`)
+- Read-only Git state (e.g., `git status`, `git log`)
+- Read-only Kubernetes cluster state (`kubectl get pods`, etc.)
 
-- The embedded terminal operates through `/ws/terminal`.
-- The terminal environment automatically maps `VIRTUAL_ENV` to `.venv`.
-- The embedded terminal requires no manual `source` activation.
-- Access the integrated commands directly via `sohail-agent --help`.
+## Safety Rules
+- Chat has **no unrestricted shell access**.
+- Chat **cannot** perform any state-mutating or destructive actions (e.g., `rm`, `mkdir`, `docker stop`, `git reset`, `kubectl apply`).
+- If asked to perform an action, Chat can only explain the necessary steps.
 
-## Interface Layout
+## Testing
+Run tests locally using `pytest`. Current validations included tests for safe Control Plane routing, Multi-question routing, read-only verifications, terminal PTY availability, and chat safety bounds. All 20 focused test cases from Phase 2 have successfully passed.
 
-- **Left Panel**: Contains the recent task list and programmatic 3D AI Mentor.
-- **Center Canvas**: Serves as the primary workspace for planning and execution logs.
-- **Right Panel**: Houses the rotating Engineering Knowledge Sphere and the raw Terminal.
-
-## Supported Workflows
-
-The current CLI-backed interface workflows are:
-
-- **Inspect Project**: Reads codebase context and stores project state (`inspect`).
-- **Dockerize Project**: Configures minimal, environment-specific Docker artifacts (`dockerize`).
-- **Kubernetes**: Deploys localized manifests into a clustered setup (`k8s`).
-- **CI/CD**: Generates automated pipelines tailored to project needs (`cicd`).
-- **Generate Documentation**: Authors relevant project documentation based on the codebase (`docs`).
-
-All other visual placeholders, such as "Create New Project" or "Debug Error", do not map to executable commands currently.
-
-## Workflow Execution Steps
-
-1. Select the local target folder and the desired workflow.
-2. Request a workflow plan from the dashboard.
-3. Review the proposed steps manually.
-4. Click to approve the execution.
-5. The application securely triggers the command in the integrated `.venv`.
-6. Watch real-time command output and CLI results.
-7. Logs are permanently kept in the `sessions/` directory.
+## Current Status
+- **Phase 1 (Complete):** Local Ollama foundation, Chat interface, separated PTY Terminal.
+- **Phase 2 (Complete):** AI Control Plane with read-only tools, safe local context querying, mult-question routing.
