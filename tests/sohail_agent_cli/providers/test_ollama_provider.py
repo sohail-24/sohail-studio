@@ -137,6 +137,31 @@ async def test_ollama_provider_preserves_conversation_messages():
 
 
 @pytest.mark.asyncio
+async def test_ollama_provider_keeps_system_prompt_before_tool_context():
+    client = FakeClient()
+    provider = OllamaProvider(
+        ProviderConfig(base_url="http://localhost:11434", default_model="qwen3.5:latest")
+    )
+    provider._client = client
+
+    request = GenerationRequest(
+        prompt="What is today's date?",
+        system="Never claim unperformed actions.",
+        messages=[
+            {"role": "user", "content": "What is today's date?"},
+            {"role": "system", "content": "Read-only local time result: 2026-08-20."},
+        ],
+    )
+    await provider.generate(request)
+
+    assert client.posts[0][1]["messages"][0] == {
+        "role": "system",
+        "content": "Never claim unperformed actions.",
+    }
+    assert client.posts[0][1]["messages"][2]["content"].startswith("Read-only")
+
+
+@pytest.mark.asyncio
 async def test_ollama_provider_preserves_json_mode_and_options():
     client = FakeClient()
     provider = OllamaProvider(

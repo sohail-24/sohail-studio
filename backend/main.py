@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.cli_bridge import CliBridge
+from core.control_plane import ControlPlane
 from core.session_store import SessionStore
 from sohail_agent_cli.providers import GenerationRequest, OllamaProvider, ProviderConfig
 
@@ -44,16 +45,18 @@ store = SessionStore(ROOT / "sessions")
 cli = CliBridge()
 CHAT_MODEL = SETTINGS.get("ollama_model", "devops-qwen:latest")
 chat_provider = OllamaProvider(ProviderConfig(default_model=CHAT_MODEL))
+control_plane = ControlPlane(ROOT)
 MAX_CHAT_MESSAGES = 12
 CHAT_SYSTEM_PROMPT = """You are the Sohail Studio assistant.
-Chat mode is conversational only; no tools are available. Never execute or claim
-to execute shell commands, create or delete files, modify systems, run Docker,
-Git, Kubernetes, Terraform, or install software. When a user provides a command,
-explain what it would do and describe manual steps as suggestions. Never claim
-that an action happened unless an authorized tool result explicitly confirms it.
-Answer concise technical questions clearly. Do not reveal internal reasoning or
-claim access to live system time; if asked for today's date, say you do not have
-live time access."""
+Chat mode is conversational and may receive factual results from explicitly
+approved read-only local inspection tools. No write or destructive tools are
+available; only approved read-only results may be supplied. Never execute or claim to execute shell commands, create or delete
+files, modify systems, run Docker, Git, Kubernetes, Terraform, or install
+software. When a user provides a command, explain what it would do and describe
+manual steps as suggestions. Never claim that an action happened unless an
+authorized tool result explicitly confirms it. Use supplied local-time results
+for current date/time questions; otherwise say live time is unavailable. Answer
+concise technical questions clearly and do not reveal internal reasoning."""
 
 app = FastAPI(title="Sohail Studio", version="0.1.0")
 app.mount("/assets", StaticFiles(directory=DASHBOARD), name="assets")
@@ -403,9 +406,21 @@ async def chat_socket(websocket: WebSocket) -> None:
             if not message.strip():
                 continue
 
+            previous_history = list(history)
             history.append({"role": "user", "content": message})
             if len(history) > MAX_CHAT_MESSAGES:
                 history = history[-MAX_CHAT_MESSAGES:]
+            request_started = perf_counter()
+            tool_started = perf_counter()
+            tool_results = await control_plane.inspect_many(message)
+            tool_ms = (perf_counter() - tool_started) * 1000
+            if tool_results:
+                history.append({
+                    "role": "system",
+                    "content": "\n\n".join(result.as_context() for result in tool_results),
+                })
+                if len(history) > MAX_CHAT_MESSAGES:
+                    history = history[-MAX_CHAT_MESSAGES:]
             request = GenerationRequest(
                 prompt=message,
                 model=CHAT_MODEL,
@@ -413,7 +428,7 @@ async def chat_socket(websocket: WebSocket) -> None:
                 messages=list(history),
                 stream=True,
             )
-            started = perf_counter()
+            ollama_started = perf_counter()
             first_token_ms: float | None = None
             response_parts: list[str] = []
             completed_result = None
@@ -426,7 +441,7 @@ async def chat_socket(websocket: WebSocket) -> None:
                     break
                 if result.text:
                     if first_token_ms is None:
-                        first_token_ms = (perf_counter() - started) * 1000
+                        first_token_ms = (perf_counter() - ollama_started) * 1000
                     response_parts.append(result.text)
                     await websocket.send_json({
                         "type": "output",
@@ -438,20 +453,24 @@ async def chat_socket(websocket: WebSocket) -> None:
                     break
 
             if failed:
-                history.pop()
+                history = previous_history
                 continue
 
             assistant_text = "".join(response_parts)
             if assistant_text:
                 history.append({"role": "assistant", "content": assistant_text})
-            total_ms = (perf_counter() - started) * 1000
+            ollama_ms = (perf_counter() - ollama_started) * 1000
+            total_ms = (perf_counter() - request_started) * 1000
             await websocket.send_json({
                 "type": "complete",
                 "status": "completed",
                 "model": CHAT_MODEL,
                 "timing": {
                     "first_token_ms": round(first_token_ms, 2) if first_token_ms is not None else None,
-                    "server_ms": round(total_ms, 2),
+                    "server_ms": round(ollama_ms, 2),
+                    "request_ms": round(total_ms, 2),
+                    "tool_ms": round(tool_ms, 2),
+                    "tool_names": [result.name for result in tool_results],
                     "ollama_total_duration_ms": getattr(completed_result, "total_duration_ms", None),
                     "load_duration_ms": getattr(completed_result, "load_duration_ms", None),
                     "prompt_eval_count": getattr(completed_result, "prompt_eval_count", None),

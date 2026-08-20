@@ -112,6 +112,11 @@ button { border: 0; cursor: pointer; color: inherit; }
 .chat-message.assistant { align-self: flex-start; background: transparent; }
 .chat-message-role { font-weight: 600; color: var(--subtle); font-size: 10px; margin-bottom: 2px; }
 .chat-message-content { color: #d1d5dc; font-size: 12px; line-height: 1.5; }
+.chat-message-content h2, .chat-message-content h3, .chat-message-content h4 { margin: 8px 0 4px; color: #eef0f4; font-size: 13px; }
+.chat-message-content ul, .chat-message-content ol { margin: 4px 0 8px 18px; padding: 0; }
+.chat-message-content code { padding: 1px 4px; border-radius: 4px; background: #171b22; color: #d7e39d; }
+.chat-message-content pre { margin: 8px 0; padding: 9px 10px; overflow-x: auto; border: 1px solid var(--line); border-radius: 7px; background: #0d1014; }
+.chat-message-content pre code { padding: 0; background: transparent; color: #d8dde5; }
 .canvas-state { color: #929aa5; }
 .workspace-tabs { display: flex; align-items: center; gap: 2px; padding: 0 14px; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line); overflow-x: auto; }
 .workspace-tab { position: relative; padding: 12px 9px 11px; background: transparent; color: var(--subtle); font-size: 10px; white-space: nowrap; }

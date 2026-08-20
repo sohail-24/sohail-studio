@@ -37,6 +37,54 @@ const pageTitle = document.getElementById("page-title");
 const connectionLabel = document.getElementById("connection-label");
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>\"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[char]));
+const renderMarkdown = (value) => {
+  let source = String(value ?? "").replace(/\\([\\*_`#[\]()])/g, "$1");
+  const codeBlocks = [];
+  source = source.replace(/```([^\n]*)\n([\s\S]*?)```/g, (_match, language, code) => {
+    const className = language.trim() ? ` class="language-${escapeHtml(language.trim())}"` : "";
+    const token = `@@SOHAIL_CODE_${codeBlocks.length}@@`;
+    codeBlocks.push(`<pre><code${className}>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`);
+    return token;
+  });
+
+  const inline = (line) => line
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/__(.+?)__/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+    .replace(/_([^_\n]+)_/g, "<em>$1</em>");
+
+  const escaped = escapeHtml(source);
+  const html = [];
+  let listType = null;
+  const closeList = () => {
+    if (listType) html.push(`</${listType}>`);
+    listType = null;
+  };
+  escaped.split("\n").forEach((line) => {
+    const codeToken = line.match(/^@@SOHAIL_CODE_(\d+)@@$/);
+    if (codeToken) { closeList(); html.push(codeBlocks[Number(codeToken[1])]); return; }
+    const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      const nextType = unordered ? "ul" : "ol";
+      if (listType !== nextType) { closeList(); listType = nextType; html.push(`<${listType}>`); }
+      html.push(`<li>${inline(unordered ? unordered[1] : ordered[1])}</li>`);
+      return;
+    }
+    closeList();
+    if (!line.trim()) { html.push("<br>"); return; }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(4, heading[1].length + 1);
+      html.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+      return;
+    }
+    html.push(`${inline(line)}<br>`);
+  });
+  closeList();
+  return html.join("").replace(/@@SOHAIL_CODE_(\d+)@@/g, (_match, index) => codeBlocks[Number(index)] || "");
+};
 const workflowColors = {"inspect-project":"#a9e86e","create-project":"#a98cff","dockerize-project":"#6dbbff",kubernetes:"#ffad66",cicd:"#a9e86e",documentation:"#c8a1ff","debug-error":"#f17c83","ai-chat":"#6dbbff"};
 
 async function api(path, options = {}) {
@@ -121,7 +169,7 @@ function workspaceCanvas() {
     const roleName = isUser ? "You" : "Sohail Studio";
     return `<div class="chat-message ${isUser ? 'user' : 'assistant'}">
       <div class="chat-message-role">${escapeHtml(roleName)}:</div>
-      <div class="chat-message-content" data-chat-index="${index}">${escapeHtml(msg.content).replace(/\n/g, '<br>')}</div>
+      <div class="chat-message-content" data-chat-index="${index}">${renderMarkdown(msg.content)}</div>
     </div>`;
   }).join("");
 
@@ -1058,7 +1106,7 @@ function syncTerminalView() {
   if (captureIndex !== null) {
     const content = document.querySelector(`[data-chat-index="${captureIndex}"]`);
     if (content) {
-      content.innerHTML = escapeHtml(state.chatHistory[captureIndex].content).replace(/\n/g, "<br>");
+      content.innerHTML = renderMarkdown(state.chatHistory[captureIndex].content);
       const history = document.getElementById("chat-history-content");
       if (history) history.scrollTop = history.scrollHeight;
     }

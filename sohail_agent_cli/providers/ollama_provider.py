@@ -175,7 +175,11 @@ class OllamaProvider(BaseProvider):
             {"role": message["role"], "content": message["content"]}
             for message in (request.messages or [])
         ]
-        if request.system and not any(message.get("role") == "system" for message in messages):
+        if request.system and (
+            not messages
+            or messages[0].get("role") != "system"
+            or messages[0].get("content") != request.system
+        ):
             messages.insert(0, {"role": "system", "content": request.system})
         if not messages:
             messages.append({"role": "user", "content": request.prompt})
