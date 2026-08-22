@@ -276,6 +276,18 @@ class DeepInspector:
         """Collapse repeated reports while retaining conflicts and provenance."""
         component_names = [str(item.get("name")) for item in intelligence.components]
         application_candidates = [item for item in intelligence.ports if item.get("port_type") == "application"]
+        container_ports = {
+            (str(item.get("component") or "root"), item.get("port"))
+            for item in intelligence.ports
+            if item.get("port_type") == "container"
+        }
+        correlated_container_ports = {
+            (str(item.get("component") or "root"), item.get("target_port"))
+            for item in intelligence.ports
+            if item.get("port_type") == "service"
+            and item.get("target_port") is not None
+            and (str(item.get("component") or "root"), item.get("target_port")) in container_ports
+        }
         normalized: dict[tuple[str, str, str | None], dict[str, Any]] = {}
         for raw in intelligence.ports:
             component = str(raw.get("component") or "root")
@@ -289,12 +301,7 @@ class DeepInspector:
                 elif raw_port_type != "documented" and "backend" in component_names:
                     component = "backend"
             port_type = str(raw.get("port_type") or "application")
-            if port_type == "documented" and any(
-                item.get("component") == component
-                and item.get("port_type") == "application"
-                and (item.get("port") == raw.get("port") or len(component_names) == 1)
-                for item in intelligence.ports
-            ):
+            if port_type == "container" and (component, raw.get("port")) in correlated_container_ports:
                 port_type = "application"
             service_name = raw.get("service_name")
             group_key = (component, port_type, str(service_name) if service_name else None)
@@ -327,6 +334,26 @@ class DeepInspector:
                 entry["target_port"] = None
             if entry["confidence"] != "high" and raw.get("confidence") == "high":
                 entry["confidence"] = "high"
+        documented = [
+            item for item in normalized.values() if item["port_type"] == "documented" and item["port"] is not None
+        ]
+        for entry in normalized.values():
+            if entry["port_type"] != "application" or entry["port"] is None:
+                continue
+            conflicts = [
+                item for item in documented
+                if item["component"] == entry["component"] and item["port"] != entry["port"]
+            ]
+            for conflict in conflicts:
+                entry["conflict"] = True
+                entry["port"] = None
+                entry["target_port"] = None
+                for source in conflict["sources"]:
+                    if source not in entry["sources"]:
+                        entry["sources"].append(source)
+                for candidate in conflict["candidates"]:
+                    if candidate not in entry["candidates"]:
+                        entry["candidates"].append(candidate)
         intelligence.ports = list(normalized.values())
 
     def _package_json(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> dict[str, Any] | None:
@@ -396,6 +423,22 @@ class DeepInspector:
         seen: set[str] = set()
         source_suffixes = SOURCE_SUFFIXES | {".html"}
 
+        def runtimes_for_component(
+            path: str, kind: str, framework: str | None, manager: str | None,
+        ) -> list[dict[str, Any]]:
+            component_path = path.strip("./")
+            node_component = manager in {"npm", "yarn", "pnpm"} or kind == "frontend" or framework in {
+                "React", "Vite", "Next.js", "Angular", "Express", "NestJS",
+            }
+            result = []
+            for runtime in intelligence.runtimes:
+                source = str(runtime.get("source_file") or "")
+                local = not component_path or source == component_path or source.startswith(component_path + "/")
+                repository_level = node_component and "/" not in source
+                if local or repository_level:
+                    result.append(dict(runtime))
+            return result
+
         def add(name: str, path: str, kind: str, role: str, framework: str | None, manager: str | None, evidence: list[str]) -> None:
             if name in seen:
                 return
@@ -403,6 +446,7 @@ class DeepInspector:
             components.append({
                 "name": name, "path": path or ".", "kind": kind, "role": role,
                 "framework": framework, "package_manager": manager,
+                "runtimes": runtimes_for_component(path, kind, framework, manager),
                 "evidence": sorted(set(evidence)),
             })
 
@@ -648,9 +692,18 @@ class DeepInspector:
             match = PORT_RE.search(line)
             if match:
                 self._port(intelligence, source, "documented_port", int(match.group(1)), "medium", "README port mention", line_number, component="root", port_type="documented")
-            runtime = re.search(r"\bNode(?:\.js)?\s+(?:version\s+)?(\d+(?:\.\d+)?)\b", line, re.IGNORECASE)
+            runtime = re.search(
+                r"\bNode(?:\.js)?\s*(?:\(\s*)?(?:version\s+)?"
+                r"(?P<version>v?\d+(?:\.\d+){0,2})"
+                r"(?P<qualifier>\s+or\s+(?:higher|later))?\s*\)?",
+                line,
+                re.IGNORECASE,
+            )
             if runtime:
-                self._runtime(intelligence, source, "Node.js", runtime.group(1), "medium", "README runtime mention")
+                version = runtime.group("version")
+                if runtime.group("qualifier"):
+                    version += runtime.group("qualifier")
+                self._runtime(intelligence, source, "Node.js", version, "medium", "README runtime mention")
 
     def _kubernetes(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
         if classify_file(Path(source), content) != "kubernetes":
@@ -696,6 +749,16 @@ class DeepInspector:
                         or (document.get("metadata") or {}).get("name")
                         or "root"
                     )
+                    for container_port in container.get("ports", []) or []:
+                        if not isinstance(container_port, dict):
+                            continue
+                        value = container_port.get("containerPort")
+                        if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+                            self._port(
+                                intelligence, source, "container_port", int(value), "high",
+                                "Kubernetes workload containerPort", component=component,
+                                port_type="container",
+                            )
                     for environment in container.get("env", []) or []:
                         if not isinstance(environment, dict) or environment.get("name") != "PORT":
                             continue

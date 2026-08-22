@@ -182,6 +182,7 @@ class ProjectIntelligenceRepository:
                 }
                 intelligence.components = [
                     {
+                        **summary_components.get(row["name"], {}),
                         **dict(row),
                         "role": (summary_components.get(row["name"]) or {}).get("role"),
                     }
@@ -213,7 +214,28 @@ class ProjectIntelligenceRepository:
             if dependency_rows:
                 intelligence.dependencies = [dict(row) for row in dependency_rows]
             if runtime_rows:
-                intelligence.runtimes = [dict(row) for row in runtime_rows]
+                intelligence.runtimes = [
+                    {
+                        key: row[key]
+                        for key in ("runtime", "version", "source_file", "confidence")
+                    }
+                    for row in runtime_rows
+                ]
+                for component in intelligence.components:
+                    component_path = str(component.get("path") or ".").strip("./")
+                    node_component = (
+                        component.get("package_manager") in {"npm", "yarn", "pnpm"}
+                        or component.get("kind") == "frontend"
+                        or component.get("framework") in {"React", "Vite", "Next.js", "Angular", "Express", "NestJS"}
+                    )
+                    component_runtimes = []
+                    for runtime in intelligence.runtimes:
+                        source = str(runtime.get("source_file") or "")
+                        local = not component_path or source == component_path or source.startswith(component_path + "/")
+                        repository_level = node_component and "/" not in source
+                        if local or repository_level:
+                            component_runtimes.append(dict(runtime))
+                    component["runtimes"] = component_runtimes
             if command_rows:
                 intelligence.commands = [dict(row) for row in command_rows]
 

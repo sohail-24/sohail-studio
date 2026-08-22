@@ -169,12 +169,20 @@ class DockerDecisionEngine:
                     continue
                 command_text = " ".join(command) if isinstance(command, list) else str(command)
                 allowed = self._commands_for(source, command_name)
+                if command_name == "start":
+                    # A frontend package may expose its runnable server as
+                    # the standard Vite `preview` script instead of `start`.
+                    # Accept only that script's exact evidence-backed command.
+                    preview_commands = self._commands_for(source, "preview")
+                    allowed |= preview_commands
                 if allowed:
                     manager = str(source.get("package_manager") or "npm")
                     allowed |= {
                         f"{manager} run {command_name}",
                         f"{manager} {command_name}" if command_name == "start" and manager == "npm" else "",
                     }
+                    if command_name == "start" and preview_commands:
+                        allowed.add(f"{manager} run preview")
                     allowed.discard("")
                 if command_text not in allowed:
                     raise DockerDecisionError(f"Docker decision invented {command_name} command for {name}")
@@ -218,16 +226,34 @@ class DockerDecisionEngine:
         an internal default. Only an explicit Project Intelligence runtime
         fact can authorize its major version.
         """
-        runtimes = source.get("runtimes", [])
-        runtime = next((item for item in runtimes if item.get("runtime") == "Node.js"), None)
+        runtimes = [item for item in source.get("runtimes", []) if item.get("runtime") == "Node.js"]
         base_image = str(component.get("base_image", ""))
         if not base_image:
             raise DockerDecisionError(f"Docker decision did not provide a base image for {name}")
         if not base_image.startswith("node:"):
             return
-        runtime_version = str(runtime.get("version", "")).strip() if runtime else ""
-        if not runtime_version:
-            raise DockerDecisionError(f"Node.js runtime evidence is missing for {name}; confirmation is required")
+        runtime = next(
+            (
+                item for item in runtimes
+                if re.fullmatch(r"v?\d+(?:\.\d+){0,2}", str(item.get("version", "")).strip())
+            ),
+            None,
+        )
+        if runtime is None:
+            if runtimes:
+                candidate = runtimes[0]
+                version = str(candidate.get("version", "")).strip() or "unknown"
+                source_file = str(candidate.get("source_file", "unknown source"))
+                raise DockerDecisionError(
+                    "An exact Node.js runtime version is required to select a Node base image, "
+                    f"but Project Intelligence only contains the non-authoritative range "
+                    f"'Node.js {version}' from {source_file}."
+                )
+            raise DockerDecisionError(
+                f"An exact Node.js runtime version is required for {name}; "
+                "Project Intelligence contains no authoritative Node.js runtime evidence."
+            )
+        runtime_version = str(runtime.get("version", "")).strip()
         detected = re.fullmatch(r"v?(\d+(?:\.\d+){0,2})", runtime_version)
         selected = re.fullmatch(r"node:(\d+(?:\.\d+){0,2})(?:-.+)?", base_image)
         if not detected:

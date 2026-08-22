@@ -68,6 +68,29 @@ def decision_response(port: int = 5001) -> str:
     })
 
 
+def frontend_decision_response(start_command: str = "vite preview") -> str:
+    return json.dumps({
+        "status": "ready",
+        "reason": "Evidence is sufficient",
+        "components": [{
+            "name": "frontend",
+            "base_image": "node:20-alpine",
+            "working_directory": "/app/frontend",
+            "package_manager": "npm",
+            "install_command": "npm ci",
+            "start_command": start_command,
+            "port": 80,
+        }],
+        "compose": {"services": [{
+            "name": "frontend",
+            "component": "frontend",
+            "build_context": "./frontend",
+            "port": 80,
+            "target_port": 80,
+        }]},
+    })
+
+
 @pytest.mark.asyncio
 async def test_docker_decision_contract_accepts_ready_with_strict_json_validation(tmp_path: Path):
     node_backend(tmp_path)
@@ -88,6 +111,97 @@ async def test_docker_decision_contract_accepts_ready_with_strict_json_validatio
     assert provider.call_history[0].options["format"] == "json"
     assert provider.call_history[0].options["num_ctx"] == 16384
     assert provider.call_history[0].options["num_predict"] == 1024
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_frontend_preview_command_survives_persistence_and_is_accepted(tmp_path: Path):
+    write(tmp_path / ".nvmrc", "20\n")
+    write(tmp_path / "frontend/package.json", '{"scripts":{"dev":"vite","build":"vite build","preview":"vite preview"}}')
+    write(tmp_path / "frontend/package-lock.json", "{}")
+    write(tmp_path / "frontend/src/main.js", "console.log('frontend');\n")
+    write(tmp_path / "k8s/frontend-deployment.yml", "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: frontend\nspec:\n  template:\n    metadata:\n      labels:\n        app: frontend\n    spec:\n      containers:\n        - name: frontend\n          ports:\n            - containerPort: 80\n")
+    write(tmp_path / "k8s/frontend-service.yml", "apiVersion: v1\nkind: Service\nmetadata:\n  name: frontend\nspec:\n  selector:\n    app: frontend\n  ports:\n    - port: 80\n      targetPort: 80\n")
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["frontend"])
+
+    commands = context.components[0]["commands"]
+    assert {item["name"] for item in commands} >= {"dev", "build", "preview"}
+    assert any(item["command"] == "vite preview" for item in commands if item["name"] == "preview")
+
+    decision = await DockerDecisionEngine(
+        MockProvider(responses={"project": frontend_decision_response()}),
+        "devops-qwen:latest",
+    ).decide(context)
+
+    assert decision.status == "ready"
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_frontend_invented_start_command_is_rejected(tmp_path: Path):
+    write(tmp_path / ".nvmrc", "20\n")
+    write(tmp_path / "frontend/package.json", '{"scripts":{"preview":"vite preview"},"dependencies":{"vite":"^5"}}')
+    write(tmp_path / "frontend/package-lock.json", "{}")
+    write(tmp_path / "frontend/src/main.js", "console.log('frontend');\n")
+    write(tmp_path / "k8s/frontend-deployment.yml", "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: frontend\nspec:\n  template:\n    metadata:\n      labels:\n        app: frontend\n    spec:\n      containers:\n        - name: frontend\n          ports:\n            - containerPort: 80\n")
+    write(tmp_path / "k8s/frontend-service.yml", "apiVersion: v1\nkind: Service\nmetadata:\n  name: frontend\nspec:\n  selector:\n    app: frontend\n  ports:\n    - port: 80\n      targetPort: 80\n")
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["frontend"])
+
+    decision = await DockerDecisionEngine(
+        MockProvider(responses={"project": frontend_decision_response("vite serve")}),
+        "devops-qwen:latest",
+    ).decide(context)
+
+    assert decision.status == "NEEDS_EVIDENCE"
+    assert "invented start command for frontend" in decision.raw["reason"]
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base_image", ["node:14", "node:20", "node:22"])
+async def test_readme_runtime_range_does_not_authorize_any_node_base_image(
+    tmp_path: Path, base_image: str,
+):
+    write(tmp_path / "backend/package.json", '{"scripts":{"start":"node src/server.js"}}')
+    write(tmp_path / "backend/package-lock.json", "{}")
+    write(tmp_path / "backend/src/server.js", "server.listen(5001);\n")
+    write(tmp_path / "README.md", "Node.js (v14 or higher)\n")
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    response = decision_response().replace("node:20-alpine", base_image)
+
+    decision = await DockerDecisionEngine(
+        MockProvider(responses={"project": response}), "devops-qwen:latest",
+    ).decide(context)
+
+    assert decision.status == "NEEDS_EVIDENCE"
+    assert decision.raw["reason"] == (
+        "An exact Node.js runtime version is required to select a Node base image, "
+        "but Project Intelligence only contains the non-authoritative range "
+        "'Node.js v14 or higher' from README.md."
+    )
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_exact_package_engines_runtime_authorizes_matching_node_base_image(tmp_path: Path):
+    write(
+        tmp_path / "backend/package.json",
+        '{"engines":{"node":"20"},"scripts":{"start":"node src/server.js"}}',
+    )
+    write(tmp_path / "backend/package-lock.json", "{}")
+    write(tmp_path / "backend/src/server.js", "server.listen(5001);\n")
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+
+    decision = await DockerDecisionEngine(
+        MockProvider(responses={"project": decision_response()}), "devops-qwen:latest",
+    ).decide(context)
+
+    assert decision.status == "ready"
+    assert context.components[0]["runtimes"][0]["version"] == "20"
     repository.storage.close()
 
 
@@ -187,6 +301,12 @@ def test_load_latest_hydrates_normalized_facts_when_summary_is_incomplete(tmp_pa
 
     assert loaded is not None
     assert [item["name"] for item in loaded.components] == ["backend"]
+    assert any(
+        item["runtime"] == "Node.js"
+        and item["version"] == "20"
+        and item["source_file"] == ".nvmrc"
+        for item in loaded.components[0]["runtimes"]
+    )
     assert loaded.evidence
     repository.storage.close()
 
@@ -227,11 +347,68 @@ def test_api_context_and_dockerize_share_persisted_project_identity(tmp_path: Pa
     docker_context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
     assert api_context["root_path"] == docker_context.project["root_path"]
     assert {item["name"] for item in api_context["components"]} == {"backend", "frontend"}
+    for component in api_context["components"]:
+        assert any(
+            runtime["runtime"] == "Node.js"
+            and runtime["version"] == "20"
+            and runtime["source_file"] == ".nvmrc"
+            and runtime["confidence"] == "high"
+            for runtime in component["runtimes"]
+        )
     assert [item["name"] for item in docker_context.components] == ["backend"]
     assert docker_context.evidence
     assert run_response.status_code == 200
     assert Path(str(captured["target"])).expanduser().resolve() == Path(docker_context.project["root_path"])
     assert captured["components"] == ["backend"]
+    repository.storage.close()
+
+
+def test_correlated_kubernetes_ports_survive_persistence_and_api_context(tmp_path: Path):
+    node_backend(tmp_path)
+    write(tmp_path / "frontend/package.json", '{"scripts":{"preview":"vite preview"},"dependencies":{"vite":"^5"}}')
+    write(tmp_path / "frontend/src/main.js", "console.log('frontend');\n")
+    write(
+        tmp_path / "k8s/backend-deployment.yml",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: backend\nspec:\n  template:\n    metadata:\n      labels:\n        app: backend\n    spec:\n      containers:\n        - name: backend\n          ports:\n            - containerPort: 5001\n",
+    )
+    write(
+        tmp_path / "k8s/backend-service.yml",
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: backend\nspec:\n  selector:\n    app: backend\n  ports:\n    - port: 5001\n      targetPort: 5001\n",
+    )
+    write(
+        tmp_path / "k8s/frontend-deployment.yml",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: frontend\nspec:\n  template:\n    metadata:\n      labels:\n        app: frontend\n    spec:\n      containers:\n        - name: frontend\n          ports:\n            - containerPort: 80\n",
+    )
+    write(
+        tmp_path / "k8s/frontend-service.yml",
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: frontend\nspec:\n  selector:\n    app: frontend\n  ports:\n    - port: 80\n      targetPort: 80\n",
+    )
+    repository = repository_for(tmp_path)
+
+    loaded = repository.load_latest(str(tmp_path))
+    assert loaded is not None
+    assert {
+        (item["component"], item["port_type"], item["port"])
+        for item in loaded.ports
+        if item["port_type"] == "application"
+    } >= {("backend", "application", 5001), ("frontend", "application", 80)}
+
+    backend_context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    frontend_context = DockerContextBuilder(repository).build(tmp_path, ["frontend"])
+    assert any(item["port"] == 5001 for item in backend_context.components[0]["ports"])
+    assert not any(item["port"] == 80 for item in backend_context.components[0]["ports"])
+    assert any(item["port"] == 80 for item in frontend_context.components[0]["ports"])
+    assert not any(item["port"] == 5001 for item in frontend_context.components[0]["ports"])
+
+    import backend.main as main
+
+    with TestClient(main.app) as client:
+        response = client.get("/api/agent/context", params={"target": str(tmp_path)})
+
+    assert response.status_code == 200
+    api_ports = response.json()["ports"]
+    assert any(item["component"] == "frontend" and item["port_type"] == "application" and item["port"] == 80 for item in api_ports)
+    assert any(item["component"] == "backend" and item["port_type"] == "application" and item["port"] == 5001 for item in api_ports)
     repository.storage.close()
 
 
@@ -344,7 +521,7 @@ async def test_model_cannot_invent_node_runtime_without_runtime_evidence(tmp_pat
     ).decide(context)
 
     assert decision.status == "NEEDS_EVIDENCE"
-    assert "Node.js runtime evidence is missing" in decision.raw["reason"]
+    assert "exact Node.js runtime version" in decision.raw["reason"]
     repository.storage.close()
 
 

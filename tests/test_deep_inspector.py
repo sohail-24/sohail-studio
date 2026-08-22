@@ -25,7 +25,7 @@ def make_node_repository(root: Path) -> None:
             {
                 "name": "frontend",
                 "engines": {"node": ">=18"},
-                "scripts": {"dev": "vite", "build": "vite build", "test": "vitest"},
+                "scripts": {"dev": "vite", "build": "vite build", "preview": "vite preview", "test": "vitest"},
                 "dependencies": {"react": "^18.0.0", "vite": "^5.0.0"},
             }
         ),
@@ -84,8 +84,23 @@ def test_manifest_runtime_package_manager_commands_and_frameworks(tmp_path: Path
     assert "React" in intelligence.frameworks
     assert any(item["runtime"] == "Node.js" and item["version"] == "18" for item in intelligence.runtimes)
     assert any(item["name"] == "build" and item["command"] == "vite build" for item in intelligence.commands)
+    assert any(item["name"] == "preview" and item["command"] == "vite preview" and item["source_file"] == "frontend/package.json" for item in intelligence.commands)
     assert any(item["name"] == "start" and item["source_file"] == "backend/package.json" for item in intelligence.commands)
     assert any(item["name"] == "react" and item["source_file"] == "frontend/package.json" for item in intelligence.dependencies)
+
+
+def test_repository_nvmrc_runtime_is_inherited_by_node_components(tmp_path: Path):
+    make_node_repository(tmp_path)
+
+    intelligence = DeepInspector().inspect(tmp_path)
+
+    for component in ("backend", "frontend"):
+        component_data = next(item for item in intelligence.components if item["name"] == component)
+        assert {
+            (item["runtime"], item["version"], item["source_file"], item["confidence"])
+            for item in component_data["runtimes"]
+            if item["source_file"] == ".nvmrc"
+        } == {("Node.js", "18", ".nvmrc", "high")}
 
 
 def test_python_manifest_and_evidence_confidence(tmp_path: Path):
@@ -200,7 +215,13 @@ def test_port_conflicts_remain_explicit_and_provenance_is_retained(tmp_path: Pat
     assert application_ports[0]["conflict"] is True
     assert application_ports[0]["port"] is None
     assert {candidate["port"] for candidate in application_ports[0]["candidates"]} == {3000, 5001}
-    assert {source["source_file"] for source in application_ports[0]["sources"]} >= {"backend/.env", "backend/src/server.js", "README.md"}
+    assert {source["source_file"] for source in application_ports[0]["sources"]} >= {"backend/.env", "backend/src/server.js"}
+    assert any(
+        item["port_type"] == "documented"
+        and item["port"] == 3000
+        and any(source["source_file"] == "README.md" for source in item["sources"])
+        for item in intelligence.ports
+    )
 
 
 def test_explicit_source_listen_port_is_application_evidence(tmp_path: Path):
@@ -228,6 +249,19 @@ def test_dependency_versions_and_machine_node_state_are_not_runtime_evidence(tmp
     assert intelligence.runtimes == []
 
 
+def test_readme_node_range_is_retained_as_non_exact_evidence(tmp_path: Path):
+    write(tmp_path / "README.md", "Node.js (v14 or higher)\n")
+
+    intelligence = DeepInspector().inspect(tmp_path)
+
+    assert any(
+        item["runtime"] == "Node.js"
+        and item["version"] == "v14 or higher"
+        and item["source_file"] == "README.md"
+        for item in intelligence.runtimes
+    )
+
+
 def test_kubernetes_service_port_is_not_application_port(tmp_path: Path):
     write(
         tmp_path / "k8s/service.yml",
@@ -242,15 +276,61 @@ def test_kubernetes_service_port_is_not_application_port(tmp_path: Path):
 
 def test_kubernetes_workload_port_is_application_evidence(tmp_path: Path):
     write(
-        tmp_path / "k8s/backend.yml",
+        tmp_path / "backend/package.json",
+        '{"scripts":{"start":"node src/server.js"},"dependencies":{"express":"^4"}}',
+    )
+    write(tmp_path / "backend/src/server.js", "server.listen(process.env.PORT);\n")
+    write(
+        tmp_path / "k8s/backend-deployment.yml",
         "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: backend\nspec:\n  template:\n    metadata:\n      labels:\n        app: backend\n    spec:\n      containers:\n        - name: api\n          env:\n            - name: PORT\n              value: \"5001\"\n",
     )
+    write(
+        tmp_path / "k8s/backend-service.yml",
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: backend\nspec:\n  selector:\n    app: backend\n  ports:\n    - port: 5001\n      targetPort: 5001\n",
+    )
+    content = (tmp_path / "k8s/backend-deployment.yml").read_text(encoding="utf-8").replace(
+        '          env:', '          ports:\n            - containerPort: 5001\n          env:',
+    )
+    write(tmp_path / "k8s/backend-deployment.yml", content)
 
     intelligence = DeepInspector().inspect(tmp_path)
 
     ports = [item for item in intelligence.ports if item["component"] == "backend"]
     assert any(item["port_type"] == "application" and item["port"] == 5001 for item in ports)
+    assert any(item["port_type"] == "service" and item["port"] == 5001 for item in ports)
     assert any(
-        evidence.key == "application_port" and evidence.source_file == "k8s/backend.yml"
+        evidence.key == "container_port" and evidence.source_file == "k8s/backend-deployment.yml"
         for evidence in intelligence.evidence
     )
+
+
+def test_kubernetes_frontend_port_is_correlated_and_isolated(tmp_path: Path):
+    write(tmp_path / "frontend/package.json", '{"scripts":{"preview":"vite preview"},"dependencies":{"vite":"^5"}}')
+    write(tmp_path / "frontend/src/main.js", "console.log('frontend');\n")
+    write(
+        tmp_path / "k8s/frontend-deployment.yml",
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: frontend\nspec:\n  template:\n    metadata:\n      labels:\n        app: frontend\n    spec:\n      containers:\n        - name: frontend\n          ports:\n            - containerPort: 80\n",
+    )
+    write(
+        tmp_path / "k8s/frontend-service.yml",
+        "apiVersion: v1\nkind: Service\nmetadata:\n  name: frontend\nspec:\n  selector:\n    app: frontend\n  ports:\n    - port: 80\n      targetPort: 80\n",
+    )
+
+    intelligence = DeepInspector().inspect(tmp_path)
+
+    frontend_ports = [item for item in intelligence.ports if item["component"] == "frontend"]
+    assert any(item["port_type"] == "application" and item["port"] == 80 for item in frontend_ports)
+    assert any(item["port_type"] == "service" and item["port"] == 80 for item in frontend_ports)
+    backend_ports = [item for item in intelligence.ports if item["component"] == "backend"]
+    assert not any(item.get("port") == 80 for item in backend_ports)
+
+
+def test_readme_port_without_application_evidence_stays_documented(tmp_path: Path):
+    write(tmp_path / "backend/package.json", '{"scripts":{"start":"node src/server.js"}}')
+    write(tmp_path / "backend/src/server.js", "server.listen(process.env.PORT);\n")
+    write(tmp_path / "README.md", "The application runs on port 5173.\n")
+
+    intelligence = DeepInspector().inspect(tmp_path)
+
+    assert any(item["port_type"] == "documented" and item["port"] == 5173 for item in intelligence.ports)
+    assert not any(item["port_type"] == "application" and item["port"] == 5173 for item in intelligence.ports)
