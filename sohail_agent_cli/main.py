@@ -10,9 +10,10 @@ from typing import Awaitable, Callable
 
 from rich.console import Console
 
+from core.storage.project_intelligence import ProjectIntelligenceRepository
 from sohail_agent_cli.agents import (
-    BootstrapAgent,
     BlueprintAgent,
+    BootstrapAgent,
     CicdAgent,
     DockerAgent,
     DocsAgent,
@@ -20,11 +21,11 @@ from sohail_agent_cli.agents import (
     K8sAgent,
     PlanningAgent,
     PlanningAgentV2,
-    RepoInspectorAgent,
     SpecificationAgent,
     StackAgent,
 )
 from sohail_agent_cli.bootstrap.validator import PlanningValidationError
+from sohail_agent_cli.inspection import DeepInspector
 from sohail_agent_cli.stack.loader import StackPlanError
 
 console = Console()
@@ -126,9 +127,8 @@ Examples:
     dockerize_parser.add_argument(
         "--component",
         action="append",
-        choices=["frontend", "backend"],
         default=None,
-        help="Component to containerize; may be repeated",
+        help="Evidence-discovered component to containerize; may be repeated",
     )
     dockerize_parser.add_argument(
         "--compose-action",
@@ -378,13 +378,39 @@ async def cmd_inspect(args: argparse.Namespace) -> int:
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
     
-    agent = RepoInspectorAgent(
-        dry_run=args.dry_run,
-        verbose=args.verbose,
-    )
-    result = await agent.execute(path)
-    
-    return 0 if result.success else 1
+    intelligence = DeepInspector().inspect(path)
+    runtime_summary = ", ".join(
+        f"{item['runtime']} {item['version']}" for item in intelligence.runtimes
+    ) or "none detected"
+    port_summary = ", ".join(
+        f"{item.get('component', 'project')}.{item.get('port_type', 'application')}="
+        f"{'conflict' if item.get('conflict') else item.get('port')}"
+        for item in intelligence.ports
+    ) or "none detected"
+    console.print(f"\n[bold cyan]Inspection complete:[/bold cyan] {intelligence.name}")
+    console.print(f"[bold]Files:[/bold] {len(intelligence.files)} · [bold]Evidence:[/bold] {len(intelligence.evidence)}")
+    console.print(f"[bold]Components:[/bold] {', '.join(item['name'] for item in intelligence.components) or 'none detected'}")
+    console.print(f"[bold]Languages:[/bold] {', '.join(intelligence.languages) or 'none detected'}")
+    console.print(f"[bold]Runtimes:[/bold] {runtime_summary}")
+    console.print(f"[bold]Package managers:[/bold] {', '.join(intelligence.package_managers) or 'none detected'}")
+    console.print(f"[bold]Databases:[/bold] {', '.join(intelligence.databases) or 'none detected'}")
+    console.print(f"[bold]Ports:[/bold] {port_summary}")
+    console.print(f"[bold]Docker:[/bold] {'detected' if intelligence.has_docker or intelligence.has_docker_compose else 'not detected'}")
+    console.print(f"[bold]Kubernetes:[/bold] {'detected' if intelligence.kubernetes.get('files') else 'not detected'}")
+    console.print(f"[bold]CI/CD:[/bold] {', '.join(intelligence.ci_cd.get('platforms', [])) or 'not detected'}")
+    counts = intelligence.evidence_counts
+    console.print(f"[bold]Confidence:[/bold] high {counts['high']} · medium {counts['medium']} · low {counts['low']}")
+    if args.dry_run:
+        console.print("[yellow]Dry run: inspection was not persisted.[/yellow]")
+        return 0
+
+    repository = ProjectIntelligenceRepository.from_env()
+    try:
+        persisted = repository.persist(intelligence)
+    finally:
+        repository.storage.close()
+    console.print(f"[bold green]Stored in PostgreSQL:[/bold green] inspection run {persisted.run_id}")
+    return 0
 
 
 async def cmd_dockerize(args: argparse.Namespace) -> int:
@@ -407,8 +433,11 @@ async def cmd_dockerize(args: argparse.Namespace) -> int:
         compose_action=args.compose_action,
         compose=args.compose,
     )
-    
-    return 0 if result.success else 1
+    if not result.success:
+        console.print(f"[red]Dockerize failed:[/red] {result.message}")
+        return 1
+    console.print(f"[bold green]{result.message}[/bold green]")
+    return 0
 
 
 async def cmd_k8s(args: argparse.Namespace) -> int:

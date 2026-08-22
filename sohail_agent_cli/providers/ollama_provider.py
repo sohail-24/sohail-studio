@@ -181,7 +181,10 @@ class OllamaProvider(BaseProvider):
             or messages[0].get("content") != request.system
         ):
             messages.insert(0, {"role": "system", "content": request.system})
-        if not messages:
+        if request.prompt and not any(
+            message.get("role") == "user" and message.get("content") == request.prompt
+            for message in messages
+        ):
             messages.append({"role": "user", "content": request.prompt})
 
         payload: dict[str, Any] = {
@@ -195,6 +198,8 @@ class OllamaProvider(BaseProvider):
         }
         if response_format:
             payload["format"] = response_format
+        if request.think is not None:
+            payload["think"] = request.think
         return payload
 
     def _http_error_message(self, exc: httpx.HTTPStatusError, model: str) -> str:

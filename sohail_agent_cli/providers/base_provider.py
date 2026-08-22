@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-import os
 from typing import Any, AsyncIterator
 
 
@@ -43,6 +43,7 @@ class GenerationRequest:
     context: list[int] | None = None
     options: dict[str, Any] = field(default_factory=dict)
     messages: list[dict[str, str]] | None = None
+    think: bool | None = None
     
     def to_dict(self) -> dict[str, Any]:
         """Convert request to dictionary."""
@@ -63,6 +64,8 @@ class GenerationRequest:
             data["context"] = self.context
         if self.options:
             data["options"] = self.options
+        if self.think is not None:
+            data["think"] = self.think
         return data
 
 

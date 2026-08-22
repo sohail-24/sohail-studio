@@ -175,6 +175,7 @@ async def test_ollama_provider_preserves_json_mode_and_options():
             system="Return structured data.",
             max_tokens=128,
             options={"format": "json", "num_ctx": 2048},
+            think=False,
         )
     )
 
@@ -188,6 +189,11 @@ async def test_ollama_provider_preserves_json_mode_and_options():
         "role": "system",
         "content": "Return structured data.",
     }
+    assert payload["messages"][-1] == {
+        "role": "user",
+        "content": "Return JSON",
+    }
+    assert payload["think"] is False
 
 
 @pytest.mark.asyncio

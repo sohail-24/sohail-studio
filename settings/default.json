@@ -2,5 +2,8 @@
   "terminal_cwd": ".",
   "venv_path": ".venv",
   "shell": "/bin/zsh",
-  "local_only": true
+  "local_only": true,
+  "chat_model": "devops-qwen:v1",
+  "devops_model": "devops-qwen:latest",
+  "ollama_base_url": "http://localhost:11434"
 }

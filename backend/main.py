@@ -9,10 +9,10 @@ import os
 import pty
 import shutil
 import signal
-from time import perf_counter
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -21,11 +21,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.cli_bridge import CliBridge
+from core.config import load_config
 from core.control_plane import ControlPlane
 from core.session_store import SessionStore
+from core.storage import Storage, StorageConfigurationError
+from sohail_agent_cli.inspection import DeepInspector
 from sohail_agent_cli.providers import GenerationRequest, OllamaProvider, ProviderConfig
-from sohail_agent_cli.analyzers import RepoAnalyzer
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "dashboard"
@@ -40,12 +41,16 @@ def _load_settings() -> dict[str, Any]:
 
 
 SETTINGS = _load_settings()
+CONFIG = load_config(SETTINGS_PATH)
 STUDIO_VENV = (ROOT / SETTINGS.get("venv_path", ".venv")).resolve()
 DEFAULT_TERMINAL_CWD = (ROOT / SETTINGS.get("terminal_cwd", ".")).resolve()
 store = SessionStore(ROOT / "sessions")
 cli = CliBridge()
-CHAT_MODEL = SETTINGS.get("ollama_model", "devops-qwen:latest")
-chat_provider = OllamaProvider(ProviderConfig(default_model=CHAT_MODEL))
+CHAT_MODEL = CONFIG.chat_model
+DEVOPS_MODEL = CONFIG.devops_model
+chat_provider = OllamaProvider(
+    ProviderConfig(base_url=CONFIG.ollama_base_url, default_model=CHAT_MODEL)
+)
 control_plane = ControlPlane(ROOT)
 MAX_CHAT_MESSAGES = 12
 CHAT_SYSTEM_PROMPT = """You are the Sohail Studio assistant.
@@ -250,7 +255,23 @@ async def home() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "local_only": True, "cli_root": str(cli.cli_root), "cli_available": cli.cli_root.exists()}
+    database = "not_configured"
+    try:
+        storage = Storage.from_env()
+    except StorageConfigurationError:
+        pass
+    else:
+        try:
+            database = storage.health()["database"]
+        finally:
+            storage.close()
+    return {
+        "status": "ok",
+        "local_only": True,
+        "cli_root": str(cli.cli_root),
+        "cli_available": cli.cli_root.exists(),
+        "database": database,
+    }
 
 
 @app.get("/api/workflows")
@@ -276,7 +297,7 @@ async def agent_context(target: str) -> dict[str, Any]:
     path = Path(target).expanduser().resolve()
     if not path.exists() or not path.is_dir():
         raise HTTPException(status_code=400, detail="Target folder does not exist")
-    return RepoAnalyzer().analyze(path).to_dict()
+    return DeepInspector().inspect(path).to_dict()
 
 
 @app.get("/api/sessions")

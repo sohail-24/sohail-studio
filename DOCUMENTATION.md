@@ -8,7 +8,7 @@ Sohail Studio is a local-first AI engineering workspace. There is no separate CL
 - **Execution:** Start the server using `.venv/bin/uvicorn backend.main:app --reload`. Access the studio via `http://127.0.0.1:8000`. Ollama must be running locally to process AI generations.
 
 ## Chat
-The Chat workspace serves two main behaviors using `devops-qwen:latest`:
+The Chat workspace serves two main behaviors using the stable local model `devops-qwen:v1`:
 1. **Normal Knowledge Questions:** Answers technical and factual queries using standard Ollama generation (e.g., "What is Docker?").
 2. **Local-Environment Questions:** Understands when local context is needed and calls the Control Plane (e.g., "show pwd", "find my folder named sms").
 
@@ -20,7 +20,69 @@ The raw Terminal is architecturally isolated from the Chat. It operates via `/ws
 
 ## Ollama
 Ollama is the local inference engine driving all AI generation.
-The configured model is `devops-qwen:latest`. There is no cloud-hosted component.
+Create the stable tag once from the existing development model with:
+
+```bash
+ollama cp devops-qwen:latest devops-qwen:v1
+```
+
+Both local tags remain available. Chat uses `CHAT_MODEL=devops-qwen:v1`, while
+the future DevOps generation layer is reserved as `DEVOPS_MODEL=devops-qwen:latest`.
+There is no cloud LLM or AWS component.
+
+## PostgreSQL storage foundation
+The storage boundary uses PostgreSQL hosted by Neon. It is configured only
+through the environment variable `DATABASE_URL`; credentials are never stored
+in source or returned by health checks. The minimum schema is applied with the
+reproducible Alembic migration command:
+
+```bash
+DATABASE_URL='postgresql://...?...sslmode=require' .venv/bin/python -m core.storage.migrate
+```
+
+The backend health endpoint at `/api/health` reports only `database:
+connected`, `unavailable`, or `not_configured`. Existing JSON session files are
+preserved and are not migrated by this foundation.
+
+## Phase 4B: Deep Inspector and Project Intelligence
+The existing Sohail-Agent `inspect` operation now recursively discovers the
+current repository, excludes generated/cache directories and secret-bearing
+files, classifies discovered files, and extracts deterministic engineering
+evidence with source-file provenance and high/medium/low confidence. Components
+are reported only when manifests and source/configuration evidence show an
+independently runnable or deployable unit; workspace and metadata-only roots
+are not promoted to applications. It does not call Ollama and does not store
+source contents.
+
+Each successful inspection creates a new inspection run. The normalized
+Project Intelligence snapshot and its file metadata, components, runtimes,
+dependencies, commands, component-aware ports, Docker, Kubernetes, CI/CD,
+documentation, and evidence are persisted through the existing Neon PostgreSQL
+storage layer. Port candidates retain their source and conflicts rather than
+being silently merged. Local `.env` files are inspected for configuration
+shape, but sensitive values are stored only as `REDACTED`.
+Re-inspection preserves prior runs and advances the project's current snapshot.
+
+After the already-applied storage foundation migration, apply the Phase 4B
+migration with:
+
+```bash
+DATABASE_URL='postgresql://...?...sslmode=require' .venv/bin/python -m core.storage.migrate
+```
+
+The inspector never stores `.env` secrets, private keys, credentials, tokens,
+or raw source contents. Dockerize targets come from detected components, and
+the UI distinguishes an existing Compose file from a request to generate one.
+The JSON session store remains unchanged.
+
+Dockerize now retrieves the latest successful Project Intelligence snapshot
+through the existing storage repository, scopes it to the selected components,
+and sends only that context to `DEVOPS_MODEL` (`devops-qwen:latest`). Ollama
+returns a structured decision; Sohail-Agent renders the selected Dockerfiles
+and Compose services, then validates runtime, commands, paths, services, and
+ports before reporting success. Missing or conflicting evidence fails safely
+with `NEEDS_EVIDENCE`. Dry runs never write files, and existing files require
+the existing overwrite policy.
 
 ## Supported Read-Only Operations
 The AI Control Plane supports the following read-only CLI abstractions for Chat:
