@@ -84,6 +84,16 @@ ports before reporting success. Missing or conflicting evidence fails safely
 with `NEEDS_EVIDENCE`. Dry runs never write files, and existing files require
 the existing overwrite policy.
 
+Docker runtime selection uses a strict evidence policy. A base image is
+accepted only when its runtime is supported by Project Intelligence. For
+Node.js, an explicit project runtime fact such as `.nvmrc`, manifest runtime
+metadata, or an existing Dockerfile base image must authorize the matching
+`node:<version>` image. Dependency versions, the developer machine's Node
+version, Kubernetes Service ports, README assumptions, `latest`, and internal
+defaults are never runtime evidence. If Ollama returns `ready` with an
+unsupported or missing runtime claim, deterministic validation converts the
+proposal to `NEEDS_EVIDENCE`; no Dockerfile or Compose artifact is rendered.
+
 ## Supported Read-Only Operations
 The AI Control Plane supports the following read-only CLI abstractions for Chat:
 - `pwd`

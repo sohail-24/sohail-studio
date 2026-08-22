@@ -83,7 +83,24 @@ class DockerDecisionEngine:
         )
         if decision.status == "NEEDS_EVIDENCE":
             return decision
-        self._validate_decision(decision, context)
+        try:
+            self._validate_decision(decision, context)
+        except DockerDecisionError as exc:
+            # A schema-valid model response is still only a proposal. Any
+            # unsupported infrastructure claim becomes an explicit evidence
+            # request before the rendering layer can see the decision.
+            reason = str(exc)
+            return DockerDecision(
+                status="NEEDS_EVIDENCE",
+                components=[],
+                compose={},
+                raw={
+                    "status": "NEEDS_EVIDENCE",
+                    "reason": reason,
+                    "components": [],
+                    "compose": {},
+                },
+            )
         return decision
 
     @staticmethod
@@ -161,15 +178,7 @@ class DockerDecisionEngine:
                     allowed.discard("")
                 if command_text not in allowed:
                     raise DockerDecisionError(f"Docker decision invented {command_name} command for {name}")
-            runtime = next((item for item in source.get("runtimes", []) if item.get("runtime") == "Node.js"), None)
-            base_image = str(component.get("base_image", ""))
-            if base_image.startswith("node:") and runtime is None:
-                raise DockerDecisionError(f"Node.js runtime evidence is missing for {name}; confirmation is required")
-            if runtime and base_image.startswith("node:"):
-                detected = re.search(r"\d+", str(runtime.get("version", "")))
-                selected = re.search(r"node:(\d+)", base_image)
-                if detected and selected and detected.group(0) != selected.group(1):
-                    raise DockerDecisionError(f"Docker decision changed the detected Node.js runtime for {name}")
+            self._validate_runtime(name, component, source)
         services = decision.compose.get("services") or []
         if not isinstance(services, list):
             raise DockerDecisionError("Docker Compose services must be a list")
@@ -199,6 +208,32 @@ class DockerDecisionEngine:
                 raise DockerDecisionError("Docker decision invented a Compose environment variable")
             if any(item not in expected for item in service.get("depends_on") or []):
                 raise DockerDecisionError("Docker decision invented a Compose dependency")
+
+    @staticmethod
+    def _validate_runtime(name: str, component: dict[str, Any], source: dict[str, Any]) -> None:
+        """Require every Docker runtime claim to be supported by evidence.
+
+        In particular, a Node base image is never selected from model
+        knowledge, dependency versions, machine state, README assumptions, or
+        an internal default. Only an explicit Project Intelligence runtime
+        fact can authorize its major version.
+        """
+        runtimes = source.get("runtimes", [])
+        runtime = next((item for item in runtimes if item.get("runtime") == "Node.js"), None)
+        base_image = str(component.get("base_image", ""))
+        if not base_image:
+            raise DockerDecisionError(f"Docker decision did not provide a base image for {name}")
+        if not base_image.startswith("node:"):
+            return
+        runtime_version = str(runtime.get("version", "")).strip() if runtime else ""
+        if not runtime_version:
+            raise DockerDecisionError(f"Node.js runtime evidence is missing for {name}; confirmation is required")
+        detected = re.fullmatch(r"v?(\d+(?:\.\d+){0,2})", runtime_version)
+        selected = re.fullmatch(r"node:(\d+(?:\.\d+){0,2})(?:-.+)?", base_image)
+        if not detected:
+            raise DockerDecisionError(f"Node.js runtime evidence is not an explicit version for {name}; confirmation is required")
+        if not selected or detected.group(1) != selected.group(1):
+            raise DockerDecisionError(f"Docker decision changed the detected Node.js runtime for {name}")
 
     @staticmethod
     def render_dockerfile(component: dict[str, Any]) -> str:

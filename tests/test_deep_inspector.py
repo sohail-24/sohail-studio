@@ -214,6 +214,20 @@ def test_explicit_source_listen_port_is_application_evidence(tmp_path: Path):
     assert any(source["source_file"] == "backend/src/server.js" for source in ports[0]["sources"])
 
 
+def test_dependency_versions_and_machine_node_state_are_not_runtime_evidence(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("NODE_VERSION", "22")
+    monkeypatch.setenv("npm_config_node_version", "22")
+    write(
+        tmp_path / "backend/package.json",
+        '{"scripts":{"start":"node src/server.js"},"dependencies":{"express":"^20.0.0","mongoose":"^8.0.0"}}',
+    )
+    write(tmp_path / "backend/src/server.js", "server.listen(5001);\n")
+
+    intelligence = DeepInspector().inspect(tmp_path)
+
+    assert intelligence.runtimes == []
+
+
 def test_kubernetes_service_port_is_not_application_port(tmp_path: Path):
     write(
         tmp_path / "k8s/service.yml",

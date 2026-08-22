@@ -79,6 +79,12 @@ async def test_docker_decision_contract_accepts_ready_with_strict_json_validatio
 
     assert decision.status == "ready"
     assert decision.components[0]["name"] == "backend"
+    assert context.components[0]["runtimes"] == [{
+        "runtime": "Node.js",
+        "version": "20",
+        "source_file": ".nvmrc",
+        "confidence": "high",
+    }]
     assert provider.call_history[0].options["format"] == "json"
     assert provider.call_history[0].options["num_ctx"] == 16384
     assert provider.call_history[0].options["num_predict"] == 1024
@@ -305,7 +311,8 @@ async def test_conflicting_port_evidence_fails_before_generation(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_model_cannot_invent_node_runtime_without_runtime_evidence(tmp_path: Path):
+@pytest.mark.parametrize("base_image", ["node:20.15.3-alpine", "node:22-alpine"])
+async def test_model_cannot_invent_node_runtime_without_runtime_evidence(tmp_path: Path, base_image: str):
     write(tmp_path / "backend/package.json", '{"scripts":{"start":"node src/server.js"}}')
     write(tmp_path / "backend/package-lock.json", "{}")
     write(tmp_path / "backend/src/server.js", "server.listen(5001);\n")
@@ -316,7 +323,7 @@ async def test_model_cannot_invent_node_runtime_without_runtime_evidence(tmp_pat
         "reason": "Evidence is sufficient",
         "components": [{
             "name": "backend",
-            "base_image": "node:20.15.3-alpine",
+            "base_image": base_image,
             "working_directory": "/app/backend",
             "package_manager": "npm",
             "install_command": "npm install",
@@ -332,8 +339,32 @@ async def test_model_cannot_invent_node_runtime_without_runtime_evidence(tmp_pat
         }]},
     })
 
-    with pytest.raises(DockerDecisionError, match="Node.js runtime evidence is missing"):
-        await DockerDecisionEngine(MockProvider(responses={"project": response}), "devops-qwen:latest").decide(context)
+    decision = await DockerDecisionEngine(
+        MockProvider(responses={"project": response}), "devops-qwen:latest",
+    ).decide(context)
+
+    assert decision.status == "NEEDS_EVIDENCE"
+    assert "Node.js runtime evidence is missing" in decision.raw["reason"]
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_runtime_evidence_prevents_all_docker_artifacts(tmp_path: Path):
+    write(tmp_path / "backend/package.json", '{"scripts":{"start":"node src/server.js"}}')
+    write(tmp_path / "backend/package-lock.json", "{}")
+    write(tmp_path / "backend/src/server.js", "server.listen(5001);\n")
+    repository = repository_for(tmp_path)
+    response = decision_response().replace("node:20-alpine", "node:22-alpine")
+    provider = MockProvider(responses={"project": response})
+
+    result = await DockerAgent(
+        repository=repository, provider=provider, model="devops-qwen:latest",
+    ).execute(tmp_path, components=["backend"], compose=True, compose_action="generate")
+
+    assert not result.success
+    assert "requires evidence" in result.message
+    assert not (tmp_path / "backend/Dockerfile").exists()
+    assert not (tmp_path / "docker-compose.yml").exists()
     repository.storage.close()
 
 
