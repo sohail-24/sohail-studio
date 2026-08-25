@@ -8,7 +8,7 @@ from typing import Any
 
 from rich.console import Console
 
-from sohail_agent_cli.analyzers import RepoAnalyzer, RepoAnalysis
+from sohail_agent_cli.analyzers import RepoAnalysis, RepoAnalyzer
 from sohail_agent_cli.workers import FileWorker, WorkerSafetyLevel
 
 console = Console()
@@ -25,6 +25,7 @@ class AgentResult:
         files_created: list[Path] | None = None,
         files_skipped: list[Path] | None = None,
         data: dict[str, Any] | None = None,
+        status: str | None = None,
     ):
         self.success = success
         self.message = message
@@ -32,6 +33,7 @@ class AgentResult:
         self.files_created = files_created or []
         self.files_skipped = files_skipped or []
         self.data = data or {}
+        self.status = status or ("SUCCESS" if success else "FAILED")
 
     @classmethod
     def success(
@@ -53,6 +55,16 @@ class AgentResult:
             success=False,
             message=message,
             error=error,
+        )
+
+    @classmethod
+    def controlled(cls, status: str, message: str, data: dict[str, Any] | None = None) -> AgentResult:
+        """Return a non-error controlled outcome such as NEEDS_EVIDENCE."""
+        return cls(
+            success=False,
+            message=message,
+            data=data,
+            status=status,
         )
 
 
@@ -103,8 +115,16 @@ class BaseAgent(ABC):
         """Print error message."""
         console.print(f"[red]✗[/red] {message}")
 
-    async def analyze_repo(self, path: Path) -> RepoAnalysis:
-        """Analyze a repository."""
+    async def analyze_repo(self, path: Path, intelligence: Any | None = None) -> RepoAnalysis:
+        """Return stored analysis when supplied; scan only for legacy direct callers."""
+        if intelligence is not None:
+            from sohail_agent_cli.inspection import repo_analysis_from_intelligence
+
+            self.log(
+                f"Using persisted Project Intelligence: "
+                f"{getattr(intelligence, 'inspection_run_id', None) or 'stored snapshot'}"
+            )
+            return repo_analysis_from_intelligence(intelligence)
         self.log(f"Analyzing repository: {path}")
         return self.repo_analyzer.analyze(path)
 

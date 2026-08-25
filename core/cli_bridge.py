@@ -7,6 +7,7 @@ generators, and business rules stay in the integrated CLI package.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 import sys
@@ -14,9 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator
 
-
 DEFAULT_CLI_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VENV = DEFAULT_CLI_ROOT / ".venv"
+CONTROLLED_NEEDS_EVIDENCE_EXIT_CODE = 2
+CONTROLLED_NEEDS_CLARIFICATION_EXIT_CODE = 3
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,9 @@ class CliBridge:
         cicd_action: str = "analyze",
         cicd_platform: str = "jenkins",
         compose: bool = True,
+        clarification_response: str = "",
+        inspection_run_id: str = "",
+        docker_plan: dict[str, str] | None = None,
     ) -> CliCommand:
         """Build a command for the Terminal Sohail-Agent operation picker."""
         if operation not in self.AGENT_OPERATIONS:
@@ -117,12 +122,18 @@ class CliBridge:
             if not target.strip():
                 raise ValueError("A local project path is required")
             args.extend([command, target.strip()])
+            if operation != "inspect" and inspection_run_id:
+                args.extend(["--inspection-run-id", inspection_run_id])
             if operation == "dockerize":
                 for component in components or []:
                     args.extend(["--component", component])
                 args.extend(["--compose-action", compose_action])
                 if not compose:
                     args.append("--no-compose")
+                if clarification_response:
+                    args.extend(["--clarification-response", clarification_response])
+                if docker_plan:
+                    args.extend(["--docker-plan", json.dumps(docker_plan, separators=(",", ":"))])
             elif operation == "kubernetes":
                 for component in components or []:
                     args.extend(["--component", component])

@@ -149,6 +149,7 @@ class ProjectIntelligenceRepository:
             completed_at = row.completed_at.isoformat() if row.completed_at else None
             intelligence = ProjectIntelligence.from_summary(
                 row.summary or {}, root_path=canonical_root, inspected_at=completed_at,
+                inspection_run_id=str(project.current_inspection_id),
             )
             self._hydrate_normalized_facts(intelligence, str(project.current_inspection_id))
             return intelligence

@@ -1,10 +1,13 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, update
 
+from core.evidence import AcquisitionResult
+from core.cli_bridge import CliBridge
 from core.storage.database import Storage, StorageConfig
 from core.storage.project_intelligence import (
     ProjectIntelligenceRepository,
@@ -18,8 +21,8 @@ from sohail_agent_cli.dockerize import (
     DockerDecisionEngine,
     DockerDecisionError,
 )
-from sohail_agent_cli.inspection import DeepInspector
-from sohail_agent_cli.providers import MockProvider
+from sohail_agent_cli.inspection import DeepInspector, Evidence
+from sohail_agent_cli.providers import GenerationResult, MockProvider
 
 
 def write(path: Path, content: str) -> None:
@@ -43,6 +46,161 @@ def repository_for(root: Path) -> ProjectIntelligenceRepository:
     )
     repository.persist(DeepInspector().inspect(root))
     return repository
+
+
+def test_docker_context_reuses_and_validates_the_persisted_inspection_run(tmp_path: Path):
+    node_backend(tmp_path)
+    repository = repository_for(tmp_path)
+    intelligence = repository.load_latest(str(tmp_path))
+    assert intelligence is not None
+    assert intelligence.inspection_run_id
+
+    context = DockerContextBuilder(repository).build(
+        tmp_path,
+        ["backend"],
+        expected_inspection_run_id=intelligence.inspection_run_id,
+    )
+
+    assert context.project["inspection_run_id"] == intelligence.inspection_run_id
+    with pytest.raises(DockerContextError, match="does not match"):
+        DockerContextBuilder(repository).build(
+            tmp_path,
+            ["backend"],
+            expected_inspection_run_id="different-run",
+        )
+
+
+def test_cli_bridge_carries_an_explicit_docker_artifact_plan(tmp_path: Path):
+    command = CliBridge().build_agent_command(
+        "dockerize",
+        target=str(tmp_path),
+        components=["backend"],
+        inspection_run_id="inspection-123",
+        docker_plan={"dockerfiles": {"backend": "generate"}, "compose": "skip"},
+    )
+
+    assert "--docker-plan" in command.argv
+    assert any('"backend":"generate"' in argument for argument in command.argv)
+    assert "--inspection-run-id" in command.argv
+
+
+@pytest.mark.asyncio
+async def test_docker_plan_keeps_existing_artifacts_without_model_or_overwrite(tmp_path: Path):
+    node_backend(tmp_path)
+    write(tmp_path / "backend/Dockerfile", "FROM node:20-alpine\n# existing\n")
+    repository = repository_for(tmp_path)
+    provider = MockProvider(responses={"project": decision_response()})
+
+    result = await DockerAgent(
+        repository=repository,
+        provider=provider,
+        model="devops-qwen:latest",
+    ).execute(
+        tmp_path,
+        components=["backend"],
+        docker_plan={"dockerfiles": {"backend": "keep"}, "compose": "skip"},
+    )
+
+    assert result.success
+    assert result.message == "Existing Docker configuration kept"
+    assert tmp_path / "backend/Dockerfile" in result.files_skipped
+    assert provider.call_history == []
+    assert "# existing" in (tmp_path / "backend/Dockerfile").read_text(encoding="utf-8")
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_docker_plan_upgrade_is_explicit_and_targets_only_selected_artifact(tmp_path: Path):
+    node_backend(tmp_path)
+    write(tmp_path / "backend/Dockerfile", "FROM node:18-alpine\n# old\n")
+    repository = repository_for(tmp_path)
+    provider = MockProvider(responses={"project": decision_response()})
+
+    result = await DockerAgent(
+        repository=repository,
+        provider=provider,
+        model="devops-qwen:latest",
+    ).execute(
+        tmp_path,
+        components=["backend"],
+        compose=True,
+        docker_plan={"dockerfiles": {"backend": "upgrade"}, "compose": "skip"},
+    )
+
+    assert result.success
+    assert tmp_path / "backend/Dockerfile" in result.files_created
+    assert "node:20-alpine" in (tmp_path / "backend/Dockerfile").read_text(encoding="utf-8")
+    assert "# old" not in (tmp_path / "backend/Dockerfile").read_text(encoding="utf-8")
+    assert result.data["docker_plan"]["dockerfiles"]["backend"] == "upgrade"
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_docker_plan_does_not_acquire_new_repository_evidence(tmp_path: Path):
+    node_backend(tmp_path)
+    repository = repository_for(tmp_path)
+    provider = MockProvider(responses={
+        "project": json.dumps({
+            "status": "NEEDS_EVIDENCE",
+            "reason": "Production start evidence is incomplete",
+            "components": [],
+            "compose": {},
+        }),
+    })
+
+    class MustNotAcquire:
+        async def acquire(self, *_args, **_kwargs):
+            raise AssertionError("planned Dockerize must not acquire new repository evidence")
+
+    result = await DockerAgent(
+        repository=repository,
+        provider=provider,
+        acquisition_service=MustNotAcquire(),
+        model="devops-qwen:latest",
+    ).execute(
+        tmp_path,
+        components=["backend"],
+        docker_plan={"dockerfiles": {"backend": "generate"}, "compose": "skip"},
+    )
+
+    assert result.status == "NEEDS_EVIDENCE"
+    assert "Production start evidence is incomplete" in result.message
+    assert not (tmp_path / "backend/Dockerfile").exists()
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_docker_plan_generates_only_selected_artifacts(tmp_path: Path):
+    node_backend(tmp_path)
+    write(
+        tmp_path / "frontend/package.json",
+        json.dumps({"scripts": {"start": "node server.js"}}),
+    )
+    write(tmp_path / "frontend/server.js", "server.listen(80);\n")
+    repository = repository_for(tmp_path)
+    provider = MockProvider(responses={"backend": decision_response()})
+
+    result = await DockerAgent(
+        dry_run=False,
+        repository=repository,
+        provider=provider,
+        model="devops-qwen:latest",
+    ).execute(
+        tmp_path,
+        components=["backend", "frontend"],
+        compose=True,
+        docker_plan={
+            "dockerfiles": {"backend": "generate", "frontend": "skip"},
+            "compose": "skip",
+        },
+    )
+
+    assert result.success, result.message
+    assert (tmp_path / "backend/Dockerfile").exists()
+    assert not (tmp_path / "frontend/Dockerfile").exists()
+    assert result.data["context"]["project"]["selected_components"] == ["backend"]
+    assert len(provider.call_history) == 1
+    repository.storage.close()
 
 
 def decision_response(port: int = 5001) -> str:
@@ -115,7 +273,7 @@ async def test_docker_decision_contract_accepts_ready_with_strict_json_validatio
 
 
 @pytest.mark.asyncio
-async def test_frontend_preview_command_survives_persistence_and_is_accepted(tmp_path: Path):
+async def test_frontend_preview_command_survives_persistence_but_is_not_promoted_to_start(tmp_path: Path):
     write(tmp_path / ".nvmrc", "20\n")
     write(tmp_path / "frontend/package.json", '{"scripts":{"dev":"vite","build":"vite build","preview":"vite preview"}}')
     write(tmp_path / "frontend/package-lock.json", "{}")
@@ -129,12 +287,15 @@ async def test_frontend_preview_command_survives_persistence_and_is_accepted(tmp
     assert {item["name"] for item in commands} >= {"dev", "build", "preview"}
     assert any(item["command"] == "vite preview" for item in commands if item["name"] == "preview")
 
-    decision = await DockerDecisionEngine(
-        MockProvider(responses={"project": frontend_decision_response()}),
-        "devops-qwen:latest",
-    ).decide(context)
+    provider = MockProvider(responses={"project": frontend_decision_response()})
+    decision = await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
 
-    assert decision.status == "ready"
+    assert decision.status == "NEEDS_EVIDENCE"
+    assert "frontend lacks evidence-backed production start command" in decision.raw["reason"]
+    assert "development and preview commands cannot be used" in decision.raw["reason"]
+    assert not provider.call_history
+    assert "only a component's literal 'start' script" in context.prompt()
+    assert "'dev' and 'preview' scripts as non-production roles" in context.prompt()
     repository.storage.close()
 
 
@@ -155,7 +316,168 @@ async def test_frontend_invented_start_command_is_rejected(tmp_path: Path):
     ).decide(context)
 
     assert decision.status == "NEEDS_EVIDENCE"
-    assert "invented start command for frontend" in decision.raw["reason"]
+    assert "frontend lacks evidence-backed production start command" in decision.raw["reason"]
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_backend_dev_command_is_rejected_as_production_start(tmp_path: Path):
+    node_backend(tmp_path)
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    provider_payload = json.loads(decision_response())
+    provider_payload["components"][0]["start_command"] = "nodemon src/server.js"
+    provider_response = json.dumps(provider_payload)
+
+    decision = await DockerDecisionEngine(
+        MockProvider(responses={"project": provider_response}),
+        "devops-qwen:latest",
+    ).decide(context)
+
+    assert decision.status == "NEEDS_EVIDENCE"
+    assert "invented start command for backend" in decision.raw["reason"]
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_known_runtime_gap_stops_docker_decision_and_artifacts_after_analysis(tmp_path: Path):
+    node_backend(tmp_path)
+    write(tmp_path / "frontend/package.json", '{"scripts":{"dev":"vite","preview":"vite preview"},"dependencies":{"vite":"^5"}}')
+    write(tmp_path / "frontend/package-lock.json", "{}")
+    write(tmp_path / "frontend/src/main.js", "console.log('frontend');\n")
+    repository = repository_for(tmp_path)
+    provider = MockProvider(responses={"project": frontend_decision_response()})
+
+    result = await DockerAgent(
+        dry_run=True,
+        repository=repository,
+        provider=provider,
+        model="devops-qwen:latest",
+    ).execute(tmp_path, components=["backend", "frontend"], compose=True, compose_action="generate")
+
+    assert not result.success
+    assert result.status == "NEEDS_EVIDENCE"
+    assert "frontend lacks evidence-backed production start command" in result.message
+    assert len(provider.call_history) == 1
+    assert "EVIDENCE_GAP" in provider.call_history[0].prompt
+    assert not (tmp_path / "backend/Dockerfile").exists()
+    assert not (tmp_path / "frontend/Dockerfile").exists()
+    assert not (tmp_path / "docker-compose.yml").exists()
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_malformed_evidence_target_does_not_claim_acquisition_started(tmp_path: Path, capsys):
+    write(tmp_path / ".nvmrc", "20\n")
+    write(tmp_path / "backend/package.json", '{"scripts":{"dev":"node src/server.js"}}')
+    write(tmp_path / "backend/src/server.js", "app.listen(5001);\n")
+    repository = repository_for(tmp_path)
+    analysis_response = json.dumps({
+        "status": "inspect_more",
+        "findings": ["A relevant repository target may exist"],
+        "evidence_relationships": [],
+        "inspection_targets": ["malformed target proposal"],
+        "clarification_questions": [],
+        "candidate_hypotheses": [],
+        "unsupported_assumptions": [],
+    })
+
+    class AnalysisOnlyProvider(MockProvider):
+        async def generate(self, request):
+            self.call_history.append(request)
+            return GenerationResult(text=analysis_response, model=request.model or "mock")
+
+    result = await DockerAgent(
+        dry_run=True,
+        repository=repository,
+        provider=AnalysisOnlyProvider(),
+        model="devops-qwen:latest",
+    ).execute(tmp_path, components=["backend"], compose=True, compose_action="generate")
+
+    output = capsys.readouterr().out
+    assert result.status == "NEEDS_EVIDENCE"
+    assert "Evidence analysis response received: partially valid" in output
+    assert "Evidence analysis parsed: 0 valid target(s), 1 malformed target(s) rejected" in output
+    assert "Rejected malformed proposal 0: inspection target must be an object" in output
+    assert "Deterministic target validation not started: no valid inspection proposals" in output
+    assert "Acquisition started" not in output
+    assert "Deterministic evidence inspection completed" not in output
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_evidence_acquisition_retries_dockerize_at_most_once(tmp_path: Path):
+    write(tmp_path / ".nvmrc", "20\n")
+    write(tmp_path / "backend/package.json", '{"scripts":{"dev":"node src/server.js"},"dependencies":{"express":"^4"}}')
+    write(tmp_path / "backend/package-lock.json", "{}")
+    write(tmp_path / "backend/src/server.js", "app.listen(5001);\n")
+    repository = repository_for(tmp_path)
+
+    analysis_response = json.dumps({
+        "status": "inspect_more", "findings": ["Inspect the component manifest"],
+        "evidence_relationships": [], "inspection_targets": [],
+        "clarification_questions": [], "candidate_hypotheses": [],
+        "unsupported_assumptions": [],
+    })
+
+    class SequencedProvider(MockProvider):
+        async def generate(self, request):
+            self.call_history.append(request)
+            if request.system and "evidence analysis assistant" in request.system:
+                response = analysis_response
+            else:
+                response = decision_response()
+            return GenerationResult(text=response, model=request.model or "mock")
+
+    class AddsStartEvidence:
+        def __init__(self, repository):
+            self.repository = repository
+            self.calls = 0
+
+        def acquire(self, root, intelligence, gap, analysis):
+            self.calls += 1
+            refreshed = replace(intelligence)
+            refreshed.commands = [*intelligence.commands, {
+                "name": "start", "command": "node src/server.js", "source_file": "backend/package.json",
+                "confidence": "high", "component": "backend",
+            }]
+            refreshed.evidence = [*intelligence.evidence, Evidence(
+                "backend/package.json", "command", "backend.start_command", "node src/server.js", "high",
+            )]
+            self.repository.persist(refreshed)
+            return AcquisitionResult(accepted_evidence_added=True, added_evidence_count=1, refreshed=refreshed)
+
+    acquisition = AddsStartEvidence(repository)
+    result = await DockerAgent(
+        dry_run=True, repository=repository, provider=SequencedProvider(),
+        model="devops-qwen:latest", acquisition_service=acquisition,
+    ).execute(tmp_path, components=["backend"], compose=True, compose_action="generate")
+
+    assert result.success, result.message
+    assert acquisition.calls == 1
+    assert not (tmp_path / "backend/Dockerfile").exists()
+    repository.storage.close()
+
+
+def test_root_commands_do_not_contaminate_component_context(tmp_path: Path):
+    write(tmp_path / ".nvmrc", "20\n")
+    write(
+        tmp_path / "package.json",
+        '{"scripts":{"start":"npm run start --prefix backend","build":"npm install --prefix backend && npm run build --prefix frontend"}}',
+    )
+    write(tmp_path / "backend/package.json", '{"scripts":{"start":"node src/index.js","dev":"nodemon src/index.js"},"dependencies":{"express":"^4"}}')
+    write(tmp_path / "backend/package-lock.json", "{}")
+    write(tmp_path / "backend/src/index.js", "app.listen(5001);\n")
+    write(tmp_path / "frontend/package.json", '{"scripts":{"preview":"vite preview"},"dependencies":{"vite":"^5"}}')
+    write(tmp_path / "frontend/package-lock.json", "{}")
+    write(tmp_path / "frontend/src/main.js", "console.log('frontend');\n")
+    repository = repository_for(tmp_path)
+
+    backend_context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    frontend_context = DockerContextBuilder(repository).build(tmp_path, ["frontend"])
+
+    assert {item["source_file"] for item in backend_context.components[0]["commands"]} == {"backend/package.json"}
+    assert {item["source_file"] for item in frontend_context.components[0]["commands"]} == {"frontend/package.json"}
     repository.storage.close()
 
 
@@ -252,6 +574,56 @@ async def test_docker_decision_contract_rejects_invalid_schema(
 
     with pytest.raises(DockerDecisionError, match=message):
         await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_reason_gets_one_bounded_repair_and_revalidates(tmp_path: Path):
+    node_backend(tmp_path)
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    invalid = json.dumps({"status": "ready", "reason": "", "components": [], "compose": {}})
+
+    class SequentialProvider(MockProvider):
+        def __init__(self, outputs: list[str]):
+            super().__init__()
+            self.outputs = outputs
+
+        async def generate(self, request):
+            self.call_history.append(request)
+            return GenerationResult(text=self.outputs.pop(0), model=request.model or "mock")
+
+    provider = SequentialProvider([invalid, decision_response()])
+    decision = await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
+
+    assert decision.status == "ready"
+    assert decision.repair_attempted is True
+    assert len(provider.call_history) == 2
+    assert "VALIDATION_ERROR" in provider.call_history[1].prompt
+    assert "non-empty" in (provider.call_history[1].system or "")
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_docker_output_fails_after_exactly_one_repair(tmp_path: Path):
+    node_backend(tmp_path)
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    invalid = json.dumps({"status": "ready", "reason": "", "components": [], "compose": {}})
+
+    class SequentialProvider(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.outputs = [invalid, invalid]
+
+        async def generate(self, request):
+            self.call_history.append(request)
+            return GenerationResult(text=self.outputs.pop(0), model=request.model or "mock")
+
+    provider = SequentialProvider()
+    with pytest.raises(DockerDecisionError, match="after one bounded repair attempt"):
+        await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
+    assert len(provider.call_history) == 2
     repository.storage.close()
 
 

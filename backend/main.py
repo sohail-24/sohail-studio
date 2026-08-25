@@ -7,6 +7,7 @@ import errno
 import json
 import os
 import pty
+import re
 import shutil
 import signal
 import uuid
@@ -20,11 +21,17 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from core.cli_bridge import CliBridge
+from core.cli_bridge import (
+    CONTROLLED_NEEDS_CLARIFICATION_EXIT_CODE,
+    CONTROLLED_NEEDS_EVIDENCE_EXIT_CODE,
+    CliBridge,
+)
 from core.config import load_config
 from core.control_plane import ControlPlane
+from core.evidence import ClarificationRequest, ClarificationRequestError
 from core.session_store import SessionStore
 from core.storage import Storage, StorageConfigurationError
+from core.storage.project_intelligence import ProjectIntelligenceRepository, ProjectIntelligencePersistenceError
 from sohail_agent_cli.inspection import DeepInspector
 from sohail_agent_cli.providers import GenerationRequest, OllamaProvider, ProviderConfig
 
@@ -108,6 +115,14 @@ class AgentRunRequest(BaseModel):
     cicd_action: str = "analyze"
     cicd_platform: str = "jenkins"
     compose: bool = True
+    clarification_response: str = ""
+    inspection_run_id: str = ""
+    docker_plan: dict[str, Any] = Field(default_factory=dict)
+
+
+class ClarificationAnswerRequest(BaseModel):
+    request_id: str
+    answer: str
 
 
 class AgentConsoleRequest(BaseModel):
@@ -124,6 +139,10 @@ class RunState:
     events: list[dict[str, Any]] = field(default_factory=list)
     subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
     complete: bool = False
+    agent_request: AgentRunRequest | None = None
+    pending_clarification: dict[str, Any] | None = None
+    awaiting_clarification: bool = False
+    clarification_attempts: int = 0
 
     async def publish(self, event: dict[str, Any]) -> None:
         self.events.append(event)
@@ -144,7 +163,10 @@ class RunManager:
 
     def create_agent(self, request: AgentRunRequest) -> RunState:
         run_id = uuid.uuid4().hex[:12]
-        state = RunState(run_id, request.operation, request.target or request.output_dir)
+        state = RunState(
+            run_id, request.operation, request.target or request.output_dir,
+            agent_request=request,
+        )
         self.runs[run_id] = state
         asyncio.create_task(self._execute_agent(state, request))
         return state
@@ -156,17 +178,55 @@ class RunManager:
         asyncio.create_task(self._execute_console(state, request))
         return state
 
-    async def _stream_command(self, state: RunState, command_request: Any, command: Any) -> None:
+    async def _stream_command(self, state: RunState, command_request: Any, command: Any) -> bool:
         await state.publish({"type": "command", "command": command.display, "purpose": command.purpose})
         output: list[str] = []
+        marker = "SOHAIL_CLARIFICATION_REQUEST:"
         async for kind, chunk in cli.stream(command, getattr(command_request, "provider", ""), getattr(command_request, "model", "")):
             if kind == "output":
                 output.append(chunk)
-                await state.publish({"type": "output", "message": chunk})
+                visible = chunk.split(marker, 1)[0] if marker in chunk else chunk
+                if visible:
+                    await state.publish({"type": "output", "message": visible})
             else:
                 code = int(chunk)
-                status = "completed" if code == 0 else "failed"
-                await state.publish({"type": "complete", "status": status, "exit_code": code})
+                combined_output = "".join(output)
+                if state.workflow == "inspect" and code == 0:
+                    inspection_match = re.search(r"inspection run ([A-Za-z0-9_-]+)", combined_output)
+                    if inspection_match:
+                        await state.publish({
+                            "type": "inspection_persisted",
+                            "run_id": inspection_match.group(1),
+                        })
+                if state.workflow == "dockerize" and code == CONTROLLED_NEEDS_CLARIFICATION_EXIT_CODE:
+                    request = self._parse_clarification_marker(combined_output)
+                    if request is not None and state.clarification_attempts == 0:
+                        state.pending_clarification = request
+                        state.awaiting_clarification = True
+                        await state.publish({
+                            "type": "clarification_required",
+                            "request": request,
+                        })
+                        await state.publish({
+                            "type": "status",
+                            "status": "awaiting_clarification",
+                        })
+                        return True
+                    code = CONTROLLED_NEEDS_EVIDENCE_EXIT_CODE
+                controlled = (
+                    state.workflow == "dockerize"
+                    and code == CONTROLLED_NEEDS_EVIDENCE_EXIT_CODE
+                )
+                status = "completed" if code == 0 else "needs_evidence" if controlled else "failed"
+                result_status = "SUCCESS" if code == 0 else "NEEDS_EVIDENCE" if controlled else "FAILED"
+                await state.publish(
+                    {
+                        "type": "complete",
+                        "status": status,
+                        "result_status": result_status,
+                        "exit_code": code,
+                    }
+                )
                 store.write(
                     state.run_id,
                     {
@@ -174,10 +234,25 @@ class RunManager:
                         "workflow": state.workflow,
                         "target": state.target,
                         "status": status,
+                        "result_status": result_status,
                         "exit_code": code,
-                        "output": "".join(output),
+                        "output": combined_output,
                     },
                 )
+                return False
+        return False
+
+    @staticmethod
+    def _parse_clarification_marker(output: str) -> dict[str, Any] | None:
+        marker = "SOHAIL_CLARIFICATION_REQUEST:"
+        if marker not in output:
+            return None
+        try:
+            payload = output.split(marker, 1)[1].replace("\r", "").replace("\n", "").strip()
+            value = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
 
     async def _execute(self, state: RunState, request: RunRequest) -> None:
         target = Path(request.target).expanduser().resolve()
@@ -202,6 +277,7 @@ class RunManager:
             await state.publish({"type": "closed"})
 
     async def _execute_agent(self, state: RunState, request: AgentRunRequest) -> None:
+        awaiting = False
         try:
             command = cli.build_agent_command(
                 request.operation,
@@ -218,8 +294,11 @@ class RunManager:
                 cicd_action=request.cicd_action,
                 cicd_platform=request.cicd_platform,
                 compose=request.compose,
+                clarification_response=request.clarification_response,
+                inspection_run_id=request.inspection_run_id,
+                docker_plan=request.docker_plan,
             )
-            await self._stream_command(state, request, command)
+            awaiting = await self._stream_command(state, request, command)
         except Exception as exc:
             await state.publish({"type": "error", "message": str(exc)})
             store.write(
@@ -227,8 +306,9 @@ class RunManager:
                 {"run_id": state.run_id, "workflow": state.workflow, "target": state.target, "status": "error", "error": str(exc)},
             )
         finally:
-            state.complete = True
-            await state.publish({"type": "closed"})
+            if not awaiting:
+                state.complete = True
+                await state.publish({"type": "closed"})
 
     async def _execute_console(self, state: RunState, request: AgentConsoleRequest) -> None:
         try:
@@ -243,6 +323,68 @@ class RunManager:
         finally:
             state.complete = True
             await state.publish({"type": "closed"})
+
+    async def submit_clarification(
+        self, run_id: str, request: ClarificationAnswerRequest,
+    ) -> dict[str, Any]:
+        state = self.runs.get(run_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if not state.awaiting_clarification or state.pending_clarification is None:
+            raise HTTPException(status_code=409, detail="This run is not awaiting clarification")
+        if state.clarification_attempts >= 1:
+            raise HTTPException(status_code=409, detail="Clarification retry limit reached")
+        if request.request_id != state.pending_clarification.get("request_id"):
+            raise HTTPException(status_code=409, detail="Clarification request does not match this run")
+        clarification = ClarificationRequest.from_dict(state.pending_clarification)
+        await state.publish({
+            "type": "clarification_response_received",
+            "request_id": request.request_id,
+            "answer_type": clarification.expected_answer_type,
+        })
+        from sohail_agent_cli.dockerize import DockerClarificationPolicy
+
+        try:
+            evidence = DockerClarificationPolicy.validate_answer(clarification, request.answer)
+        except ClarificationRequestError as exc:
+            await state.publish({
+                "type": "user_evidence_rejected",
+                "request_id": request.request_id,
+                "message": str(exc),
+            })
+            state.awaiting_clarification = False
+            state.pending_clarification = None
+            state.complete = True
+            await state.publish({
+                "type": "complete", "status": "needs_evidence",
+                "result_status": "NEEDS_EVIDENCE", "exit_code": CONTROLLED_NEEDS_EVIDENCE_EXIT_CODE,
+            })
+            await state.publish({"type": "closed"})
+            return {"status": "rejected", "message": str(exc)}
+
+        state.clarification_attempts += 1
+        state.awaiting_clarification = False
+        state.pending_clarification = None
+        await state.publish({
+            "type": "user_evidence_accepted",
+            "request_id": evidence.request_id,
+            "origin": evidence.origin.value,
+        })
+        original = state.agent_request
+        if original is None:
+            raise HTTPException(status_code=409, detail="Original agent request is unavailable")
+        retry_request = original.model_copy(
+            update={"clarification_response": json.dumps(evidence.to_dict(), separators=(",", ":"))}
+        )
+        state.agent_request = retry_request
+        await state.publish({
+            "type": "retry_started",
+            "reason": "accepted user-provided evidence",
+            "attempt": state.clarification_attempts,
+            "maximum": 1,
+        })
+        asyncio.create_task(self._execute_agent(state, retry_request))
+        return {"status": "accepted", "retry": True}
 
 
 runs = RunManager()
@@ -300,6 +442,37 @@ async def agent_context(target: str) -> dict[str, Any]:
     return DeepInspector().inspect(path).to_dict()
 
 
+def _validated_project_path(target: str) -> Path:
+    path = Path(target).expanduser().resolve()
+    if not path.exists() or not path.is_dir():
+        raise HTTPException(status_code=400, detail="Target folder does not exist")
+    return path
+
+
+@app.get("/api/agent/project")
+async def validate_agent_project(target: str) -> dict[str, Any]:
+    """Validate a selected local folder without starting a new inspection."""
+    path = _validated_project_path(target)
+    return {"target": str(path), "valid": True}
+
+
+@app.get("/api/agent/intelligence")
+async def stored_agent_intelligence(target: str) -> dict[str, Any]:
+    """Load the latest persisted inspection for subsequent engineering actions."""
+    path = _validated_project_path(target)
+    try:
+        repository = ProjectIntelligenceRepository.from_env()
+        try:
+            intelligence = repository.load_latest(str(path))
+        finally:
+            repository.storage.close()
+    except (ProjectIntelligencePersistenceError, StorageConfigurationError) as exc:
+        raise HTTPException(status_code=503, detail="Stored project intelligence is unavailable") from exc
+    if intelligence is None:
+        raise HTTPException(status_code=404, detail="No completed inspection exists for this project")
+    return intelligence.to_dict()
+
+
 @app.get("/api/sessions")
 async def sessions() -> list[dict[str, Any]]:
     return store.list_recent()
@@ -347,6 +520,8 @@ async def create_run(request: RunRequest) -> dict[str, str]:
 async def create_agent_run(request: AgentRunRequest) -> dict[str, str]:
     if request.operation not in cli.AGENT_OPERATIONS:
         raise HTTPException(status_code=400, detail="Unknown Sohail-Agent operation")
+    if request.operation in {"inspect", "dockerize", "kubernetes", "cicd"}:
+        _validated_project_path(request.target)
     try:
         cli.build_agent_command(
             request.operation,
@@ -363,6 +538,9 @@ async def create_agent_run(request: AgentRunRequest) -> dict[str, str]:
             cicd_action=request.cicd_action,
             cicd_platform=request.cicd_platform,
             compose=request.compose,
+            clarification_response=request.clarification_response,
+            inspection_run_id=request.inspection_run_id,
+            docker_plan=request.docker_plan,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -380,12 +558,27 @@ async def create_agent_console_run(request: AgentConsoleRequest) -> dict[str, st
     return {"run_id": state.run_id}
 
 
+@app.post("/api/agent/runs/{run_id}/clarification")
+async def answer_agent_clarification(
+    run_id: str, request: ClarificationAnswerRequest,
+) -> dict[str, Any]:
+    return await runs.submit_clarification(run_id, request)
+
+
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str) -> dict[str, Any]:
     state = runs.runs.get(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    return {"run_id": state.run_id, "workflow": state.workflow, "target": state.target, "complete": state.complete, "events": state.events}
+    return {
+        "run_id": state.run_id,
+        "workflow": state.workflow,
+        "target": state.target,
+        "complete": state.complete,
+        "awaiting_clarification": state.awaiting_clarification,
+        "clarification": state.pending_clarification,
+        "events": state.events,
+    }
 
 
 @app.websocket("/ws/runs/{run_id}")

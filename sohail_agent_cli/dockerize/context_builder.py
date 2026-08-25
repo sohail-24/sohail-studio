@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from core.evidence.patterns import recognize_verified_patterns
 from core.storage.project_intelligence import ProjectIntelligenceRepository
 from sohail_agent_cli.inspection.models import ProjectIntelligence
 
@@ -23,6 +24,9 @@ class DockerContext:
     components: list[dict[str, Any]]
     infrastructure: dict[str, Any]
     evidence: list[dict[str, Any]]
+    user_evidence: list[dict[str, Any]] = field(default_factory=list)
+    verified_patterns: list[dict[str, Any]] = field(default_factory=list)
+    artifact_plan: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -30,6 +34,9 @@ class DockerContext:
             "components": self.components,
             "infrastructure": self.infrastructure,
             "evidence": self.evidence,
+            "user_evidence": self.user_evidence or [],
+            "verified_patterns": self.verified_patterns,
+            "artifact_plan": self.artifact_plan or {},
         }
 
     def prompt(self) -> str:
@@ -39,6 +46,14 @@ class DockerContext:
             "Do not invent project facts or assume missing files, frameworks, ports, commands, or services.\n"
             "When evidence conflicts, identify the conflict and return NEEDS_EVIDENCE when it blocks a safe decision.\n"
             "Use the supplied project evidence as the source of truth.\n"
+            "Command roles are authoritative: only a component's literal 'start' script is production start evidence.\n"
+            "Treat 'dev' and 'preview' scripts as non-production roles; never place them in start_command.\n"
+            "If no explicit production start strategy is supplied for a component, return NEEDS_EVIDENCE.\n"
+            "A verified engineering pattern is a deterministic policy boundary, not a model fact.\n"
+            "When a component has a verified pattern, include its pattern_id as deployment_pattern\n"
+            "and propose implementation details that satisfy that pattern's policy.\n"
+            "The artifact_plan is authoritative: generate or upgrade only selected artifacts,\n"
+            "preserve keep actions, and exclude skipped components.\n"
             "Return JSON only with status, a non-empty reason, a components array, and a compose object.\n"
             "A ready response must include each component name and compose.services as an array.\n\n"
             "FOCUSED_DOCKER_PROJECT_INTELLIGENCE:\n"
@@ -52,12 +67,21 @@ class DockerContextBuilder:
     def __init__(self, repository: ProjectIntelligenceRepository) -> None:
         self.repository = repository
 
-    def build(self, project_path: Path, selected_components: list[str] | None = None) -> DockerContext:
+    def build(
+        self,
+        project_path: Path,
+        selected_components: list[str] | None = None,
+        expected_inspection_run_id: str | None = None,
+    ) -> DockerContext:
         root = project_path.expanduser().resolve()
         intelligence = self.repository.load_latest(str(root))
         if intelligence is None:
             raise DockerContextError(
                 "No successful Project Intelligence snapshot exists for this project; run Inspect first"
+            )
+        if expected_inspection_run_id and intelligence.inspection_run_id != expected_inspection_run_id:
+            raise DockerContextError(
+                "The stored Project Intelligence snapshot does not match the requested inspection run; re-inspect explicitly"
             )
         return self.from_intelligence(intelligence, selected_components)
 
@@ -75,6 +99,7 @@ class DockerContextBuilder:
             raise DockerContextError("No independently runnable components were discovered")
 
         selected = [available[name] for name in names]
+        verified_patterns = recognize_verified_patterns(intelligence, names)
 
         def fields(item: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
             return {name: item[name] for name in names if name in item}
@@ -113,15 +138,24 @@ class DockerContextBuilder:
                 }
             ][:80]
             commands = [
-                fields(item, ("name", "command", "source_file", "confidence"))
+                fields(item, ("name", "command", "source_file", "confidence", "origin"))
                 for item in intelligence.commands
                 if item.get("component") == name
                 or belongs(str(item.get("source_file", "")), component)
-                or (
-                    "/" not in str(item.get("source_file", ""))
-                    and name in str(item.get("command", ""))
-                )
             ]
+            user_evidence = [
+                dict(item) for item in intelligence.user_evidence
+                if item.get("component") in {None, name}
+            ]
+            for item in user_evidence:
+                if item.get("key") == "production_start_command":
+                    commands.append({
+                        "name": "start",
+                        "command": item.get("confirmed_value"),
+                        "source_file": "user-provided",
+                        "confidence": "user-confirmed",
+                        "origin": "USER_PROVIDED_EVIDENCE",
+                    })
             dependencies = [
                 fields(item, ("name", "version", "scope", "source_file", "confidence"))
                 for item in intelligence.dependencies
@@ -176,10 +210,24 @@ class DockerContextBuilder:
                 ))
 
         dockerfiles = list(intelligence.docker.get("dockerfiles", []))
+
+        def artifact_belongs(source: str, component: dict[str, Any]) -> bool:
+            if belongs(source, component):
+                return True
+            name = str(component.get("name") or "").strip().lower()
+            path_name = Path(str(component.get("path") or ".")).name.strip().lower()
+            filename = Path(source).name.lower()
+            tokens = {token for token in (name, path_name) if token and token != "."}
+            return any(filename in {f"dockerfile.{token}", f"{token}.dockerfile"} for token in tokens)
+
         selected_dockerfiles = [
             item for item in dockerfiles
-            if any(belongs(item, component) for component in selected)
+            if any(artifact_belongs(item, component) for component in selected)
         ]
+        for component in components:
+            component["dockerfiles"] = [
+                item for item in dockerfiles if artifact_belongs(item, component)
+            ]
         kubernetes = intelligence.kubernetes or {}
         infrastructure = {
             "dockerfiles": selected_dockerfiles,
@@ -211,7 +259,15 @@ class DockerContextBuilder:
         project = {
             "name": intelligence.name,
             "root_path": intelligence.root_path,
+            "inspection_run_id": intelligence.inspection_run_id,
             "selected_components": names,
             "available_components": list(available),
         }
-        return DockerContext(project, components, infrastructure, evidence)
+        selected_user_evidence = [
+            dict(item) for item in intelligence.user_evidence
+            if item.get("component") in {None, *names}
+        ]
+        return DockerContext(
+            project, components, infrastructure, evidence, selected_user_evidence,
+            verified_patterns,
+        )

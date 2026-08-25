@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Mapping
 
+from dotenv import load_dotenv
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
@@ -27,18 +28,31 @@ class StorageConfig:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "StorageConfig":
+        if environ is None:
+            load_dotenv()
+
         env = os.environ if environ is None else environ
         value = env.get("DATABASE_URL", "").strip()
+
         if not value:
             raise StorageConfigurationError("DATABASE_URL is not configured")
 
         try:
             parsed = make_url(value)
         except ArgumentError as exc:
-            raise StorageConfigurationError("DATABASE_URL is not a valid database URL") from exc
+            raise StorageConfigurationError(
+                "DATABASE_URL is not a valid database URL"
+            ) from exc
 
-        if parsed.drivername not in {"postgres", "postgresql", "postgresql+psycopg"}:
-            raise StorageConfigurationError("DATABASE_URL must use PostgreSQL")
+        if parsed.drivername not in {
+            "postgres",
+            "postgresql",
+            "postgresql+psycopg",
+        }:
+            raise StorageConfigurationError(
+                "DATABASE_URL must use PostgreSQL"
+            )
+
         return cls(value)
 
     @property

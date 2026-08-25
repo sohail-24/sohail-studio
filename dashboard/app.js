@@ -24,6 +24,9 @@ const state = {
   selectedAgentOperation: "inspect",
   agentRunId: null,
   agentRunSocket: null,
+  agentRunSocketRunId: null,
+  agentRunTerminal: false,
+  agentRunStarting: false,
   agentConsoleInput: "",
   agentContext: null,
   agentChoices: {
@@ -34,10 +37,17 @@ const state = {
     cicdAction: "analyze",
     cicdPlatform: "jenkins",
   },
+  agentDockerPlan: null,
   agentOutput: "",
   agentStatus: "Idle",
+  agentClarification: null,
   agentCommand: "",
   agentInputs: { target: "", goal: "", plan_dir: "", spec_dir: "", output_dir: "" },
+  agentProjectValidated: false,
+  agentCategory: null,
+  agentInspectionActive: false,
+  agentInspectionReady: false,
+  agentInspectionRunId: "",
   agentDryRun: false,
   agentOverwrite: false,
   chatConnection: "Available",
@@ -291,7 +301,10 @@ function terminalView() {
   if (!state.terminalEngine) return terminalEngineChooser();
   const engineTabs = `<div class="terminal-engine-tabs" role="tablist" aria-label="Terminal engine"><button class="terminal-engine-tab ${state.terminalEngine === "pty" ? "active" : ""}" data-terminal-engine="pty">Raw PTY</button><button class="terminal-engine-tab ${state.terminalEngine === "agent" ? "active" : ""}" data-terminal-engine="agent">Sohail-Agent</button></div>`;
   const body = state.terminalEngine === "agent" ? agentTerminalView() : rawTerminalView();
-  return `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>Choose a local shell or the existing Sohail-Agent engineering CLI.</p></div>${engineTabs}${body}`;
+  const intro = state.terminalEngine === "agent" && !state.agentProjectValidated
+    ? `<div class="page-intro"><div class="eyebrow">Sohail-Agent Terminal</div><h1>Select a project folder</h1><p>Choose a local project once. Inspection and engineering actions will reuse its stored intelligence.</p></div>`
+    : `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>Choose a local shell or the existing Sohail-Agent engineering CLI.</p></div>`;
+  return `${intro}${engineTabs}${body}`;
 }
 
 function terminalEngineChooser() {
@@ -302,27 +315,185 @@ function rawTerminalView() {
   return `<section class="terminal-shell"><div class="terminal-toolbar"><div class="terminal-toolbar-title"><span class="terminal-dots"><i></i><i></i><i></i></span><strong>sohail-studio / raw pty</strong></div><div class="terminal-toolbar-status"><span class="status-dot"></span><span id="terminal-status">Connecting…</span><button class="quiet-icon" data-route="home" title="Collapse terminal">⌃</button></div></div><div class="terminal-execution-row"><span>Execution status</span><strong>Interactive zsh</strong><span>Command output is live</span></div><div class="terminal-screen" id="terminal-screen" aria-label="Raw PTY terminal"></div><form class="terminal-input-row" id="terminal-form"><span>›</span><input class="terminal-input" id="terminal-input" placeholder="Type a command and press Enter" autocomplete="off" /><span class="terminal-hint">Ctrl+C supported</span></form></section>`;
 }
 
+function agentProjectChooser() {
+  return `<section class="agent-project-start panel"><div class="agent-project-start-icon">⌂</div><div><span class="panel-kicker">Local project</span><h2>Select Project Folder</h2><p>Use an absolute local path. Sohail Studio will inspect it only when you choose Inspect.</p></div><form id="agent-project-form" class="agent-project-form"><label class="field-label" for="agent-project-input">Project path</label><div class="agent-project-input-row"><input class="field-input" id="agent-project-input" value="${escapeHtml(state.agentInputs.target)}" placeholder="/Users/sohal/Projects/my-app" autocomplete="off" required /><button class="primary-button" type="submit">Continue →</button></div></form>${state.agentOutput ? `<p class="agent-project-error">${escapeHtml(state.agentOutput)}</p>` : ""}</section>`;
+}
+
+function agentCategoryChooser() {
+  return `<section class="agent-category-shell"><div class="agent-project-context"><span class="panel-kicker">Selected project</span><strong>${escapeHtml(state.agentInputs.target)}</strong><button type="button" class="quiet-button" data-agent-change-project>Change folder</button></div><div class="page-intro agent-category-intro"><div class="eyebrow">Engineering workflow</div><h1>What would you like to do?</h1><p>Start with a complete inspection, then create supported engineering files from the stored result.</p></div><div class="agent-category-grid"><button type="button" class="agent-category-card inspect" data-agent-category="inspect"><span class="agent-category-icon">⌘</span><strong>Inspect</strong><span>Complete repository inspection and unlock Dockerize, Kubernetes, and CI/CD.</span><span class="agent-category-arrow">→</span></button><button type="button" class="agent-category-card build" data-agent-category="build"><span class="agent-category-icon">✦</span><strong>Build</strong><span>Create a Plan or Blueprint for future implementation work.</span><span class="agent-category-arrow">→</span></button></div></section>`;
+}
+
+function agentInspectionSummary() {
+  const context = state.agentContext;
+  if (!context) return "";
+  const components = Array.isArray(context.components) ? context.components : [];
+  const ports = Array.isArray(context.ports) ? context.ports : [];
+  const files = Array.isArray(context.files) ? context.files : [];
+  const evidence = Array.isArray(context.evidence) ? context.evidence : [];
+  const runtimes = (context.runtimes || []).map((item) => [item.runtime, item.version].filter(Boolean).join(" ")).filter(Boolean);
+  const frameworks = Array.isArray(context.frameworks) ? context.frameworks : [];
+  const patterns = (context.verified_patterns || []).map((item) => item.category || item.pattern_id).filter(Boolean);
+  const counts = context.evidence_counts || {};
+  const portGroups = new Map();
+  ports.forEach((item) => {
+    const group = item.component || "repository";
+    if (!portGroups.has(group)) portGroups.set(group, []);
+    const kind = item.port_type || item.evidence_type || "observed";
+    const value = item.port ?? item.value;
+    if (value !== undefined && value !== null) portGroups.get(group).push(`${kind}: ${value}`);
+  });
+  const portRows = [...portGroups.entries()].map(([group, values]) => `<div class="agent-intelligence-row"><strong>${escapeHtml(group)}</strong><span>${escapeHtml([...new Set(values)].join(" · "))}</span></div>`).join("") || `<p class="agent-intelligence-empty">No port evidence detected.</p>`;
+  const componentCards = components.map((component) => {
+    const name = component.name || component.path || "Component";
+    const componentPorts = ports.filter((item) => item.component === name || item.component === component.path);
+    const details = [component.framework, component.package_manager, ...(component.runtimes || []).map((item) => [item.runtime, item.version].filter(Boolean).join(" "))].filter(Boolean);
+    const componentEvidence = Array.isArray(component.evidence) ? component.evidence.slice(0, 4) : [];
+    return `<article class="agent-component-card"><div><span class="panel-kicker">${escapeHtml(component.kind || "component")}</span><h4>${escapeHtml(name)}</h4></div>${details.length ? `<p>${escapeHtml(details.join(" · "))}</p>` : ""}${componentPorts.length ? `<p>Ports: ${escapeHtml(componentPorts.map((item) => `${item.port_type || "observed"} ${item.port ?? item.value}`).join(" · "))}</p>` : ""}${componentEvidence.length ? `<small>Evidence: ${escapeHtml(componentEvidence.join(", "))}</small>` : ""}</article>`;
+  }).join("") || `<p class="agent-intelligence-empty">No components detected.</p>`;
+  const deployment = [
+    ["Docker", context.has_docker ? "Detected" : "Not detected", context.docker?.dockerfiles || []],
+    ["Kubernetes", context.has_kubernetes ? "Detected" : "Not detected", context.kubernetes?.files || []],
+    ["CI/CD", context.has_ci_cd ? (context.ci_cd?.platforms || []).join(", ") || "Detected" : "Not detected", context.ci_cd_files || []],
+  ].map(([label, status, filesForStatus]) => `<div class="agent-intelligence-status"><span>${label}</span><strong>${escapeHtml(status)}</strong>${filesForStatus.length ? `<small>${escapeHtml(filesForStatus.join(", "))}</small>` : ""}</div>`).join("");
+  const stack = [...new Set([...runtimes, ...frameworks, ...(context.package_managers || []), ...(context.languages || [])])];
+  return `<section class="agent-inspection-summary"><div class="agent-intelligence-heading"><div><span class="panel-kicker">Verified intelligence</span><h3>Project inspected successfully</h3><p>${escapeHtml(context.name || context.project || "Project intelligence is ready")}</p></div><button type="button" class="quiet-button" data-agent-reinspect>Re-inspect project</button></div><div class="agent-summary-grid"><div><span>Project path</span><strong>${escapeHtml(context.root_path || context.path || state.agentInputs.target)}</strong></div><div><span>Inspection run</span><strong>${escapeHtml(state.agentInspectionRunId || "Stored inspection")}</strong></div><div><span>Inspected at</span><strong>${escapeHtml(context.inspected_at || "Recorded")}</strong></div><div><span>Persistence</span><strong>PostgreSQL · verified</strong></div></div><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Architecture / components</h4><span>${components.length} detected</span></div><div class="agent-component-grid">${componentCards}</div></div><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Technology stack</h4><span>Repository evidence</span></div><div class="agent-chip-list">${stack.length ? stack.map((item) => `<span>${escapeHtml(item)}</span>`).join("") : `<span>None detected</span>`}</div></div><div class="agent-intelligence-columns"><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Database</h4><span>${(context.databases || []).length ? "Detected" : "Not detected"}</span></div><p class="agent-intelligence-value">${escapeHtml((context.databases || []).join(", ") || "Not detected")}</p></div><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Deployment intelligence</h4><span>Verified state</span></div><div class="agent-deployment-grid">${deployment}</div></div></div><div class="agent-intelligence-columns"><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Network / ports</h4><span>Evidence types preserved</span></div><div class="agent-intelligence-list">${portRows}</div></div><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Inspection quality</h4><span>${files.length} files · ${evidence.length} evidence</span></div><div class="agent-quality-grid"><div><span>Files inspected</span><strong>${files.length}</strong></div><div><span>Evidence collected</span><strong>${evidence.length}</strong></div><div><span>High confidence</span><strong>${counts.high ?? 0}</strong></div><div><span>Medium confidence</span><strong>${counts.medium ?? 0}</strong></div><div><span>Low confidence</span><strong>${counts.low ?? 0}</strong></div></div></div></div>${patterns.length ? `<div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Verified engineering patterns</h4><span>Deterministic</span></div><div class="agent-chip-list">${patterns.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div></div>` : ""}</section>`;
+}
+
+function agentIntelligenceWorkspace() {
+  const context = state.agentContext;
+  if (!context) return "";
+  const components = Array.isArray(context.components) ? context.components : [];
+  const ports = Array.isArray(context.ports) ? context.ports : [];
+  const files = Array.isArray(context.files) ? context.files : [];
+  const evidence = Array.isArray(context.evidence) ? context.evidence : [];
+  const counts = context.evidence_counts || {};
+  const runtimes = (context.runtimes || []).map((item) => [item.runtime, item.version].filter(Boolean).join(" ")).filter(Boolean);
+  const patterns = (context.verified_patterns || []).map((item) => item.category || item.pattern_id).filter(Boolean);
+  const portText = (name) => ports.filter((item) => item.component === name).map((item) => `${item.port_type || "observed"} ${item.port ?? item.value}`).join(" · ");
+  const architecture = components.map((component) => {
+    const name = component.name || component.path || "Component";
+    const facts = [component.framework, ...(component.runtimes || []).map((item) => [item.runtime, item.version].filter(Boolean).join(" ")), component.package_manager].filter(Boolean);
+    const componentPorts = portText(name);
+    const sourceFiles = Array.isArray(component.evidence) ? component.evidence.slice(0, 3) : [];
+    return `<div class="agent-architecture-row"><div><span class="panel-kicker">${escapeHtml(component.role || component.kind || "component")}</span><h4>${escapeHtml(name)}</h4></div><div class="agent-architecture-facts"><strong>${escapeHtml(facts.join(" · ") || "Evidence recorded")}</strong>${componentPorts ? `<span>Ports: ${escapeHtml(componentPorts)}</span>` : ""}${sourceFiles.length ? `<small>Sources: ${escapeHtml(sourceFiles.join(", "))}</small>` : ""}</div></div>`;
+  });
+  for (const database of context.databases || []) {
+    const databasePorts = portText(database);
+    architecture.push(`<div class="agent-architecture-row"><div><span class="panel-kicker">data service</span><h4>${escapeHtml(database)}</h4></div><div class="agent-architecture-facts"><strong>Detected database</strong>${databasePorts ? `<span>Ports: ${escapeHtml(databasePorts)}</span>` : ""}</div></div>`);
+  }
+  const technologyGroups = [
+    ["Languages", context.languages || []],
+    ["Runtimes", runtimes],
+    ["Frameworks", context.frameworks || []],
+    ["Platform", [...(context.package_managers || []), ...(context.kubernetes?.files?.length ? ["Kubernetes"] : []), ...(context.ci_cd?.platforms || [])]],
+  ].filter(([, values]) => values.length).map(([label, values]) => `<div class="agent-technology-group"><span>${label}</span><div>${[...new Set(values)].map((value) => `<em>${escapeHtml(value)}</em>`).join("")}</div></div>`).join("") || `<p class="agent-intelligence-empty">No additional technology evidence detected.</p>`;
+  const deployment = [
+    ["Docker", context.has_docker ? "Detected" : "Not detected", context.docker?.dockerfiles || []],
+    ["Kubernetes", context.has_kubernetes ? "Detected" : "Not detected", context.kubernetes?.files || []],
+    ["CI/CD", context.has_ci_cd ? (context.ci_cd?.platforms || []).join(", ") || "Detected" : "Not detected", context.ci_cd_files || []],
+  ].map(([label, status, filesForStatus]) => `<div><span>${label}</span><strong>${escapeHtml(status)}</strong>${filesForStatus.length ? `<small>${escapeHtml(filesForStatus.join(", "))}</small>` : ""}</div>`).join("");
+  const groupedPorts = new Map();
+  ports.forEach((item) => {
+    const key = item.component || "repository";
+    if (!groupedPorts.has(key)) groupedPorts.set(key, []);
+    const value = item.port ?? item.value;
+    if (value !== undefined && value !== null) groupedPorts.get(key).push(`${item.port_type || item.evidence_type || "observed"}: ${value}`);
+  });
+  const portRows = [...groupedPorts.entries()].map(([name, values]) => `<span><strong>${escapeHtml(name)}</strong> ${escapeHtml([...new Set(values)].join(" · "))}</span>`).join("") || `<span>No port evidence detected.</span>`;
+  const sourceFiles = [...new Set(evidence.map((item) => item.source_file).filter(Boolean))].slice(0, 16);
+  return `<section class="agent-intelligence-workspace"><header class="agent-intelligence-hero"><div><span class="panel-kicker">Project Intelligence</span><h3>${escapeHtml(context.name || context.project || "Project")}</h3><p>${escapeHtml(context.root_path || context.path || state.agentInputs.target)}</p></div><div class="agent-intelligence-hero-actions"><span class="agent-inspection-status">● Inspected successfully</span><button type="button" class="quiet-button" data-agent-reinspect>Re-inspect</button></div><div class="agent-intelligence-meta"><span>Inspected ${escapeHtml(context.inspected_at || "time recorded")}</span><span>PostgreSQL snapshot</span><details><summary>Inspection details</summary><p>Run ${escapeHtml(state.agentInspectionRunId || context.inspection_run_id || "stored snapshot")}</p><p>Verified patterns: ${escapeHtml(patterns.join(", ") || "none detected")}</p><p>Evidence sources: ${escapeHtml(sourceFiles.join(", ") || "recorded in snapshot")}</p></details></div></header><section class="agent-intelligence-block agent-architecture-block"><div class="agent-block-heading"><h4>Project architecture</h4><span>${architecture.length} verified areas</span></div><div class="agent-architecture-list">${architecture.join("") || `<p class="agent-intelligence-empty">No components detected.</p>`}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Technology stack</h4><span>Persisted repository evidence</span></div><div class="agent-technology-groups">${technologyGroups}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Deployment status</h4><span>Detected configuration</span></div><div class="agent-deployment-strip">${deployment}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Network</h4><span>Port evidence types preserved</span></div><div class="agent-port-lines">${portRows}</div></section><footer class="agent-intelligence-quality"><span><strong>${files.length}</strong> files inspected</span><span><strong>${evidence.length}</strong> evidence signals</span><span><strong>${counts.high ?? 0}</strong> high confidence</span><span><strong>${counts.medium ?? 0}</strong> medium confidence</span><span><strong>${counts.low ?? 0}</strong> low confidence</span></footer></section>`;
+}
+
+function dockerizeArtifactPath(component, context) {
+  const stored = (context?.docker?.dockerfiles || []).map((item) => String(item).replace(/^\.\//, ""));
+  const componentPath = String(component.path || ".").replace(/^\.\//, "").replace(/\/$/, "");
+  const name = String(component.name || "").toLowerCase();
+  const candidates = [
+    componentPath && componentPath !== "." ? `${componentPath}/Dockerfile` : "Dockerfile",
+    `Dockerfile.${name}`,
+    `${name}.dockerfile`,
+  ];
+  return stored.find((item) => candidates.includes(item)) || "";
+}
+
+function ensureDockerizePlan() {
+  const context = state.agentContext;
+  if (!context) return null;
+  const components = Array.isArray(context.components) ? context.components : [];
+  const names = components.map((item) => String(item.name));
+  const currentNames = Object.keys(state.agentDockerPlan?.dockerfiles || {});
+  if (state.agentDockerPlan && names.length === currentNames.length && names.every((name) => currentNames.includes(name))) {
+    return state.agentDockerPlan;
+  }
+  state.agentDockerPlan = {
+    dockerfiles: Object.fromEntries(components.map((component) => [
+      String(component.name), dockerizeArtifactPath(component, context) ? "keep" : "generate",
+    ])),
+    compose: (context.docker?.compose_files || []).length ? "keep" : "generate",
+  };
+  return state.agentDockerPlan;
+}
+
+function dockerizePlanningWorkspace() {
+  const context = state.agentContext;
+  const plan = ensureDockerizePlan();
+  if (!context || !plan) return `<section class="agent-question-block"><h4>Dockerize</h4><p>Load the stored Project Intelligence before planning Docker artifacts.</p></section>`;
+  const components = Array.isArray(context.components) ? context.components : [];
+  const rows = components.map((component) => {
+    const name = String(component.name || component.path || "Component");
+    const existing = dockerizeArtifactPath(component, context);
+    const facts = [component.framework, ...(component.runtimes || []).map((item) => [item.runtime, item.version].filter(Boolean).join(" ")), component.package_manager].filter(Boolean);
+    const action = plan.dockerfiles[name] || "skip";
+    const options = existing
+      ? `<option value="keep" ${action === "keep" ? "selected" : ""}>Keep existing</option><option value="upgrade" ${action === "upgrade" ? "selected" : ""}>Upgrade</option>`
+      : `<option value="generate" ${action === "generate" ? "selected" : ""}>Generate</option><option value="skip" ${action === "skip" ? "selected" : ""}>Skip</option>`;
+    return `<div class="agent-docker-plan-row"><div><strong>${escapeHtml(name)} Dockerfile</strong><span>${escapeHtml(facts.join(" · ") || "Verified component evidence")}</span></div><div><em class="agent-docker-plan-status ${existing ? "detected" : "missing"}">${existing ? `Detected · ${escapeHtml(existing)}` : "Missing"}</em><select data-docker-plan-component="${escapeHtml(name)}">${options}</select></div></div>`;
+  }).join("");
+  const composeFiles = context.docker?.compose_files || [];
+  const composeAction = plan.compose || "skip";
+  const composeOptions = composeFiles.length
+    ? `<option value="keep" ${composeAction === "keep" ? "selected" : ""}>Keep existing</option><option value="upgrade" ${composeAction === "upgrade" ? "selected" : ""}>Upgrade</option>`
+    : `<option value="generate" ${composeAction === "generate" ? "selected" : ""}>Generate</option><option value="skip" ${composeAction === "skip" ? "selected" : ""}>Skip</option>`;
+  return `<section class="agent-question-block agent-docker-planner"><h4>Dockerize from stored Project Intelligence</h4><p>Using the completed inspection snapshot. Choose only the artifacts to generate, upgrade, or keep.</p><div class="agent-docker-plan-list">${rows || `<p class="agent-intelligence-empty">No independently runnable components were verified.</p>`}<div class="agent-docker-plan-row"><div><strong>Docker Compose</strong><span>${composeFiles.length ? `Detected · ${escapeHtml(composeFiles.join(", "))}` : "No Compose file detected"}</span></div><div><em class="agent-docker-plan-status ${composeFiles.length ? "detected" : "missing"}">${composeFiles.length ? "Detected" : "Missing"}</em><select data-docker-plan-compose>${composeOptions}</select></div></div></div><p class="agent-guidance">Upgrade is an explicit, validated change. Existing artifacts are never overwritten by this planning step.</p></section>`;
+}
+
 function agentTerminalView() {
-  const operation = state.agentOperations.find((item) => item.id === state.selectedAgentOperation) || state.agentOperations[0];
+  if (!state.agentProjectValidated) return agentProjectChooser();
+  if (!state.agentCategory) return agentCategoryChooser();
+  const categoryOperations = state.agentCategory === "inspect"
+    ? (state.agentInspectionReady ? ["dockerize", "kubernetes", "cicd"] : ["inspect", "dockerize", "kubernetes", "cicd"])
+    : ["plan", "blueprint"];
+  const operation = state.agentOperations.find((item) => item.id === state.selectedAgentOperation && categoryOperations.includes(item.id))
+    || state.agentOperations.find((item) => categoryOperations.includes(item.id))
+    || state.agentOperations[0];
   const requires = operation?.requires || [];
   const field = (key, label, placeholder) => `<label class="agent-field"><span>${label}</span><input data-agent-input="${key}" value="${escapeHtml(state.agentInputs[key])}" placeholder="${placeholder}" autocomplete="off" /></label>`;
   const fields = [
-    requires.includes("target") ? field("target", "Project path", "/Users/sohal/Projects/my-app") : "",
+    requires.includes("target") && !state.agentProjectValidated ? field("target", "Project path", "/Users/sohal/Projects/my-app") : "",
     requires.includes("goal") ? field("goal", "Planning goal", "Build a local-first service") : "",
     requires.includes("plan_dir") ? field("plan_dir", "Plan directory", "./project-plan") : "",
     requires.includes("spec_dir") ? field("spec_dir", "Specification directory", "./specifications") : "",
     ["plan", "blueprint"].includes(operation?.id) ? field("output_dir", "Output directory", operation.id === "plan" ? "./project-plan" : "./blueprints") : "",
   ].join("");
-  const cards = state.agentOperations.map((item) => `<button type="button" class="agent-operation-card ${item.id === state.selectedAgentOperation ? "active" : ""}" data-agent-operation="${item.id}"><strong>${item.label}</strong><span>${item.description}</span></button>`).join("");
+  const cards = state.agentOperations.filter((item) => categoryOperations.includes(item.id)).map((item) => {
+    const locked = state.agentCategory === "inspect" && item.id !== "inspect" && !state.agentContext;
+    const starting = item.id === "inspect" && state.agentRunStarting;
+    return `<button type="button" class="agent-operation-card ${item.id === operation?.id ? "active" : ""}" data-agent-operation="${item.id}" ${(locked || starting) ? "disabled" : ""}><strong>${item.label}</strong><span>${locked ? "Run Inspect first to load verified intelligence." : item.description}</span></button>`;
+  }).join("");
   const components = state.agentContext?.components || [];
-  const componentChoices = components.length ? components.map((component) => `<label class="agent-choice"><input type="checkbox" data-agent-choice="component" value="${escapeHtml(component.name)}" ${state.agentChoices.components.includes(component.name) ? "checked" : ""} /><span><strong>${escapeHtml(component.name)}</strong><small>${escapeHtml(component.framework || component.stack?.primary || "Detected component")} · ${escapeHtml(component.package_manager || "package manager")}</small></span></label>`).join("") : `<p class="agent-guidance">Run Inspect first to discover independently buildable components from repository manifests.</p>`;
-  const composeDetected = Boolean(state.agentContext?.has_docker_compose);
-  const composeChoices = composeDetected ? `<div class="agent-inline-choices"><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="keep" ${state.agentChoices.composeAction === "keep" ? "checked" : ""} /> Keep existing unchanged</label><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="analyze" ${state.agentChoices.composeAction === "analyze" ? "checked" : ""} /> Analyze existing</label><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="improve" ${state.agentChoices.composeAction === "improve" ? "checked" : ""} /> Improve existing</label><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="generate" ${state.agentChoices.composeAction === "generate" ? "checked" : ""} /> Generate new</label></div><p class="agent-guidance">Existing Docker Compose configuration detected.</p>` : `<p class="agent-guidance">Docker Compose not detected.</p><div class="agent-inline-choices"><label><input type="radio" name="compose-action" data-agent-choice="composeAction" value="generate" checked /> Generate new</label></div>`;
-  const guidedQuestions = operation?.id === "dockerize" ? `<section class="agent-question-block"><h4>Dockerization target</h4><p>Choose components from the shared inspection context.</p><div class="agent-choice-grid">${componentChoices}</div><h4>Docker Compose</h4>${composeChoices}</section>` : operation?.id === "kubernetes" ? `<section class="agent-question-block"><h4>Kubernetes targets</h4><p>Use the same inspected components for manifest generation.</p><div class="agent-choice-grid">${componentChoices}</div><h4>Manifest organization</h4><div class="agent-inline-choices"><label><input type="radio" name="organization" data-agent-choice="organization" value="automatic" ${state.agentChoices.organization === "automatic" ? "checked" : ""} /> Automatic / recommended</label><label><input type="radio" name="organization" data-agent-choice="organization" value="single" ${state.agentChoices.organization === "single" ? "checked" : ""} /> Single manifest</label><label><input type="radio" name="organization" data-agent-choice="organization" value="separate" ${state.agentChoices.organization === "separate" ? "checked" : ""} /> Separate resource files</label></div></section>` : operation?.id === "cicd" ? `<section class="agent-question-block"><h4>Detected CI/CD</h4><p>${state.agentContext?.ci_cd_files?.length ? `✓ ${escapeHtml(state.agentContext.ci_cd_files.join(", "))}` : "No existing CI/CD configuration detected."}</p><div class="agent-inline-choices"><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="analyze" ${state.agentChoices.cicdAction === "analyze" ? "checked" : ""} /> Analyze existing</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="improve" ${state.agentChoices.cicdAction === "improve" ? "checked" : ""} /> Improve existing</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="generate" ${state.agentChoices.cicdAction === "generate" ? "checked" : ""} /> Generate new</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="keep" ${state.agentChoices.cicdAction === "keep" ? "checked" : ""} /> Keep unchanged</label></div><h4>CI/CD platform</h4><div class="agent-inline-choices"><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="jenkins" ${state.agentChoices.cicdPlatform === "jenkins" ? "checked" : ""} /> Jenkins</label><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="github-actions" ${state.agentChoices.cicdPlatform === "github-actions" ? "checked" : ""} /> GitHub Actions</label><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="both" ${state.agentChoices.cicdPlatform === "both" ? "checked" : ""} /> Both</label></div></section>` : "";
+  const guidedQuestions = operation?.id === "dockerize" ? dockerizePlanningWorkspace() : operation?.id === "kubernetes" ? `<section class="agent-question-block agent-evidence-summary"><h4>Kubernetes from verified intelligence</h4><p>Detected components, runtimes, ports, and deployment evidence will be used automatically.</p><div class="agent-auto-choice">Manifest organization: <strong>automatic</strong></div></section>` : operation?.id === "cicd" ? `<section class="agent-question-block"><h4>Detected CI/CD</h4><p>${state.agentContext?.ci_cd_files?.length ? `✓ ${escapeHtml(state.agentContext.ci_cd_files.join(", "))}` : "No existing CI/CD configuration detected."}</p><div class="agent-inline-choices"><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="analyze" ${state.agentChoices.cicdAction === "analyze" ? "checked" : ""} /> Analyze existing</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="improve" ${state.agentChoices.cicdAction === "improve" ? "checked" : ""} /> Improve existing</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="generate" ${state.agentChoices.cicdAction === "generate" ? "checked" : ""} /> Generate new</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="keep" ${state.agentChoices.cicdAction === "keep" ? "checked" : ""} /> Keep unchanged</label></div><h4>CI/CD platform</h4><div class="agent-inline-choices"><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="jenkins" ${state.agentChoices.cicdPlatform === "jenkins" ? "checked" : ""} /> Jenkins</label><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="github-actions" ${state.agentChoices.cicdPlatform === "github-actions" ? "checked" : ""} /> GitHub Actions</label><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="both" ${state.agentChoices.cicdPlatform === "both" ? "checked" : ""} /> Both</label></div></section>` : "";
   const output = state.agentOutput || "Select an operation, provide its required inputs, and run the existing Sohail-Agent capability.";
   const consoleBusy = ["Running", "Starting"].includes(state.agentStatus);
-  const nextActions = state.selectedAgentOperation === "inspect" && state.agentStatus === "Completed" ? `<div class="agent-next-actions"><strong>Inspection complete.</strong><span>Choose the next engineering operation from the controls above or continue here:</span><button type="button" data-agent-operation="dockerize">Dockerize</button><button type="button" data-agent-operation="kubernetes">Kubernetes</button><button type="button" data-agent-operation="cicd">CI/CD</button></div>` : "";
-  return `<section class="agent-shell"><div class="agent-shell-header"><div><span class="panel-kicker">Existing engineering CLI</span><h2>Sohail-Agent</h2><p class="agent-prompt">What would you like to do?</p></div><span class="agent-status" id="agent-status">${escapeHtml(state.agentStatus)}</span></div><div class="agent-operation-grid">${cards}</div><form class="agent-form" id="agent-form"><div class="agent-workspace-heading"><div><span class="panel-kicker">Operation workspace</span><h3>${escapeHtml(operation?.label || "Choose an operation")}</h3></div><span>Guided workflow</span></div><div class="agent-fields">${fields}</div>${guidedQuestions}<div class="agent-options"><label><input type="checkbox" id="agent-dry-run" ${state.agentDryRun ? "checked" : ""} /> Dry run</label><label><input type="checkbox" id="agent-overwrite" ${state.agentOverwrite ? "checked" : ""} /> Allow overwrite</label><button class="primary-button" id="agent-run-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run ${escapeHtml(operation?.label || "operation")} →</button></div></form>${nextActions}<section class="agent-live-terminal"><div class="agent-live-terminal-header"><div><span class="panel-kicker">Live execution</span><h3>Sohail-Agent Terminal</h3></div><div class="agent-live-terminal-meta"><span id="agent-command">${escapeHtml(state.agentCommand || "Waiting for a run")}</span><span id="agent-live-status">${escapeHtml(state.agentStatus)}</span></div></div><pre class="agent-output" id="agent-output">${escapeHtml(output)}</pre><form class="agent-console-form" id="agent-console-form"><span class="agent-console-prompt">$</span><input id="agent-console-input" value="${escapeHtml(state.agentConsoleInput)}" placeholder="sohail-agent --help" autocomplete="off" ${consoleBusy ? "disabled" : ""} /><button class="quiet-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run CLI</button></form><p class="agent-console-note">Only the existing <code>sohail-agent</code> CLI is accepted here; use Raw PTY for shell commands.</p></section></section>`;
+  const clarification = state.agentClarification;
+  const clarificationControls = clarification?.expected_answer_type === "text"
+    ? `<input class="agent-clarification-input" id="agent-clarification-answer" type="text" maxlength="512" autocomplete="off" placeholder="Enter the exact value" /><button class="primary-button" type="submit">Submit answer</button>`
+    : (clarification ? (clarification.allowed_answers || []).map((answer) => `<button class="quiet-button" type="button" data-agent-clarification-answer="${escapeHtml(answer)}">${escapeHtml(answer)}</button>`).join("") : "");
+  const clarificationPanel = clarification ? `<section class="agent-clarification" id="agent-clarification"><span class="panel-kicker">Needs clarification</span><h3>${escapeHtml(clarification.requirement)}</h3><p><strong>Component:</strong> ${escapeHtml(clarification.component || "Affected scope")}</p><p>${escapeHtml(clarification.reason)}</p><p class="agent-clarification-question">${escapeHtml(clarification.question)}</p><form id="agent-clarification-form" class="agent-clarification-form">${clarificationControls}</form></section>` : "";
+  const nextActions = state.agentInspectionReady && state.selectedAgentOperation === "inspect" && state.agentStatus === "Completed" ? `<div class="agent-next-actions"><strong>Project inspected successfully.</strong><span>Choose the next engineering operation:</span><button type="button" data-agent-operation="dockerize">Dockerize</button><button type="button" data-agent-operation="kubernetes">Kubernetes</button><button type="button" data-agent-operation="cicd">CI/CD</button></div>` : "";
+  const inspectionRunMode = state.agentCategory === "inspect" && state.selectedAgentOperation === "inspect" && state.agentInspectionActive;
+  const operationWorkspace = inspectionRunMode ? "" : `<form class="agent-form" id="agent-form"><div class="agent-workspace-heading"><div><span class="panel-kicker">Operation workspace</span><h3>${escapeHtml(operation?.label || "Choose an operation")}</h3></div><span>Guided workflow</span></div><div class="agent-fields">${fields}</div>${guidedQuestions}<div class="agent-options"><label><input type="checkbox" id="agent-dry-run" ${state.agentDryRun ? "checked" : ""} /> Dry run</label>${operation?.id === "dockerize" ? "" : `<label><input type="checkbox" id="agent-overwrite" ${state.agentOverwrite ? "checked" : ""} /> Allow overwrite</label>`}<button class="primary-button" id="agent-run-button" type="submit" ${consoleBusy ? "disabled" : ""}>${operation?.id === "dockerize" ? "Continue" : `Run ${escapeHtml(operation?.label || "operation")}`} →</button></div></form>`;
+  const terminalOutput = state.agentOutput || (inspectionRunMode ? "Waiting for backend inspection events…" : "Select an operation, provide its required inputs, and run the existing Sohail-Agent capability.");
+  return `<section class="agent-shell"><div class="agent-project-context"><span class="panel-kicker">Selected project</span><strong>${escapeHtml(state.agentInputs.target)}</strong><button type="button" class="quiet-button" data-agent-change-project>Change folder</button></div>${agentIntelligenceWorkspace()}<div class="agent-shell-header"><div><span class="panel-kicker">${state.agentCategory === "inspect" ? "Inspect" : "Build"} workflow</span><h2>Sohail-Agent</h2><p class="agent-prompt">${inspectionRunMode ? "Complete inspection is running in this Terminal." : "Use stored project intelligence to continue."}</p></div><span class="agent-status" id="agent-status">${escapeHtml(state.agentStatus)}</span></div><div class="agent-operation-grid">${cards}</div>${operationWorkspace}${clarificationPanel}${nextActions}<section class="agent-live-terminal"><div class="agent-live-terminal-header"><div><span class="panel-kicker">Live execution</span><h3>Sohail-Agent Terminal</h3></div><div class="agent-live-terminal-meta"><span id="agent-command">${escapeHtml(state.agentCommand || "Waiting for a run")}</span><span id="agent-live-status">${escapeHtml(state.agentStatus)}</span></div></div><pre class="agent-output" id="agent-output">${escapeHtml(terminalOutput)}</pre><form class="agent-console-form" id="agent-console-form"><span class="agent-console-prompt">$</span><input id="agent-console-input" value="${escapeHtml(state.agentConsoleInput)}" placeholder="sohail-agent --help" autocomplete="off" ${consoleBusy ? "disabled" : ""} /><button class="quiet-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run CLI</button></form><p class="agent-console-note">Only the existing <code>sohail-agent</code> CLI is accepted here; use Raw PTY for shell commands.</p></section></section>`;
 }
 
 function sessionRows(sessions) {
@@ -888,7 +1059,7 @@ function render() {
   bindView();
   if (route === "run" && state.runId) connectRun(state.runId);
   if (route === "home" || (route === "terminal" && state.terminalEngine === "pty")) connectTerminal();
-  if (route === "terminal" && state.terminalEngine === "agent" && state.agentRunId) connectAgentRun(state.agentRunId);
+  if (route === "terminal" && state.terminalEngine === "agent" && state.agentRunId && !state.agentRunTerminal) connectAgentRun(state.agentRunId);
   if (state.commandMode === "chat") connectChat();
 
   // Initialize or re-attach the 3D robot if its container exists in the current view
@@ -918,16 +1089,57 @@ function bindView() {
     state.terminalEngine = item.dataset.terminalEngine;
     if (state.terminalEngine === "pty") {
       state.agentRunId = null;
+      state.agentRunTerminal = true;
+      state.agentRunStarting = false;
       if (state.agentRunSocket) state.agentRunSocket.close();
       state.agentRunSocket = null;
+      state.agentRunSocketRunId = null;
     } else if (state.terminalSocket) {
       state.terminalSocket.close();
       state.terminalSocket = null;
     }
     render();
   }));
+  document.querySelectorAll("[data-agent-category]").forEach((item) => item.addEventListener("click", () => {
+    state.agentCategory = item.dataset.agentCategory;
+    state.selectedAgentOperation = state.agentCategory === "inspect" ? "inspect" : "plan";
+    if (state.agentContext?.components?.length) {
+      state.agentChoices.components = state.agentContext.components.map((component) => component.name);
+    }
+    if (state.agentCategory === "inspect") {
+      void startAgentOperation("inspect");
+      return;
+    }
+    render();
+  }));
+  document.querySelectorAll("[data-agent-change-project]").forEach((item) => item.addEventListener("click", () => {
+    state.agentProjectValidated = false;
+    state.agentCategory = null;
+    state.agentInspectionActive = false;
+    state.agentInspectionReady = false;
+    state.agentContext = null;
+    state.agentDockerPlan = null;
+    state.agentInspectionRunId = "";
+    state.agentOutput = "";
+    state.agentRunId = null;
+    state.agentRunTerminal = true;
+    state.agentRunStarting = false;
+    if (state.agentRunSocket) state.agentRunSocket.close();
+    state.agentRunSocket = null;
+    state.agentRunSocketRunId = null;
+    state.selectedAgentOperation = "inspect";
+    render();
+  }));
+  document.querySelectorAll("[data-agent-reinspect]").forEach((item) => item.addEventListener("click", () => {
+    void startAgentOperation("inspect");
+  }));
   document.querySelectorAll("[data-agent-operation]").forEach((item) => item.addEventListener("click", () => {
     state.selectedAgentOperation = item.dataset.agentOperation;
+    if (state.selectedAgentOperation === "inspect" && state.agentCategory === "inspect") {
+      void startAgentOperation("inspect");
+      return;
+    }
+    state.agentInspectionActive = false;
     if (state.agentChoices.components.length === 0 && state.agentContext?.components?.length) state.agentChoices.components = state.agentContext.components.map((component) => component.name);
     render();
   }));
@@ -936,10 +1148,16 @@ function bindView() {
   }));
   document.querySelectorAll("[data-agent-choice]").forEach((item) => item.addEventListener("change", () => {
     const choice = item.dataset.agentChoice;
-    if (choice === "component") {
-      state.agentChoices.components = Array.from(document.querySelectorAll('[data-agent-choice="component"]:checked')).map((input) => input.value);
-    } else if (choice === "compose") state.agentChoices.compose = item.value === "true";
+    if (choice === "compose") state.agentChoices.compose = item.value === "true";
     else state.agentChoices[choice] = item.value;
+  }));
+  document.querySelectorAll("[data-docker-plan-component]").forEach((item) => item.addEventListener("change", () => {
+    ensureDockerizePlan();
+    state.agentDockerPlan.dockerfiles[item.dataset.dockerPlanComponent] = item.value;
+  }));
+  document.querySelectorAll("[data-docker-plan-compose]").forEach((item) => item.addEventListener("change", () => {
+    ensureDockerizePlan();
+    state.agentDockerPlan.compose = item.value;
   }));
   document.querySelectorAll("[data-command-example]").forEach((item) => item.addEventListener("click", () => {
     const input = document.getElementById("prompt-input");
@@ -982,23 +1200,72 @@ function bindView() {
   });
   const agentForm = document.getElementById("agent-form");
   if (agentForm) agentForm.addEventListener("submit", submitAgentRun);
-  if (state.selectedAgentOperation === "dockerize") {
-    const agentOptions = document.querySelector("#agent-form .agent-options");
-    if (agentOptions && !document.getElementById("agent-compose-choice")) {
-      const composeChoice = document.createElement("div");
-      composeChoice.id = "agent-compose-choice";
-      composeChoice.className = "agent-compose-choice agent-inline-choices";
-      composeChoice.innerHTML = `<span>Docker Compose:</span><label><input type="radio" name="compose" value="true" ${state.agentChoices.compose ? "checked" : ""} /> Yes</label><label><input type="radio" name="compose" value="false" ${!state.agentChoices.compose ? "checked" : ""} /> No</label>`;
-      agentOptions.parentNode.insertBefore(composeChoice, agentOptions);
-      composeChoice.querySelectorAll("input").forEach((input) => input.addEventListener("change", () => { state.agentChoices.compose = input.value === "true"; }));
-    }
-  }
+  const agentProjectForm = document.getElementById("agent-project-form");
+  if (agentProjectForm) agentProjectForm.addEventListener("submit", selectAgentProject);
+  const clarificationForm = document.getElementById("agent-clarification-form");
+  if (clarificationForm) clarificationForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitAgentClarification(document.getElementById("agent-clarification-answer")?.value || "");
+  });
+  document.querySelectorAll("[data-agent-clarification-answer]").forEach((button) => button.addEventListener("click", () => {
+    submitAgentClarification(button.dataset.agentClarificationAnswer || "");
+  }));
   const agentConsoleForm = document.getElementById("agent-console-form");
   if (agentConsoleForm) agentConsoleForm.addEventListener("submit", submitAgentConsole);
 }
 
-async function submitAgentRun(event) {
+async function selectAgentProject(event) {
   event.preventDefault();
+  const input = document.getElementById("agent-project-input");
+  const target = input?.value.trim() || "";
+  if (!target) return;
+  state.agentOutput = "";
+  state.agentStatus = "Validating project folder";
+  try {
+    const result = await api(`/api/agent/project?target=${encodeURIComponent(target)}`);
+    state.agentInputs.target = result.target;
+    state.agentProjectValidated = true;
+    state.agentCategory = null;
+    state.agentInspectionActive = false;
+    state.agentInspectionReady = false;
+    state.agentContext = null;
+    state.agentDockerPlan = null;
+    state.agentInspectionRunId = "";
+    state.agentRunId = null;
+    state.agentRunTerminal = true;
+    state.agentRunStarting = false;
+    if (state.agentRunSocket) state.agentRunSocket.close();
+    state.agentRunSocket = null;
+    state.agentRunSocketRunId = null;
+    state.agentStatus = "Ready";
+    state.selectedAgentOperation = "inspect";
+    render();
+  } catch (error) {
+    state.agentStatus = "Idle";
+    state.agentOutput = error.message;
+    render();
+  }
+}
+
+async function loadStoredIntelligence() {
+  const target = state.agentInputs.target;
+  if (!target) throw new Error("Select a project folder first");
+  const intelligence = await api(`/api/agent/intelligence?target=${encodeURIComponent(target)}`);
+  state.agentContext = intelligence;
+  state.agentDockerPlan = null;
+  state.agentInspectionRunId = intelligence.inspection_run_id || state.agentInspectionRunId;
+  state.agentInspectionReady = true;
+  if (intelligence.components?.length) {
+    state.agentChoices.components = intelligence.components.map((component) => component.name);
+  }
+  return intelligence;
+}
+
+async function startAgentOperation(operation) {
+  if (state.agentRunStarting) return;
+  state.selectedAgentOperation = operation;
+  state.agentInspectionActive = operation === "inspect";
+  state.agentRunStarting = true;
   const liveInputs = { ...state.agentInputs };
   document.querySelectorAll("[data-agent-input]").forEach((input) => {
     liveInputs[input.dataset.agentInput] = input.value;
@@ -1012,19 +1279,56 @@ async function submitAgentRun(event) {
   state.agentOutput = "";
   state.agentCommand = "";
   state.agentRunId = null;
+  state.agentRunTerminal = false;
+  state.agentClarification = null;
+  if (operation === "dockerize") ensureDockerizePlan();
+  if (operation === "inspect") {
+    state.agentInspectionReady = false;
+    state.agentContext = null;
+    state.agentInspectionRunId = "";
+  }
   if (state.agentRunSocket) state.agentRunSocket.close();
+  state.agentRunSocket = null;
+  state.agentRunSocketRunId = null;
+  render();
   try {
-    if (state.selectedAgentOperation === "inspect" && liveInputs.target) {
-      try { state.agentContext = await api(`/api/agent/context?target=${encodeURIComponent(liveInputs.target)}`); } catch (contextError) { state.agentContext = null; }
+    if (operation !== "inspect" && ["dockerize", "kubernetes", "cicd"].includes(operation) && (!state.agentInspectionReady || !state.agentContext || !state.agentInspectionRunId)) {
+      await loadStoredIntelligence();
     }
-    const result = await api("/api/agent/runs", { method: "POST", body: JSON.stringify({ operation: state.selectedAgentOperation, target: liveInputs.target, goal: liveInputs.goal, plan_dir: liveInputs.plan_dir, spec_dir: liveInputs.spec_dir, output_dir: liveInputs.output_dir, dry_run: state.agentDryRun, overwrite: state.agentOverwrite, components: state.agentChoices.components, compose: state.agentChoices.compose, compose_action: state.agentChoices.composeAction, organization: state.agentChoices.organization, cicd_action: state.agentChoices.cicdAction, cicd_platform: state.agentChoices.cicdPlatform }) });
+    const dockerPlan = operation === "dockerize" ? ensureDockerizePlan() : null;
+    const operationComponents = operation === "dockerize" && dockerPlan
+      ? Object.keys(dockerPlan.dockerfiles)
+      : state.agentChoices.components;
+    const result = await api("/api/agent/runs", { method: "POST", body: JSON.stringify({ operation, target: liveInputs.target || state.agentInputs.target, goal: liveInputs.goal, plan_dir: liveInputs.plan_dir, spec_dir: liveInputs.spec_dir, output_dir: liveInputs.output_dir, dry_run: state.agentDryRun, overwrite: state.agentOverwrite, components: operationComponents, compose: state.agentChoices.compose, compose_action: state.agentChoices.composeAction, organization: state.agentChoices.organization, cicd_action: state.agentChoices.cicdAction, cicd_platform: state.agentChoices.cicdPlatform, inspection_run_id: operation === "inspect" ? "" : state.agentInspectionRunId, docker_plan: dockerPlan || {} }) });
     state.agentRunId = result.run_id;
+    state.agentRunStarting = false;
     state.agentStatus = "Running";
     render();
   } catch (error) {
+    state.agentRunStarting = false;
     state.agentStatus = "Error";
     state.agentOutput = error.message;
     render();
+  }
+}
+
+async function submitAgentRun(event) {
+  event.preventDefault();
+  await startAgentOperation(state.selectedAgentOperation);
+}
+
+async function submitAgentClarification(answer) {
+  if (!state.agentRunId || !state.agentClarification || !String(answer).trim()) return;
+  try {
+    await api(`/api/agent/runs/${encodeURIComponent(state.agentRunId)}/clarification`, {
+      method: "POST",
+      body: JSON.stringify({ request_id: state.agentClarification.request_id, answer: String(answer).trim() }),
+    });
+    state.agentStatus = "Validating answer";
+    syncAgentView();
+  } catch (error) {
+    state.agentOutput += `\n${error.message}\n`;
+    syncAgentView();
   }
 }
 
@@ -1038,13 +1342,17 @@ async function submitAgentConsole(event) {
   state.agentOutput = "";
   state.agentCommand = `$ ${command}`;
   state.agentRunId = null;
+  state.agentRunTerminal = false;
+  state.agentRunStarting = true;
   if (state.agentRunSocket) state.agentRunSocket.close();
   try {
     const result = await api("/api/agent/console", { method: "POST", body: JSON.stringify({ command }) });
     state.agentRunId = result.run_id;
+    state.agentRunStarting = false;
     state.agentStatus = "Running";
     render();
   } catch (error) {
+    state.agentRunStarting = false;
     state.agentStatus = "Error";
     state.agentOutput = error.message;
     render();
@@ -1052,25 +1360,77 @@ async function submitAgentConsole(event) {
 }
 
 function connectAgentRun(runId) {
+  if (state.agentRunTerminal || state.agentRunStarting && !state.agentRunId) return;
   if (state.agentRunSocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.agentRunSocket.readyState)) return;
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws/agent-runs/${runId}`);
   state.agentRunSocket = socket;
+  state.agentRunSocketRunId = runId;
   socket.onmessage = (event) => handleAgentRunEvent(JSON.parse(event.data));
-  socket.onclose = () => { state.agentRunSocket = null; if (state.agentStatus === "Running") state.agentStatus = "Exited"; syncAgentView(); };
-  socket.onerror = () => { state.agentStatus = "Error"; syncAgentView(); };
+  socket.onclose = () => {
+    if (state.agentRunSocket === socket) {
+      state.agentRunSocket = null;
+      state.agentRunSocketRunId = null;
+    }
+    if (!state.agentRunTerminal && state.agentStatus === "Running") state.agentStatus = "Exited";
+    if (!state.agentRunTerminal) syncAgentView();
+  };
+  socket.onerror = () => { state.agentRunTerminal = true; state.agentStatus = "Error"; syncAgentView(); };
 }
 
 function handleAgentRunEvent(event) {
   if (event.type === "command") { state.agentCommand = event.command; state.agentStatus = "Running"; }
   if (event.type === "output") state.agentOutput += event.message || "";
-  if (event.type === "complete") {
-    state.agentStatus = event.status === "completed" ? "Completed" : "Failed";
-    state.agentOutput += `\n[${state.agentStatus} · exit code ${event.exit_code}]\n`;
+  if (event.type === "inspection_persisted") {
+    state.agentInspectionRunId = event.run_id || "";
+    state.agentOutput += `\n[Verified] Inspection run stored: ${state.agentInspectionRunId}\n`;
+  }
+  if (event.type === "clarification_required") {
+    state.agentClarification = event.request;
+    state.agentStatus = "Needs clarification";
+    state.agentOutput += `\nClarification required\n${event.request.question}\n`;
     render();
     return;
   }
-  if (event.type === "error") { state.agentStatus = "Error"; state.agentOutput += `\n${event.message}\n`; }
+  if (event.type === "status" && event.status === "awaiting_clarification") {
+    state.agentStatus = "Needs clarification";
+  }
+  if (event.type === "clarification_response_received") state.agentStatus = "Validating answer";
+  if (event.type === "user_evidence_rejected") {
+    state.agentStatus = "Needs evidence";
+    state.agentOutput += `\nUser-provided evidence rejected: ${event.message}\n`;
+  }
+  if (event.type === "user_evidence_accepted") state.agentOutput += "\nUser-provided evidence accepted\n";
+  if (event.type === "retry_started") {
+    state.agentClarification = null;
+    state.agentStatus = "Running";
+    state.agentOutput += "\nRetry started (bounded clarification retry)\n";
+  }
+  if (event.type === "complete") {
+    if (state.agentRunTerminal) return;
+    state.agentRunTerminal = true;
+    const needsEvidence = event.result_status === "NEEDS_EVIDENCE"
+      || event.status === "needs_evidence"
+      || (state.selectedAgentOperation === "dockerize" && event.exit_code === 2);
+    if (needsEvidence) {
+      state.agentStatus = "Needs evidence";
+      state.agentOutput += "\n[NEEDS_EVIDENCE · controlled outcome]\n";
+    } else {
+      state.agentStatus = event.status === "completed" ? "Completed" : "Failed";
+      state.agentOutput += `\n[${state.agentStatus} · exit code ${event.exit_code}]\n`;
+    }
+    if (state.selectedAgentOperation === "inspect" && state.agentStatus === "Completed") {
+      state.agentStatus = "Loading stored intelligence";
+      loadStoredIntelligence()
+        .then(() => { state.agentInspectionReady = true; state.agentStatus = "Completed"; render(); })
+        .catch((error) => { state.agentOutput += `\n[Error] Stored intelligence unavailable: ${error.message}\n`; state.agentStatus = "Completed"; render(); });
+      return;
+    }
+    render();
+    return;
+  }
+  if (event.type === "error") { state.agentRunTerminal = true; state.agentStatus = "Error"; state.agentOutput += `\n${event.message}\n`; }
+  if (event.type === "closed") state.agentRunTerminal = true;
   syncAgentView();
 }
 

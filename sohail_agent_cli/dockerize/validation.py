@@ -22,6 +22,7 @@ def validate_docker_result(
     artifacts: dict[Path, str],
     *,
     compose_expected: bool = False,
+    compose_path: Path | None = None,
 ) -> dict[str, Any]:
     """Validate in-memory dry-run artifacts or files already written to disk."""
     selected = {str(item["name"]): item for item in context.components}
@@ -30,7 +31,8 @@ def validate_docker_result(
         name = str(component["name"])
         intelligence = selected[name]
         relative = str(intelligence.get("path") or ".")
-        path = root / relative / "Dockerfile"
+        dockerfiles = [str(item) for item in intelligence.get("dockerfiles", []) if str(item).strip()]
+        path = root / dockerfiles[0] if dockerfiles else root / relative / "Dockerfile"
         content = artifacts.get(path)
         if content is None and path.exists():
             content = path.read_text(encoding="utf-8")
@@ -55,7 +57,7 @@ def validate_docker_result(
             raise DockerValidationError(f"Dockerfile port does not match Project Intelligence for {name}")
         checked.append(str(path))
 
-    compose_path = root / "docker-compose.yml"
+    compose_path = compose_path or root / "docker-compose.yml"
     compose_content = artifacts.get(compose_path)
     if compose_content is not None:
         try:

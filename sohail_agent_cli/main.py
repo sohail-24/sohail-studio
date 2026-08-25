@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from rich.console import Console
 
+from core.cli_bridge import (
+    CONTROLLED_NEEDS_CLARIFICATION_EXIT_CODE,
+    CONTROLLED_NEEDS_EVIDENCE_EXIT_CODE,
+)
 from core.storage.project_intelligence import ProjectIntelligenceRepository
 from sohail_agent_cli.agents import (
     BlueprintAgent,
@@ -143,6 +148,21 @@ Examples:
         default=True,
         help="Do not create or update Docker Compose configuration",
     )
+    dockerize_parser.add_argument(
+        "--clarification-response",
+        default="",
+        help="Validated user-provided evidence for one bounded clarification retry",
+    )
+    dockerize_parser.add_argument(
+        "--inspection-run-id",
+        default="",
+        help="Canonical persisted inspection run to reuse",
+    )
+    dockerize_parser.add_argument(
+        "--docker-plan",
+        default="",
+        help="Internal artifact plan produced by the Terminal Dockerize workflow",
+    )
     
     # k8s command
     k8s_parser = subparsers.add_parser(
@@ -180,6 +200,11 @@ Examples:
         default="automatic",
         help="Manifest organization strategy",
     )
+    k8s_parser.add_argument(
+        "--inspection-run-id",
+        default="",
+        help="Canonical persisted inspection run to reuse",
+    )
     
     # cicd command
     cicd_parser = subparsers.add_parser(
@@ -203,6 +228,11 @@ Examples:
         choices=["jenkins", "github-actions", "both"],
         default="jenkins",
         help="CI/CD platform for generated workflows",
+    )
+    cicd_parser.add_argument(
+        "--inspection-run-id",
+        default="",
+        help="Canonical persisted inspection run to reuse",
     )
     
     # docs command
@@ -378,7 +408,11 @@ async def cmd_inspect(args: argparse.Namespace) -> int:
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
     
-    intelligence = DeepInspector().inspect(path)
+    console.print("[cyan][Running][/cyan] Starting complete repository inspection...")
+    intelligence = DeepInspector().inspect(
+        path,
+        progress=lambda message: console.print(f"[cyan][Running][/cyan] {message}..."),
+    )
     runtime_summary = ", ".join(
         f"{item['runtime']} {item['version']}" for item in intelligence.runtimes
     ) or "none detected"
@@ -404,13 +438,28 @@ async def cmd_inspect(args: argparse.Namespace) -> int:
         console.print("[yellow]Dry run: inspection was not persisted.[/yellow]")
         return 0
 
+    console.print("[cyan][Running][/cyan] Persisting inspection intelligence in PostgreSQL...")
     repository = ProjectIntelligenceRepository.from_env()
     try:
         persisted = repository.persist(intelligence)
     finally:
         repository.storage.close()
     console.print(f"[bold green]Stored in PostgreSQL:[/bold green] inspection run {persisted.run_id}")
+    console.print("[bold green][Completed] Inspection complete.[/bold green]")
     return 0
+
+
+def _print_created_files(result: Any) -> None:
+    files = list(getattr(result, "files_created", []) or [])
+    skipped = list(getattr(result, "files_skipped", []) or [])
+    if files:
+        console.print("[bold]Created files:[/bold]")
+        for path in files:
+            console.print(f"[green]✓[/green] {path}")
+    if skipped:
+        console.print("[bold]Skipped existing files:[/bold]")
+        for path in skipped:
+            console.print(f"[yellow]•[/yellow] {path}")
 
 
 async def cmd_dockerize(args: argparse.Namespace) -> int:
@@ -425,6 +474,14 @@ async def cmd_dockerize(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         verbose=args.verbose,
     )
+    try:
+        raw_docker_plan = getattr(args, "docker_plan", "")
+        docker_plan = json.loads(raw_docker_plan) if raw_docker_plan else None
+        if docker_plan is not None and not isinstance(docker_plan, dict):
+            raise ValueError("Docker plan must be an object")
+    except (TypeError, json.JSONDecodeError, ValueError) as exc:
+        console.print(f"[red]Dockerize failed:[/red] Invalid Docker plan: {exc}")
+        return 1
     result = await agent.execute(
         path,
         port=args.port,
@@ -432,12 +489,55 @@ async def cmd_dockerize(args: argparse.Namespace) -> int:
         components=args.component,
         compose_action=args.compose_action,
         compose=args.compose,
+        user_evidence=getattr(args, "clarification_response", ""),
+        inspection_run_id=getattr(args, "inspection_run_id", ""),
+        docker_plan=docker_plan,
     )
+    if result.status == "NEEDS_CLARIFICATION":
+        request = result.data.get("clarification_request")
+        question = request.get("question") if isinstance(request, dict) else result.message
+        console.print(f"[yellow]Clarification required:[/yellow] {question}")
+        if request:
+            console.print(
+                "SOHAIL_CLARIFICATION_REQUEST:" + json.dumps(request, separators=(",", ":")),
+                markup=False,
+                no_wrap=True,
+                overflow="ignore",
+                crop=False,
+            )
+        return CONTROLLED_NEEDS_CLARIFICATION_EXIT_CODE
+    if result.status == "NEEDS_EVIDENCE":
+        console.print(f"[yellow]Dockerize needs evidence:[/yellow] {result.message}")
+        return CONTROLLED_NEEDS_EVIDENCE_EXIT_CODE
     if not result.success:
         console.print(f"[red]Dockerize failed:[/red] {result.message}")
         return 1
     console.print(f"[bold green]{result.message}[/bold green]")
+    _print_created_files(result)
     return 0
+
+
+def _load_required_inspection(path: Path, expected_run_id: str = ""):
+    """Load the canonical persisted snapshot; never fall back to a repository scan."""
+    repository = ProjectIntelligenceRepository.from_env()
+    try:
+        intelligence = repository.load_latest(str(path))
+    finally:
+        repository.storage.close()
+    if intelligence is None:
+        console.print("[red]Project Intelligence is required; run Inspect first.[/red]")
+        return None
+    if expected_run_id and intelligence.inspection_run_id != expected_run_id:
+        console.print(
+            "[red]Stored Project Intelligence does not match the requested inspection run; "
+            "re-inspect explicitly.[/red]"
+        )
+        return None
+    console.print(
+        f"[cyan][Verified][/cyan] Using persisted Project Intelligence: "
+        f"inspection run {intelligence.inspection_run_id or 'stored snapshot'}"
+    )
+    return intelligence
 
 
 async def cmd_k8s(args: argparse.Namespace) -> int:
@@ -448,6 +548,9 @@ async def cmd_k8s(args: argparse.Namespace) -> int:
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
     
+    intelligence = _load_required_inspection(path, getattr(args, "inspection_run_id", ""))
+    if intelligence is None:
+        return 1
     agent = K8sAgent(
         dry_run=args.dry_run,
         verbose=args.verbose,
@@ -459,8 +562,14 @@ async def cmd_k8s(args: argparse.Namespace) -> int:
         overwrite=args.overwrite,
         components=args.component,
         organization=args.organization,
+        intelligence=intelligence,
     )
     
+    if result.success:
+        console.print(f"[bold green]{result.message}[/bold green]")
+        _print_created_files(result)
+    else:
+        console.print(f"[red]Kubernetes failed:[/red] {result.message}")
     return 0 if result.success else 1
 
 
@@ -472,6 +581,9 @@ async def cmd_cicd(args: argparse.Namespace) -> int:
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
     
+    intelligence = _load_required_inspection(path, getattr(args, "inspection_run_id", ""))
+    if intelligence is None:
+        return 1
     agent = CicdAgent(
         dry_run=args.dry_run,
         verbose=args.verbose,
@@ -481,8 +593,14 @@ async def cmd_cicd(args: argparse.Namespace) -> int:
         overwrite=args.overwrite,
         action=args.action,
         platform=args.platform,
+        intelligence=intelligence,
     )
     
+    if result.success:
+        console.print(f"[bold green]{result.message}[/bold green]")
+        _print_created_files(result)
+    else:
+        console.print(f"[red]CI/CD failed:[/red] {result.message}")
     return 0 if result.success else 1
 
 
@@ -504,6 +622,11 @@ async def cmd_docs(args: argparse.Namespace) -> int:
         overwrite=args.overwrite,
     )
     
+    if result.success:
+        console.print(f"[bold green]{result.message}[/bold green]")
+        _print_created_files(result)
+    else:
+        console.print(f"[red]Documentation failed:[/red] {result.message}")
     return 0 if result.success else 1
 
 

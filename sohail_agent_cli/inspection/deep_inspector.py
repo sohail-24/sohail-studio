@@ -12,7 +12,7 @@ import os
 import re
 import tomllib
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import yaml
 
@@ -131,8 +131,32 @@ def classify_file(path: Path, content: str | None = None) -> str:
 class DeepInspector:
     """Inspect a repository recursively without external commands or Ollama."""
 
-    def inspect(self, directory: Path) -> ProjectIntelligence:
+    def inspect(
+        self,
+        directory: Path,
+        progress: Callable[[str], None] | None = None,
+    ) -> ProjectIntelligence:
         root = Path(directory).expanduser().resolve()
+        self._validate_root(root)
+        self._emit_progress(progress, "Discovering repository structure")
+        return self._inspect_paths(root, self._walk(root), progress=progress)
+
+    def inspect_targets(self, directory: Path, targets: Iterable[Path]) -> ProjectIntelligence:
+        """Inspect only validated existing files/directories under ``directory``."""
+
+        root = Path(directory).expanduser().resolve()
+        self._validate_root(root)
+        selected = [Path(target).resolve() for target in targets]
+        if not selected:
+            raise InspectionError("No safe inspection targets were supplied")
+        paths = (
+            path for path in self._walk(root)
+            if any(path == target or target in path.parents for target in selected)
+        )
+        return self._inspect_paths(root, paths)
+
+    @staticmethod
+    def _validate_root(root: Path) -> None:
         if not root.exists():
             raise InspectionError(f"Inspection path does not exist: {root}")
         if not root.is_dir():
@@ -140,9 +164,16 @@ class DeepInspector:
         if not os.access(root, os.R_OK):
             raise InspectionError(f"Inspection path is not readable: {root}")
 
+    def _inspect_paths(
+        self,
+        root: Path,
+        paths: Iterable[Path],
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> ProjectIntelligence:
         intelligence = ProjectIntelligence(name=root.name, root_path=str(root))
         text_cache: dict[str, str] = {}
-        for path in self._walk(root):
+        for path in paths:
             relative = path.relative_to(root).as_posix()
             if _is_secret(path):
                 # Read only to extract variable names and safe configuration facts.
@@ -168,12 +199,24 @@ class DeepInspector:
             if error:
                 intelligence.warnings.append(f"Could not read {relative}: {error}")
 
+        self._emit_progress(progress, "Extracting repository evidence")
         self._extract(intelligence, root, text_cache)
         intelligence.languages = sorted(_unique(intelligence.languages))
         intelligence.frameworks = sorted(_unique(intelligence.frameworks))
         intelligence.package_managers = sorted(_unique(intelligence.package_managers))
         intelligence.databases = sorted(_unique(intelligence.databases))
+        self._emit_progress(progress, "Recognizing verified engineering patterns")
+        # Import lazily: the evidence package also depends on Deep Inspector
+        # for bounded acquisition, so importing it at module load would cycle.
+        from core.evidence.patterns import recognize_verified_patterns
+
+        intelligence.verified_patterns = recognize_verified_patterns(intelligence)
         return intelligence
+
+    @staticmethod
+    def _emit_progress(progress: Callable[[str], None] | None, message: str) -> None:
+        if progress is not None:
+            progress(message)
 
     def _walk(self, root: Path) -> Iterable[Path]:
         for current, directories, filenames in os.walk(root, followlinks=False):
@@ -478,8 +521,13 @@ class DeepInspector:
             )
             runnable_script = any(key in scripts for key in ("start", "dev", "serve", "run"))
             frontend_signal = framework in {"React", "Vite", "Next.js", "Angular"} and (has_src_dir or has_source)
+            static_frontend_signal = "build" in scripts and any(
+                Path(item).name.lower() == "index.html" for item in child_files
+            )
             backend_signal = framework in {"Express", "NestJS"} or has_server_signal
-            deployable = has_source and (runnable_script or framework is not None or backend_signal)
+            deployable = has_source and (
+                runnable_script or framework is not None or backend_signal or static_frontend_signal
+            )
             if relative_dir == "." and workspace and not has_server_signal and not has_src_dir:
                 deployable = False
             if not deployable:
@@ -488,7 +536,7 @@ class DeepInspector:
                     key="package_role", value="workspace_or_metadata", confidence="high",
                 )
                 continue
-            if frontend_signal:
+            if frontend_signal or static_frontend_signal:
                 kind, role = "frontend", "frontend/application"
             elif relative_dir == ".":
                 kind, role = "application", "application"

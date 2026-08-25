@@ -6,3 +6,5 @@ venv/
 sessions/*.json
 logs/*.log
 settings/local.json
+.env
+.env.*

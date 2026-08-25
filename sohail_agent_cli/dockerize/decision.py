@@ -6,7 +6,7 @@ import json
 import re
 import shlex
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from sohail_agent_cli.providers import GenerationRequest, OllamaProvider
 
@@ -23,6 +23,7 @@ class DockerDecision:
     components: list[dict[str, Any]]
     compose: dict[str, Any]
     raw: dict[str, Any]
+    repair_attempted: bool = False
 
 
 SYSTEM_PROMPT = """You are Sohail Studio's local DevOps engineering decision engine.
@@ -35,24 +36,58 @@ Do not invent facts. Do not assume missing files, frameworks, runtimes, ports,
 commands, databases, or services. When evidence is missing or contradictory,
 return status NEEDS_EVIDENCE with a concise reason. Return JSON only using:
 {"status":"ready|NEEDS_EVIDENCE","reason":"...","components":[],"compose":{}}.
+The reason field is mandatory and MUST be a non-empty explanation grounded in
+the supplied evidence. Never return an empty string, null, or omit reason.
+For example, a safe evidence outcome is:
+{"status":"NEEDS_EVIDENCE","reason":"backend has no evidence-backed production start command.","components":[],"compose":{}}.
 Each component decision must use the supplied component name and evidence.
 For ready decisions, each component should include base_image, working_directory,
 package_manager, install_command, optional build_command, start_command, and
 port, including the supplied component name. The compose object must contain a
 services array. Compose services must include name, component, build_context,
 port, and target_port and may include only evidence-supported environment or
-dependency references.
+dependency references. The component's start_command must match the exact
+command from its literal start script. A dev or preview script is not production
+start evidence and must never be selected as start_command. If no explicit
+production start strategy exists for a component, return NEEDS_EVIDENCE.
+When the supplied context contains a verified pattern for a component, include
+that pattern's pattern_id as deployment_pattern. A static_frontend pattern
+permits a safe static-content server command after the exact build command and
+port remain evidence-bound; do not treat the pattern as permission to invent
+runtime versions, ports, environment variables, or dependencies.
+The supplied artifact_plan is authoritative: generate or upgrade only those
+artifacts, preserve keep actions, and exclude skip actions. Do not emit decisions
+for skipped components.
 Return a decision, not file contents and do not modify files."""
+
+REPAIR_SYSTEM_PROMPT = """You repair one invalid JSON Docker decision for Sohail Studio.
+Return JSON only. Preserve all valid fields and values from the original response.
+Repair schema/formatting only; do not add project facts, runtime versions, ports,
+commands, services, dependencies, or environment variables. Every response must
+contain status, reason, components, and compose. reason must be a concise,
+non-empty string grounded only in the original response or the supplied
+validation error. If the original response cannot safely be repaired, return:
+{"status":"NEEDS_EVIDENCE","reason":"The Docker decision could not be safely repaired from the supplied evidence.","components":[],"compose":{}}."""
 
 
 class DockerDecisionEngine:
     """Ask the configured local DevOps model and reject unsupported claims."""
 
-    def __init__(self, provider: OllamaProvider, model: str) -> None:
+    def __init__(
+        self,
+        provider: OllamaProvider,
+        model: str,
+        *,
+        on_repair: Callable[[], None] | None = None,
+    ) -> None:
         self.provider = provider
         self.model = model
+        self.on_repair = on_repair
 
     async def decide(self, context: DockerContext) -> DockerDecision:
+        preflight = self._preflight(context)
+        if preflight is not None:
+            return preflight
         result = await self.provider.generate(
             GenerationRequest(
                 prompt=context.prompt(),
@@ -69,17 +104,31 @@ class DockerDecisionEngine:
         )
         if result.error:
             raise DockerDecisionError(result.error)
+        repair_attempted = False
         try:
             payload = self._parse_json(result.text)
         except (TypeError, ValueError) as exc:
-            raise DockerDecisionError(
-                f"Ollama returned an invalid Docker decision schema: {exc}"
-            ) from exc
+            repair_attempted = True
+            if self.on_repair is not None:
+                self.on_repair()
+            try:
+                repaired = await self.provider.generate(
+                    self._repair_request(result.text, str(exc), context.prompt())
+                )
+                if repaired.error:
+                    raise DockerDecisionError(repaired.error)
+                payload = self._parse_json(repaired.text)
+            except (TypeError, ValueError, DockerDecisionError) as repair_exc:
+                raise DockerDecisionError(
+                    "Ollama returned an invalid Docker decision schema after one "
+                    f"bounded repair attempt: {repair_exc}"
+                ) from repair_exc
         decision = DockerDecision(
             status=payload["status"],
             components=payload["components"],
             compose=payload["compose"],
             raw=payload,
+            repair_attempted=repair_attempted,
         )
         if decision.status == "NEEDS_EVIDENCE":
             return decision
@@ -100,8 +149,76 @@ class DockerDecisionEngine:
                     "components": [],
                     "compose": {},
                 },
+                repair_attempted=repair_attempted,
             )
         return decision
+
+    def _repair_request(
+        self,
+        response: str,
+        error: str,
+        context_prompt: str,
+    ) -> GenerationRequest:
+        """Create the single bounded repair request without repository access."""
+        original = str(response or "")[:12000]
+        supplied_context = str(context_prompt or "")[:12000]
+        prompt = (
+            "Repair only this structured Docker decision. Do not request or infer "
+            "new repository evidence.\n\n"
+            f"VALIDATION_ERROR: {error}\n\n"
+            "REQUIRED_SHAPE:\n"
+            '{"status":"ready|NEEDS_EVIDENCE","reason":"non-empty explanation",'
+            '"components":[],"compose":{}}\n\n'
+            f"ORIGINAL_RESPONSE:\n{original}\n\n"
+            f"SUPPLIED_CONTEXT_FOR_GROUNDING_ONLY:\n{supplied_context}"
+        )
+        return GenerationRequest(
+            prompt=prompt,
+            system=REPAIR_SYSTEM_PROMPT,
+            model=self.model,
+            temperature=0,
+            options={
+                "format": "json",
+                "num_ctx": 16384,
+                "num_predict": 1024,
+            },
+            think=False,
+        )
+
+    @staticmethod
+    def _preflight(context: DockerContext) -> DockerDecision | None:
+        """Stop before Ollama when production-start evidence is absent."""
+        patterns = {
+            str(item.get("component")): item
+            for item in context.verified_patterns
+            if item.get("origin") == "VERIFIED_INFERENCE"
+        }
+        missing = [
+            str(component.get("name"))
+            for component in context.components
+            if not any(
+                item.get("name") == "start" and str(item.get("command") or "").strip()
+                for item in component.get("commands", [])
+            ) and str(component.get("name")) not in patterns
+        ]
+        if not missing:
+            return None
+        names = ", ".join(missing)
+        reason = (
+            f"{names} lacks evidence-backed production start command; "
+            "development and preview commands cannot be used as Docker start commands"
+        )
+        return DockerDecision(
+            status="NEEDS_EVIDENCE",
+            components=[],
+            compose={},
+            raw={
+                "status": "NEEDS_EVIDENCE",
+                "reason": reason,
+                "components": [],
+                "compose": {},
+            },
+        )
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
@@ -147,6 +264,20 @@ class DockerDecisionEngine:
             raise DockerDecisionError("Ollama returned Docker components different from the selected evidence")
         for name, component in actual.items():
             source = expected[name]
+            pattern = next(
+                (
+                    item for item in context.verified_patterns
+                    if item.get("component") == name
+                    and item.get("origin") == "VERIFIED_INFERENCE"
+                ),
+                None,
+            )
+            if pattern is not None:
+                if component.get("deployment_pattern") != pattern.get("pattern_id"):
+                    raise DockerDecisionError(
+                        f"Docker decision did not preserve the verified pattern for {name}"
+                    )
+                self._validate_verified_pattern(name, component, source, pattern)
             package_manager = source.get("package_manager")
             if package_manager and component.get("package_manager") not in {None, package_manager}:
                 raise DockerDecisionError(f"Docker decision changed the detected package manager for {name}")
@@ -169,20 +300,14 @@ class DockerDecisionEngine:
                     continue
                 command_text = " ".join(command) if isinstance(command, list) else str(command)
                 allowed = self._commands_for(source, command_name)
-                if command_name == "start":
-                    # A frontend package may expose its runnable server as
-                    # the standard Vite `preview` script instead of `start`.
-                    # Accept only that script's exact evidence-backed command.
-                    preview_commands = self._commands_for(source, "preview")
-                    allowed |= preview_commands
+                if command_name == "start" and pattern is not None:
+                    continue
                 if allowed:
                     manager = str(source.get("package_manager") or "npm")
                     allowed |= {
                         f"{manager} run {command_name}",
                         f"{manager} {command_name}" if command_name == "start" and manager == "npm" else "",
                     }
-                    if command_name == "start" and preview_commands:
-                        allowed.add(f"{manager} run preview")
                     allowed.discard("")
                 if command_text not in allowed:
                     raise DockerDecisionError(f"Docker decision invented {command_name} command for {name}")
@@ -216,6 +341,45 @@ class DockerDecisionEngine:
                 raise DockerDecisionError("Docker decision invented a Compose environment variable")
             if any(item not in expected for item in service.get("depends_on") or []):
                 raise DockerDecisionError("Docker decision invented a Compose dependency")
+
+    @staticmethod
+    def _validate_verified_pattern(
+        name: str,
+        component: dict[str, Any],
+        source: dict[str, Any],
+        pattern: dict[str, Any],
+    ) -> None:
+        """Validate model details against a deterministic pattern policy."""
+        if pattern.get("category") != "static_frontend":
+            raise DockerDecisionError(f"Unsupported verified pattern for {name}")
+        policy = pattern.get("policy") or {}
+        build_command = component.get("build_command")
+        build_text = " ".join(build_command) if isinstance(build_command, list) else str(build_command or "")
+        if build_text != str(policy.get("build_command") or ""):
+            raise DockerDecisionError(f"Docker decision changed the verified build command for {name}")
+        start = component.get("start_command")
+        start_text = " ".join(start) if isinstance(start, list) else str(start or "")
+        if not start_text.strip() or any(token in start_text for token in (";", "&&", "||", "|", "`", "$")):
+            raise DockerDecisionError(f"Docker decision supplied an unsafe static server command for {name}")
+        tokens = start if isinstance(start, list) else shlex.split(start_text)
+        if not tokens:
+            raise DockerDecisionError(f"Docker decision supplied an empty static server command for {name}")
+        if any(".." in str(token) or str(token).startswith("/") for token in tokens):
+            raise DockerDecisionError(f"Docker decision supplied a traversal-shaped static serving path for {name}")
+        family = " ".join(str(token) for token in tokens[:2])
+        allowed_families = set(policy.get("allowed_start_command_families") or [])
+        if str(tokens[0]) not in allowed_families and family not in allowed_families:
+            raise DockerDecisionError(f"Docker decision supplied an unsupported static server for {name}")
+        expected_port = policy.get("port")
+        if component.get("port") != expected_port:
+            raise DockerDecisionError(f"Docker decision changed the verified application port for {name}")
+        if not any(
+            item.get("port") == expected_port
+            and item.get("port_type") == "application"
+            and not item.get("conflict")
+            for item in source.get("ports", [])
+        ):
+            raise DockerDecisionError(f"Verified pattern port evidence is no longer available for {name}")
 
     @staticmethod
     def _validate_runtime(name: str, component: dict[str, Any], source: dict[str, Any]) -> None:

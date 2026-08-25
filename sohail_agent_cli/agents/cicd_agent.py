@@ -33,7 +33,12 @@ class CicdAgent(BaseAgent):
         self.info(f"Generating CI/CD workflows for: {path}")
         
         # Analyze repository
-        analysis = await self.analyze_repo(path)
+        intelligence = kwargs.get("intelligence")
+        if intelligence is None:
+            return AgentResult.failure(
+                "Project Intelligence is required for CI/CD generation; run Inspect first"
+            )
+        analysis = await self.analyze_repo(path, intelligence=intelligence)
         stack = analysis.stack.primary
         
         self.info(f"Detected stack: {stack.value}")

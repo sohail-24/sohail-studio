@@ -48,6 +48,7 @@ class ProjectIntelligence:
 
     name: str
     root_path: str
+    inspection_run_id: str | None = None
     inspected_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     files: list[DiscoveredFile] = field(default_factory=list)
     components: list[dict[str, Any]] = field(default_factory=list)
@@ -65,7 +66,9 @@ class ProjectIntelligence:
     kubernetes: dict[str, Any] = field(default_factory=dict)
     ci_cd: dict[str, Any] = field(default_factory=dict)
     documentation: dict[str, Any] = field(default_factory=dict)
+    verified_patterns: list[dict[str, Any]] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
+    user_evidence: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @classmethod
@@ -75,17 +78,19 @@ class ProjectIntelligence:
         *,
         root_path: str,
         inspected_at: str | None = None,
+        inspection_run_id: str | None = None,
     ) -> "ProjectIntelligence":
         """Rehydrate the normalized snapshot stored by the persistence layer."""
         known = {
             "name": summary.get("project") or summary.get("name") or Path(root_path).name,
             "root_path": root_path,
+            "inspection_run_id": inspection_run_id or summary.get("inspection_run_id"),
             "inspected_at": inspected_at or summary.get("inspected_at") or datetime.now(timezone.utc).isoformat(),
         }
         for field_name in (
             "files", "components", "languages", "frameworks", "runtimes", "package_managers",
             "dependencies", "commands", "ports", "services", "databases", "environment_variables",
-            "evidence", "warnings",
+            "verified_patterns", "evidence", "user_evidence", "warnings",
         ):
             if field_name in summary:
                 known[field_name] = summary[field_name]
@@ -141,7 +146,9 @@ class ProjectIntelligence:
             "kubernetes": self.kubernetes,
             "ci_cd": self.ci_cd,
             "documentation": self.documentation,
+            "verified_patterns": self.verified_patterns,
             "evidence": [item.to_dict() for item in self.evidence],
+            "user_evidence": [dict(item) for item in self.user_evidence],
             "evidence_counts": self.evidence_counts,
             "warnings": self.warnings,
         }
@@ -151,11 +158,13 @@ class ProjectIntelligence:
         data.update(
             {
                 "name": self.name,
+                "inspection_run_id": self.inspection_run_id,
                 "path": self.root_path,
                 "root_path": self.root_path,
                 "inspected_at": self.inspected_at,
                 "files": [item.to_dict() for item in self.files],
                 "evidence": [item.to_dict() for item in self.evidence],
+                "user_evidence": [dict(item) for item in self.user_evidence],
                 "has_docker": self.has_docker,
                 "has_docker_compose": self.has_docker_compose,
                 "has_ci_cd": bool(self.ci_cd_files),

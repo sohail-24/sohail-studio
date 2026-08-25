@@ -34,7 +34,12 @@ class K8sAgent(BaseAgent):
         self.info(f"Generating Kubernetes manifests for: {path}")
 
         # Analyze repository
-        analysis = await self.analyze_repo(path)
+        intelligence = kwargs.get("intelligence")
+        if intelligence is None:
+            return AgentResult.failure(
+                "Project Intelligence is required for Kubernetes generation; run Inspect first"
+            )
+        analysis = await self.analyze_repo(path, intelligence=intelligence)
         stack_context = analysis.stack
         stack = stack_context.primary
 
