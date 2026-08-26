@@ -11,6 +11,8 @@ from core.evidence.patterns import recognize_verified_patterns
 from core.storage.project_intelligence import ProjectIntelligenceRepository
 from sohail_agent_cli.inspection.models import ProjectIntelligence
 
+from .platform_policy import applicable_platform_policies
+
 
 class DockerContextError(ValueError):
     """Raised when a Docker context cannot be built from project evidence."""
@@ -27,6 +29,7 @@ class DockerContext:
     user_evidence: list[dict[str, Any]] = field(default_factory=list)
     verified_patterns: list[dict[str, Any]] = field(default_factory=list)
     artifact_plan: dict[str, Any] = field(default_factory=dict)
+    platform_policies: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +40,7 @@ class DockerContext:
             "user_evidence": self.user_evidence or [],
             "verified_patterns": self.verified_patterns,
             "artifact_plan": self.artifact_plan or {},
+            "platform_policies": self.platform_policies or [],
         }
 
     def prompt(self) -> str:
@@ -46,16 +50,33 @@ class DockerContext:
             "Do not invent project facts or assume missing files, frameworks, ports, commands, or services.\n"
             "When evidence conflicts, identify the conflict and return NEEDS_EVIDENCE when it blocks a safe decision.\n"
             "Use the supplied project evidence as the source of truth.\n"
-            "Command roles are authoritative: only a component's literal 'start' script is production start evidence.\n"
+            "Command roles are authoritative: only a component's literal 'start' script\n"
+            "or an explicit production start command, or a\n"
+            "DERIVED_DETERMINISTIC production start strategy with provenance is acceptable.\n"
             "Treat 'dev' and 'preview' scripts as non-production roles; never place them in start_command.\n"
-            "If no explicit production start strategy is supplied for a component, return NEEDS_EVIDENCE.\n"
+            "If neither explicit nor deterministically derived production start evidence is\n"
+            "supplied for a component, return NEEDS_EVIDENCE.\n"
             "A verified engineering pattern is a deterministic policy boundary, not a model fact.\n"
             "When a component has a verified pattern, include its pattern_id as deployment_pattern\n"
-            "and propose implementation details that satisfy that pattern's policy.\n"
+            "verbatim as a required field on that component, and propose implementation\n"
+            "details that satisfy that pattern's policy. Omitting the pattern_id is invalid.\n"
             "The artifact_plan is authoritative: generate or upgrade only selected artifacts,\n"
             "preserve keep actions, and exclude skipped components.\n"
+            "Return exactly one component decision for every name in project.selected_components,\n"
+            "with no omitted or additional component names.\n"
+            "For every component with a non-conflicting port whose port_type is application,\n"
+            "copy that exact port into component.port and into its Compose service's port\n"
+            "and target_port. Use the evidence-backed component path as a relative Compose\n"
+            "build_context. Do not omit or substitute documented/service-only ports.\n"
             "Return JSON only with status, a non-empty reason, a components array, and a compose object.\n"
             "A ready response must include each component name and compose.services as an array.\n\n"
+            "Base images and working directories must copy the exact authorized value from\n"
+            "explicit repository evidence or APPROVED_PLATFORM_POLICY in the supplied context.\n"
+            "APPROVED_PLATFORM_POLICY values are application policy, not repository truth;\n"
+            "preserve that provenance and do not describe them as discovered project files.\n"
+            "Never replace an authorized value with a model convention or a different image/path.\n"
+            "A detected database dependency does not authorize a Compose database service;\n"
+            "emit services only for the selected components and supplied service evidence.\n\n"
             "FOCUSED_DOCKER_PROJECT_INTELLIGENCE:\n"
             + json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
         )
@@ -138,7 +159,7 @@ class DockerContextBuilder:
                 }
             ][:80]
             commands = [
-                fields(item, ("name", "command", "source_file", "confidence", "origin"))
+                fields(item, ("name", "command", "source_file", "confidence", "origin", "source_type", "derived_from", "rule_id", "model_inference"))
                 for item in intelligence.commands
                 if item.get("component") == name
                 or belongs(str(item.get("source_file", "")), component)
@@ -172,6 +193,16 @@ class DockerContextBuilder:
                 for item in intelligence.ports
                 if item.get("component") == name
             ]
+            base_images = [
+                dict(item) for item in intelligence.docker.get("base_images", [])
+                if item.get("component") in {None, name}
+                or belongs(str(item.get("source_file", "")), component)
+            ]
+            working_directories = [
+                dict(item) for item in intelligence.docker.get("working_directories", [])
+                if item.get("component") in {None, name}
+                or belongs(str(item.get("source_file", "")), component)
+            ]
             environment = [
                 fields(item, ("name", "key", "value", "sensitive", "source_file", "confidence"))
                 for item in intelligence.environment_variables
@@ -179,9 +210,13 @@ class DockerContextBuilder:
                 or "/" not in str(item.get("source_file", ""))
             ]
             framework = component.get("framework")
-            language = next(
-                (file.language for file in intelligence.files if file.relative_path.startswith(path + "/") and file.language),
-                None,
+            local_languages = [
+                file.language for file in intelligence.files
+                if (path == "." or file.relative_path.startswith(path + "/")) and file.language
+            ]
+            language = (
+                "Java" if framework == "Spring Boot" and "Java" in intelligence.languages
+                else next(iter(local_languages), None)
             )
             components.append({
                 "name": name,
@@ -191,10 +226,15 @@ class DockerContextBuilder:
                 "framework": framework,
                 "language": language,
                 "package_manager": component.get("package_manager"),
+                "evidence": list(component.get("evidence") or []),
+                "artifacts": [dict(item) for item in component.get("artifacts") or []],
+                "deployment_evidence": dict(component.get("deployment_evidence") or {}),
                 "runtimes": runtimes,
                 "commands": commands,
                 "dependencies": dependencies,
                 "ports": ports,
+                "base_images": base_images,
+                "working_directories": working_directories,
                 "environment": environment,
                 "files": files,
                 "file_count": len(all_files),
@@ -206,7 +246,7 @@ class DockerContextBuilder:
             if data.get("source_file") and selected_fact(data):
                 evidence.append(fields(
                     data,
-                    ("source_file", "evidence_type", "key", "value", "confidence", "line_number"),
+                    ("source_file", "evidence_type", "key", "value", "confidence", "line_number", "extraction_method", "source_type", "derived_from", "rule_id", "model_inference"),
                 ))
 
         dockerfiles = list(intelligence.docker.get("dockerfiles", []))
@@ -267,7 +307,8 @@ class DockerContextBuilder:
             dict(item) for item in intelligence.user_evidence
             if item.get("component") in {None, *names}
         ]
+        platform_policies = applicable_platform_policies(components)
         return DockerContext(
             project, components, infrastructure, evidence, selected_user_evidence,
-            verified_patterns,
+            verified_patterns, {}, platform_policies,
         )

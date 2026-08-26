@@ -50,11 +50,17 @@ class AgentResult:
         )
 
     @classmethod
-    def failure(cls, message: str, error: str | None = None) -> AgentResult:
+    def failure(
+        cls,
+        message: str,
+        error: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> AgentResult:
         return cls(
             success=False,
             message=message,
             error=error,
+            data=data,
         )
 
     @classmethod

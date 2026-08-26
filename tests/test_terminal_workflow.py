@@ -86,6 +86,7 @@ def test_dashboard_treats_completed_runs_as_terminal_and_removes_inspect_from_ne
     assert 'state.agentInspectionReady = true' in source
     assert 'const operationWorkspace = inspectionRunMode ? ""' in source
     assert 'inspection_run_id: operation === "inspect" ? "" : state.agentInspectionRunId' in source
+    assert "dry_run: state.agentDryRun" in source
     assert '(!state.agentInspectionReady || !state.agentContext || !state.agentInspectionRunId)' in source
 
 
@@ -98,6 +99,7 @@ def test_dashboard_opens_a_persisted_intelligence_docker_planner_without_auto_ru
     assert 'docker_plan: dockerPlan || {}' in source
     assert 'operation?.id === "dockerize" ? "Continue"' in source
     assert 'state.selectedAgentOperation === "inspect" && state.agentCategory === "inspect"' in source
+    assert "Preview without writing files" in source
 
 
 def test_dashboard_intelligence_summary_uses_persisted_evidence_sections():

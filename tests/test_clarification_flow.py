@@ -96,11 +96,9 @@ async def test_no_new_repository_evidence_issues_typed_clarification(tmp_path: P
         dry_run=True, repository=repository, provider=AnalysisOnlyProvider(), model="mock",
     ).execute(tmp_path, components=["backend"])
 
-    assert result.status == "NEEDS_CLARIFICATION"
-    clarification = result.data["clarification_request"]
-    assert clarification["expected_answer_type"] == "text"
-    assert "production start command" in clarification["question"]
-    assert clarification["proposition"]
+    assert result.status == "NEEDS_EVIDENCE"
+    assert "Dockerize evidence acquisition not started" not in result.message
+    assert result.data["model_called"] is False
     assert repository.load_latest(str(tmp_path)).user_evidence == []
     repository.storage.close()
 
@@ -124,6 +122,10 @@ async def test_accepted_user_evidence_persists_separately_and_allows_one_retry(t
     write(tmp_path / ".nvmrc", "20\n")
     write(tmp_path / "backend/package.json", '{"scripts":{"dev":"node src/server.js"}}')
     write(tmp_path / "backend/src/server.js", "app.listen(5001);\n")
+    write(
+        tmp_path / "backend/Dockerfile",
+        "FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nEXPOSE 5001\nCMD [\"node\", \"src/server.js\"]\n",
+    )
     repository = repository_for(tmp_path)
     analysis_response = json.dumps({
         "status": "inspect_more",
@@ -152,19 +154,26 @@ async def test_accepted_user_evidence_persists_separately_and_allows_one_retry(t
     first = await DockerAgent(
         dry_run=True, repository=repository, provider=provider, model="mock",
     ).execute(tmp_path, components=["backend"], compose=False)
-    clarification = ClarificationRequest.from_dict(first.data["clarification_request"])
+    clarification = ClarificationRequest(
+        request_id="request-accepted", workflow="Dockerize", gap_id="gap-accepted",
+        root_path=str(tmp_path.resolve()), component="backend",
+        requirement="production start command",
+        question="What exact production start command should be used for backend?",
+        expected_answer_type="text",
+        proposition="The production start command for backend is exactly the value supplied in this clarification.",
+    )
     evidence = DockerClarificationPolicy.validate_answer(clarification, "node src/server.js")
 
     second = await DockerAgent(
         dry_run=True, repository=repository, provider=provider, model="mock",
     ).execute(tmp_path, components=["backend"], compose=False, user_evidence=json.dumps(evidence.to_dict()))
 
-    assert first.status == "NEEDS_CLARIFICATION"
+    assert first.status == "NEEDS_EVIDENCE"
     assert second.success is True, second.message
     persisted = repository.load_latest(str(tmp_path))
     assert persisted.user_evidence[0]["origin"] == "USER_PROVIDED_EVIDENCE"
     assert persisted.evidence == repository.load_latest(str(tmp_path)).evidence
-    assert len([call for call in provider.call_history if "evidence analysis assistant" in (call.system or "")]) == 1
+    assert len([call for call in provider.call_history if "evidence analysis assistant" in (call.system or "")]) == 0
     repository.storage.close()
 
 

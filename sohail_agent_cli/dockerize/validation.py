@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +50,14 @@ def validate_docker_result(
             if value:
                 if isinstance(value, list):
                     present = all(str(part) in content for part in value)
+                elif key == "start_command":
+                    # The renderer serializes string commands as a JSON argv
+                    # array in CMD, so validate the rendered representation
+                    # rather than looking for the original shell string.
+                    tokens = shlex.split(str(value))
+                    present = bool(tokens) and all(
+                        json.dumps(token) in content for token in tokens
+                    )
                 else:
                     present = str(value) in content
                 if not present:

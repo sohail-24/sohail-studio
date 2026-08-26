@@ -24,7 +24,16 @@ def repository_for(root: Path) -> ProjectIntelligenceRepository:
     repository = ProjectIntelligenceRepository(
         Storage(StorageConfig("postgresql://masked@localhost/studio"), engine=engine)
     )
-    repository.persist(DeepInspector().inspect(root))
+    intelligence = DeepInspector().inspect(root)
+    intelligence.docker.setdefault("base_images", []).append({
+        "image": "node:20-alpine", "source_file": "test-fixture-policy",
+        "source_type": "EXPLICIT_EVIDENCE", "confidence": "high", "model_inference": False,
+    })
+    intelligence.docker.setdefault("working_directories", []).append({
+        "path": "/app", "source_file": "test-fixture-policy",
+        "source_type": "EXPLICIT_EVIDENCE", "confidence": "high", "model_inference": False,
+    })
+    repository.persist(intelligence)
     return repository
 
 
@@ -150,6 +159,22 @@ def static_decision_response() -> str:
             "target_port": 80,
         }]},
     })
+
+
+@pytest.mark.asyncio
+async def test_omitted_verified_pattern_identity_is_restored_from_persisted_context(tmp_path: Path):
+    static_site(tmp_path)
+    repository = repository_for(tmp_path)
+    response = json.loads(static_decision_response())
+    del response["components"][0]["deployment_pattern"]
+
+    decision = await DockerDecisionEngine(
+        MockProvider(responses={"project": json.dumps(response)}), "devops-qwen:latest",
+    ).decide(DockerContextBuilder(repository).build(tmp_path, ["site"]))
+
+    assert decision.status == "ready"
+    assert decision.components[0]["deployment_pattern"] == "static-frontend"
+    repository.storage.close()
 
 
 @pytest.mark.asyncio

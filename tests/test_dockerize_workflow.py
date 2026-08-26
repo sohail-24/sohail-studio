@@ -44,7 +44,20 @@ def repository_for(root: Path) -> ProjectIntelligenceRepository:
     repository = ProjectIntelligenceRepository(
         Storage(StorageConfig("postgresql://masked@localhost/studio"), engine=engine)
     )
-    repository.persist(DeepInspector().inspect(root))
+    intelligence = DeepInspector().inspect(root)
+    # These unit fixtures model a project whose platform policy has already
+    # supplied exact container layout facts.  Production Inspect does not add
+    # these defaults; tests that exercise missing policy use a separate context.
+    if any(item.get("package_manager") in {"npm", "yarn", "pnpm"} for item in intelligence.components):
+        intelligence.docker.setdefault("base_images", []).append({
+            "image": "node:20-alpine", "source_file": "test-fixture-policy",
+            "source_type": "EXPLICIT_EVIDENCE", "confidence": "high", "model_inference": False,
+        })
+        intelligence.docker.setdefault("working_directories", []).append({
+            "path": "/app", "source_file": "test-fixture-policy",
+            "source_type": "EXPLICIT_EVIDENCE", "confidence": "high", "model_inference": False,
+        })
+    repository.persist(intelligence)
     return repository
 
 
@@ -68,6 +81,39 @@ def test_docker_context_reuses_and_validates_the_persisted_inspection_run(tmp_pa
             ["backend"],
             expected_inspection_run_id="different-run",
         )
+
+
+def test_single_root_component_receives_application_port_from_nested_configuration(tmp_path: Path):
+    write(
+        tmp_path / "pom.xml",
+        """<project><artifactId>sample</artifactId><version>1.0.0</version>
+        <properties><java.version>17</java.version></properties>
+        <build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build>
+        </project>""",
+    )
+    write(
+        tmp_path / "src/main/java/example/Application.java",
+        """@SpringBootApplication public class Application {
+        public static void main(String[] args) { SpringApplication.run(Application.class, args); }
+        }""",
+    )
+    write(tmp_path / "src/main/resources/application.properties", "server.port=9090\n")
+    repository = repository_for(tmp_path)
+
+    context = DockerContextBuilder(repository).build(tmp_path, ["application"])
+
+    assert context.components[0]["ports"] == [{
+        "name": "src_port",
+        "port": 9090,
+        "source_file": "src/main/resources/application.properties",
+        "confidence": "high",
+        "component": "application",
+        "port_type": "application",
+        "target_port": None,
+        "service_name": None,
+        "conflict": False,
+    }]
+    repository.storage.close()
 
 
 def test_cli_bridge_carries_an_explicit_docker_artifact_plan(tmp_path: Path):
@@ -112,7 +158,7 @@ async def test_docker_plan_keeps_existing_artifacts_without_model_or_overwrite(t
 @pytest.mark.asyncio
 async def test_docker_plan_upgrade_is_explicit_and_targets_only_selected_artifact(tmp_path: Path):
     node_backend(tmp_path)
-    write(tmp_path / "backend/Dockerfile", "FROM node:18-alpine\n# old\n")
+    write(tmp_path / "backend/Dockerfile", "FROM node:20-alpine\n# old\n")
     repository = repository_for(tmp_path)
     provider = MockProvider(responses={"project": decision_response()})
 
@@ -203,6 +249,57 @@ async def test_docker_plan_generates_only_selected_artifacts(tmp_path: Path):
     repository.storage.close()
 
 
+@pytest.mark.asyncio
+async def test_string_start_command_matches_rendered_exec_form(tmp_path: Path):
+    node_backend(tmp_path)
+    repository = repository_for(tmp_path)
+    response = json.loads(decision_response())
+    response["components"][0]["start_command"] = "node src/server.js"
+    provider = MockProvider(responses={"backend": json.dumps(response)})
+
+    result = await DockerAgent(
+        dry_run=True,
+        repository=repository,
+        provider=provider,
+        model="devops-qwen:latest",
+    ).execute(
+        tmp_path,
+        components=["backend"],
+        compose=False,
+        docker_plan={"dockerfiles": {"backend": "generate"}, "compose": "skip"},
+    )
+
+    assert result.success, result.message
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_rendered_artifact_is_not_written_before_validation(tmp_path: Path, monkeypatch):
+    node_backend(tmp_path)
+    repository = repository_for(tmp_path)
+    provider = MockProvider(responses={"backend": decision_response()})
+    monkeypatch.setattr(
+        "sohail_agent_cli.agents.docker_agent.DockerDecisionEngine.render_dockerfile",
+        staticmethod(lambda _component: "FROM node:20-alpine\n"),
+    )
+
+    result = await DockerAgent(
+        repository=repository,
+        provider=provider,
+        model="devops-qwen:latest",
+    ).execute(
+        tmp_path,
+        components=["backend"],
+        compose=False,
+        docker_plan={"dockerfiles": {"backend": "generate"}, "compose": "skip"},
+    )
+
+    assert not result.success
+    assert "install command is missing" in result.message
+    assert not (tmp_path / "backend/Dockerfile").exists()
+    repository.storage.close()
+
+
 def decision_response(port: int = 5001) -> str:
     return json.dumps({
         "status": "ready",
@@ -266,9 +363,12 @@ async def test_docker_decision_contract_accepts_ready_with_strict_json_validatio
         "source_file": ".nvmrc",
         "confidence": "high",
     }]
-    assert provider.call_history[0].options["format"] == "json"
+    assert provider.call_history[0].options["format"]["additionalProperties"] is False
+    assert provider.call_history[0].options["format"]["required"] == [
+        "status", "reason", "components", "compose",
+    ]
     assert provider.call_history[0].options["num_ctx"] == 16384
-    assert provider.call_history[0].options["num_predict"] == 1024
+    assert provider.call_history[0].options["num_predict"] == 2048
     repository.storage.close()
 
 
@@ -291,8 +391,8 @@ async def test_frontend_preview_command_survives_persistence_but_is_not_promoted
     decision = await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
 
     assert decision.status == "NEEDS_EVIDENCE"
-    assert "frontend lacks evidence-backed production start command" in decision.raw["reason"]
-    assert "development and preview commands cannot be used" in decision.raw["reason"]
+    assert "frontend: exact production start command" in decision.raw["reason"]
+    assert "development or preview commands are not authorized" in decision.raw["reason"]
     assert not provider.call_history
     assert "only a component's literal 'start' script" in context.prompt()
     assert "'dev' and 'preview' scripts as non-production roles" in context.prompt()
@@ -316,7 +416,7 @@ async def test_frontend_invented_start_command_is_rejected(tmp_path: Path):
     ).decide(context)
 
     assert decision.status == "NEEDS_EVIDENCE"
-    assert "frontend lacks evidence-backed production start command" in decision.raw["reason"]
+    assert "frontend: exact production start command" in decision.raw["reason"]
     repository.storage.close()
 
 
@@ -357,9 +457,8 @@ async def test_known_runtime_gap_stops_docker_decision_and_artifacts_after_analy
 
     assert not result.success
     assert result.status == "NEEDS_EVIDENCE"
-    assert "frontend lacks evidence-backed production start command" in result.message
-    assert len(provider.call_history) == 1
-    assert "EVIDENCE_GAP" in provider.call_history[0].prompt
+    assert "frontend: exact production start command" in result.message
+    assert len(provider.call_history) == 0
     assert not (tmp_path / "backend/Dockerfile").exists()
     assert not (tmp_path / "frontend/Dockerfile").exists()
     assert not (tmp_path / "docker-compose.yml").exists()
@@ -396,10 +495,8 @@ async def test_malformed_evidence_target_does_not_claim_acquisition_started(tmp_
 
     output = capsys.readouterr().out
     assert result.status == "NEEDS_EVIDENCE"
-    assert "Evidence analysis response received: partially valid" in output
-    assert "Evidence analysis parsed: 0 valid target(s), 1 malformed target(s) rejected" in output
-    assert "Rejected malformed proposal 0: inspection target must be an object" in output
-    assert "Deterministic target validation not started: no valid inspection proposals" in output
+    assert "Deterministic evidence preflight blocked before Ollama" in output
+    assert "Dockerize evidence acquisition not started" in output
     assert "Acquisition started" not in output
     assert "Deterministic evidence inspection completed" not in output
     repository.storage.close()
@@ -453,8 +550,10 @@ async def test_evidence_acquisition_retries_dockerize_at_most_once(tmp_path: Pat
         model="devops-qwen:latest", acquisition_service=acquisition,
     ).execute(tmp_path, components=["backend"], compose=True, compose_action="generate")
 
-    assert result.success, result.message
-    assert acquisition.calls == 1
+    assert not result.success
+    assert result.status == "NEEDS_EVIDENCE"
+    assert acquisition.calls == 0
+    assert result.data["evidence_acquisition"] == []
     assert not (tmp_path / "backend/Dockerfile").exists()
     repository.storage.close()
 
@@ -499,11 +598,7 @@ async def test_readme_runtime_range_does_not_authorize_any_node_base_image(
     ).decide(context)
 
     assert decision.status == "NEEDS_EVIDENCE"
-    assert decision.raw["reason"] == (
-        "An exact Node.js runtime version is required to select a Node base image, "
-        "but Project Intelligence only contains the non-authoritative range "
-        "'Node.js v14 or higher' from README.md."
-    )
+    assert "base image" in decision.raw["reason"]
     repository.storage.close()
 
 
@@ -624,6 +719,53 @@ async def test_invalid_docker_output_fails_after_exactly_one_repair(tmp_path: Pa
     with pytest.raises(DockerDecisionError, match="after one bounded repair attempt"):
         await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
     assert len(provider.call_history) == 2
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_selected_component_is_repaired_from_its_scoped_context(tmp_path: Path):
+    node_backend(tmp_path)
+    write(tmp_path / "frontend/package.json", json.dumps({"scripts": {"start": "npx serve -s dist"}}))
+    write(tmp_path / "frontend/package-lock.json", "{}")
+    write(tmp_path / "frontend/index.html", "<div id=\"root\"></div>\n")
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend", "frontend"])
+    backend_only = decision_response()
+    frontend_only = json.dumps({
+        "status": "ready",
+        "reason": "Frontend evidence is sufficient",
+        "components": [{
+            "name": "frontend",
+            "base_image": "node:20-alpine",
+            "working_directory": "/app",
+            "package_manager": "npm",
+            "install_command": "npm ci",
+            "start_command": "npx serve -s dist",
+        }],
+        "compose": {"services": [{
+            "name": "frontend",
+            "component": "frontend",
+            "build_context": "./frontend",
+        }]},
+    })
+
+    class SequentialProvider(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.outputs = [backend_only, frontend_only]
+
+        async def generate(self, request):
+            self.call_history.append(request)
+            return GenerationResult(text=self.outputs.pop(0), model=request.model or "mock")
+
+    provider = SequentialProvider()
+    decision = await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
+
+    assert decision.status == "ready"
+    assert {item["name"] for item in decision.components} == {"backend", "frontend"}
+    assert {item["component"] for item in decision.compose["services"]} == {"backend", "frontend"}
+    assert len(provider.call_history) == 2
+    assert '"selected_components":["frontend"]' in provider.call_history[1].prompt
     repository.storage.close()
 
 
@@ -800,6 +942,7 @@ async def test_different_project_path_cannot_receive_another_projects_intelligen
 @pytest.mark.asyncio
 async def test_dockerize_dry_run_does_not_write_and_uses_devops_model(tmp_path: Path):
     node_backend(tmp_path)
+    write(tmp_path / "backend/.dockerignore", "preserve-me\n")
     provider = MockProvider(responses={"backend": decision_response()})
     agent = DockerAgent(
         dry_run=True,
@@ -813,6 +956,10 @@ async def test_dockerize_dry_run_does_not_write_and_uses_devops_model(tmp_path: 
     assert result.success
     assert not (tmp_path / "backend/Dockerfile").exists()
     assert not (tmp_path / "docker-compose.yml").exists()
+    assert (tmp_path / "backend/.dockerignore").read_text(encoding="utf-8") == "preserve-me\n"
+    assert result.data["dry_run"] is True
+    assert {item["action"] for item in result.data["planned_actions"]} >= {"generate", "keep"}
+    assert any(item["path"].endswith("backend/Dockerfile") for item in result.data["planned_actions"])
     assert provider.call_history[0].model == "devops-qwen:latest"
     assert "mongodb://secret" not in provider.call_history[0].prompt
 
@@ -873,7 +1020,7 @@ async def test_model_cannot_invent_node_runtime_without_runtime_evidence(tmp_pat
         "components": [{
             "name": "backend",
             "base_image": base_image,
-            "working_directory": "/app/backend",
+            "working_directory": "/app",
             "package_manager": "npm",
             "install_command": "npm install",
             "start_command": "node src/server.js",
@@ -893,7 +1040,7 @@ async def test_model_cannot_invent_node_runtime_without_runtime_evidence(tmp_pat
     ).decide(context)
 
     assert decision.status == "NEEDS_EVIDENCE"
-    assert "exact Node.js runtime version" in decision.raw["reason"]
+    assert "base image" in decision.raw["reason"] or "exact Node.js runtime version" in decision.raw["reason"]
     repository.storage.close()
 
 

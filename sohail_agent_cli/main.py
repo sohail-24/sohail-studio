@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from rich.console import Console
+from rich.panel import Panel
 
 from core.cli_bridge import (
     CONTROLLED_NEEDS_CLARIFICATION_EXIT_CODE,
@@ -449,17 +450,198 @@ async def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_created_files(result: Any) -> None:
-    files = list(getattr(result, "files_created", []) or [])
-    skipped = list(getattr(result, "files_skipped", []) or [])
-    if files:
-        console.print("[bold]Created files:[/bold]")
-        for path in files:
-            console.print(f"[green]✓[/green] {path}")
-    if skipped:
-        console.print("[bold]Skipped existing files:[/bold]")
-        for path in skipped:
-            console.print(f"[yellow]•[/yellow] {path}")
+def _planned_actions(result: Any) -> list[dict[str, str]]:
+    planned = list((getattr(result, "data", {}) or {}).get("planned_actions", []) or [])
+    if planned:
+        return planned
+    return [
+        {"action": "create", "path": str(path)}
+        for path in list(getattr(result, "files_created", []) or [])
+    ] + [
+        {"action": "keep", "path": str(path)}
+        for path in list(getattr(result, "files_skipped", []) or [])
+    ]
+
+
+def _display_value(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return str(value)
+
+
+def _append_context_evidence(lines: list[str], context: dict[str, Any]) -> None:
+    for component in context.get("components", []) or []:
+        name = component.get("name", "component")
+        lines.append(f"  {name}:")
+        runtimes = component.get("runtimes", []) or []
+        for item in runtimes:
+            lines.append(
+                f"    - Runtime: {item.get('runtime')} {item.get('version')} "
+                f"(source: {item.get('source_file')}, confidence: {item.get('confidence')})"
+            )
+        for item in component.get("commands", []) or []:
+            lines.append(
+                f"    - Command [{item.get('name')}]: {item.get('command')} "
+                f"(source: {item.get('source_file')}, confidence: {item.get('confidence')})"
+            )
+        for item in component.get("ports", []) or []:
+            lines.append(
+                f"    - Port [{item.get('port_type')}]: {item.get('port')} "
+                f"(source: {item.get('source_file')}, confidence: {item.get('confidence')})"
+            )
+        for item in component.get("artifacts", []) or []:
+            lines.append(
+                f"    - Artifact [{item.get('source_type')}]: {item.get('path')} "
+                f"(rule: {item.get('rule_id')}, derived from: {_display_value(item.get('derived_from') or [])})"
+            )
+            lines.append(f"      launch: {_display_value(item.get('launch_command') or 'none')}")
+        for item in component.get("base_images", []) or []:
+            lines.append(
+                f"    - Base image [{item.get('source_type', 'EXPLICIT_EVIDENCE')}]: {item.get('image')} "
+                f"(source: {item.get('source_file')})"
+            )
+        for item in component.get("working_directories", []) or []:
+            lines.append(
+                f"    - Working directory [{item.get('source_type', 'EXPLICIT_EVIDENCE')}]: {item.get('path')} "
+                f"(source: {item.get('source_file')})"
+            )
+        if not runtimes and not component.get("commands") and not component.get("ports") and not component.get("artifacts"):
+            lines.append("    - No Docker-relevant runtime, command, or port facts")
+    for policy in context.get("platform_policies", []) or []:
+        lines.append(
+            f"  Platform policy [{policy.get('source_type')}]: "
+            f"{policy.get('policy_id')} v{policy.get('policy_version')} "
+            f"(component: {policy.get('component')}, applies: {_display_value(policy.get('applicable_reason') or [])})"
+        )
+        for field in ("base_image", "working_directory", "build_image"):
+            value = (policy.get("values") or {}).get(field)
+            if value:
+                lines.append(
+                    f"    - {field}: {value.get('value')} "
+                    f"(source_type: {value.get('source_type')}, policy: {value.get('policy_id')} v{value.get('policy_version')})"
+                )
+
+
+def _print_docker_result(result: Any, *, dry_run: bool = False) -> None:
+    if dry_run:
+        planned = _planned_actions(result)
+        data = getattr(result, "data", {}) or {}
+        context = data.get("context") or {}
+        decision = data.get("decision") or {}
+        validation = data.get("validation") or {}
+        lines = [
+            "Inspection:",
+            f"  Project: {context.get('project', {}).get('name', 'unknown')}",
+            f"  Inspection run: {data.get('inspection_run_id') or context.get('project', {}).get('inspection_run_id', 'unknown')}",
+            "  Repository scan during Dockerize: 0 (persisted snapshot reused)",
+            "",
+            "Evidence used:",
+        ]
+        _append_context_evidence(lines, context)
+        lines.extend(["", "Artifact plan:"])
+        if planned:
+            labels = {"generate": "CREATE", "create": "CREATE", "upgrade": "UPGRADE", "keep": "KEEP", "skip": "SKIP"}
+            for item in planned:
+                action = labels.get(str(item.get("action", "plan")).lower(), str(item.get("action", "PLAN")).upper())
+                lines.append(f"WOULD {action}: {item.get('path', '')}")
+        else:
+            lines.append("  No filesystem changes planned")
+        lines.extend([
+            "",
+            "Ollama:",
+            f"  Model: {data.get('model', 'devops-qwen:latest')}",
+            "  Status: decision received" if data.get("model_called", True) else "  Status: not called (deterministic preflight blocked first)",
+            f"  Repair attempts: {data.get('repair_attempts', 0)}",
+            "",
+            "Decision validation:",
+            f"  [PASS] evidence-bound decision ({decision.get('status', 'unknown')})",
+            f"  [PASS] artifact scope ({'authoritative plan applied' if data.get('docker_plan') is not None else 'default plan'})",
+            f"  [PASS] rendered artifact validation ({validation.get('status', 'unknown')})",
+            "",
+            "In-memory artifacts:",
+        ])
+        rendered = data.get("rendered_artifacts", []) or []
+        if rendered:
+            for artifact in rendered:
+                lines.append(f"  [READY] {artifact.get('path', '')}")
+        else:
+            lines.append("  None (workflow did not reach rendering)")
+        for artifact in rendered:
+            lines.extend([
+                "",
+                "------------------------------------------------",
+                "WOULD CREATE / UPDATE",
+                "------------------------------------------------",
+                f"Path: {artifact.get('path', '')}",
+                "Preview:",
+                str(artifact.get("content", "")),
+            ])
+        lines.extend([
+            "",
+            "Files written: NO (count: 0)",
+            "Files modified: NO (count: 0)",
+            "Repository scan: 0 during Dockerize",
+            f"Inspection run reused: {data.get('inspection_run_id') or context.get('project', {}).get('inspection_run_id', 'unknown')}",
+        ])
+        console.print(Panel("\n".join(lines), title="DRY RUN COMPLETED", border_style="yellow"))
+        return
+    lines = ["Created artifacts", ""]
+    actions = _planned_actions(result)
+    if actions:
+        labels = {"generate": "CREATED", "create": "CREATED", "upgrade": "UPGRADED", "keep": "KEPT", "skip": "SKIPPED"}
+        for item in actions:
+            action = labels.get(str(item.get("action", "create")).lower(), str(item.get("action", "create")).upper())
+            lines.append(f"{action}: {item.get('path', '')}")
+    else:
+        lines.append("No artifact paths reported")
+    lines.extend(["", "Validation: PASSED", "Persisted intelligence: REUSED", "New inspection: NO"])
+    console.print(Panel("\n".join(lines), title="DOCKERIZE COMPLETED", border_style="green"))
+
+
+def _print_docker_blocked(result: Any, *, dry_run: bool, stage: str) -> None:
+    title = "DRY RUN BLOCKED" if dry_run else "DOCKERIZE FAILED"
+    data = getattr(result, "data", {}) or {}
+    diagnostic = data.get("diagnostic") or {}
+    actual_stage = str(diagnostic.get("stage") or data.get("stage") or stage)
+    lines = [f"Stage: {actual_stage}", "", f"Reason: {result.message}", ""]
+    if diagnostic:
+        lines.extend([
+            "Missing/evidence boundary:",
+            f"  Repository truth in persisted snapshot: {diagnostic.get('requirements', [{}])[0].get('repository_truth', 'NOT REPRESENTED')}",
+            f"  Dockerize repository scan: {diagnostic.get('repository_scan_during_dockerize', 'NO')}",
+            f"  Missing authoritative requirements: {_display_value(diagnostic.get('missing_requirements') or 'none')}",
+            "",
+            "Evidence diagnostic:",
+        ])
+        for item in diagnostic.get("requirements", []) or []:
+            lines.extend([
+                f"  {item.get('component')}: {item.get('requirement')}",
+                f"    source: {_display_value(item.get('source') or 'none')}",
+                f"    value: {_display_value(item.get('value') or 'none')}",
+                f"    explicit evidence: {_display_value(item.get('explicit_evidence') or 'none')}",
+                f"    derived deterministic: {_display_value(item.get('derived_deterministic') or 'none')}",
+                f"    approved platform policy: {_display_value(item.get('approved_platform_policy') or 'none')}",
+                f"    unsupported: {_display_value(item.get('unsupported') or 'none')}",
+                f"    repository truth: {item.get('repository_truth')}",
+                f"    inspector: {item.get('inspector')}",
+                f"    persistence: {item.get('persisted')}",
+                f"    Docker context: {item.get('docker_context')}",
+                f"    deterministic validation: {item.get('validation')}",
+            ])
+            if item.get("rejection"):
+                lines.append(f"    rejected: {item['rejection']}")
+        lines.extend([
+            f"  Model called: {'YES' if data.get('model_called') else 'NO'}",
+            f"  Repair attempted: {'YES' if data.get('repair_attempts') else 'NO'}",
+            "  Ollama was not called: YES" if not data.get("model_called") else "  Ollama was not called: NO",
+            "",
+            "Evidence rejected: " + _display_value(diagnostic.get("evidence_rejected") or "none"),
+            "Model proposed (not repository truth): " + _display_value(diagnostic.get("model_proposed") or "none"),
+            "Evidence absent/unsupported: see each requirement's explicit, derived, and unsupported fields above.",
+            f"Recommended next action: {diagnostic.get('recommended_next_action', 'Re-inspect after adding authoritative evidence.')}",
+        ])
+    lines.extend(["", "Files written: NO (count: 0)", "Files modified: NO (count: 0)"])
+    console.print(Panel("\n".join(lines), title=title, border_style="yellow" if dry_run else "red"))
 
 
 async def cmd_dockerize(args: argparse.Namespace) -> int:
@@ -507,13 +689,20 @@ async def cmd_dockerize(args: argparse.Namespace) -> int:
             )
         return CONTROLLED_NEEDS_CLARIFICATION_EXIT_CODE
     if result.status == "NEEDS_EVIDENCE":
-        console.print(f"[yellow]Dockerize needs evidence:[/yellow] {result.message}")
+        if args.dry_run:
+            _print_docker_blocked(result, dry_run=True, stage="Evidence-bound decision validation")
+        else:
+            console.print(f"[yellow]Dockerize needs evidence:[/yellow] {result.message}")
         return CONTROLLED_NEEDS_EVIDENCE_EXIT_CODE
     if not result.success:
-        console.print(f"[red]Dockerize failed:[/red] {result.message}")
+        if args.dry_run:
+            _print_docker_blocked(result, dry_run=True, stage="Dockerize execution")
+        else:
+            _print_docker_blocked(result, dry_run=False, stage="Dockerize execution")
         return 1
-    console.print(f"[bold green]{result.message}[/bold green]")
-    _print_created_files(result)
+    if not args.dry_run:
+        console.print(f"[bold green]{result.message}[/bold green]")
+    _print_docker_result(result, dry_run=args.dry_run)
     return 0
 
 

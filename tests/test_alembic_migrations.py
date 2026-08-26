@@ -13,11 +13,14 @@ def test_project_intelligence_migration_revision_is_within_alembic_limit():
     revision_1 = script.get_revision("0001_storage_foundation")
     revision_2 = script.get_revision("0002_project_intelligence")
     revision_3 = script.get_revision("0003_project_intel_refine")
+    revision_4 = script.get_revision("0004_evidence_provenance")
 
     assert revision_1 is not None
     assert revision_2 is not None
     assert revision_3 is not None
+    assert revision_4 is not None
     assert len(revision_3.revision) <= 32
     assert revision_2.down_revision == revision_1.revision
     assert revision_3.down_revision == revision_2.revision
-    assert script.get_current_head() == revision_3.revision
+    assert revision_4.down_revision == revision_3.revision
+    assert script.get_current_head() == revision_4.revision

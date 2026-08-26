@@ -27,7 +27,159 @@ from sohail_agent_cli.dockerize import (
     DockerValidationError,
     validate_docker_result,
 )
+from sohail_agent_cli.dockerize.platform_policy import policy_for_component, policy_value
 from sohail_agent_cli.providers import BaseProvider, OllamaProvider, ProviderConfig
+
+
+DOCKER_OLLAMA_TIMEOUT_SECONDS = 120.0
+
+
+def _evidence_diagnostic(context: Any, reason: str) -> dict[str, Any]:
+    """Describe the evidence boundary without acquiring new repository facts."""
+
+    requirements: list[dict[str, Any]] = []
+    for component in context.components:
+        name = str(component.get("name") or "component")
+        runtimes = list(component.get("runtimes") or [])
+        commands = list(component.get("commands") or [])
+        application_ports = [
+            item for item in component.get("ports", [])
+            if item.get("port_type") == "application"
+        ]
+        start_commands = [
+            item for item in commands
+            if item.get("name") == "start" and str(item.get("command") or "").strip()
+        ]
+        derived_artifacts = [
+            item for item in component.get("artifacts", [])
+            if item.get("source_type") == "DERIVED_DETERMINISTIC"
+            and item.get("model_inference") is False
+        ]
+        policy = policy_for_component(context.platform_policies, name)
+        policy_base = policy_value(policy, "base_image")
+        policy_workdir = policy_value(policy, "working_directory")
+        unsupported = component.get("deployment_evidence") or {}
+        build_commands = [
+            item for item in commands
+            if item.get("name") in {"build", "package"}
+            and str(item.get("command") or "").strip()
+        ]
+        requirements.extend([
+            {
+                "component": name,
+                "requirement": "Application/component identity",
+                "source": component.get("evidence") or [],
+                "value": name,
+                "repository_truth": "FOUND" if name else "NOT FOUND",
+                "inspector": "EXTRACTED" if name else "NOT EXTRACTED",
+                "persisted": "PERSISTED",
+                "docker_context": "INCLUDED",
+                "validation": "NOT RUN (decision blocked)" if not name else "PENDING",
+            },
+            {
+                "component": name,
+                "requirement": "Exact runtime version",
+                "source": [item.get("source_file") for item in runtimes],
+                "value": [
+                    {"runtime": item.get("runtime"), "version": item.get("version")}
+                    for item in runtimes
+                ],
+                "repository_truth": "FOUND" if runtimes else "NOT FOUND",
+                "inspector": "EXTRACTED" if runtimes else "NOT EXTRACTED",
+                "persisted": "PERSISTED" if runtimes else "NOT PERSISTED",
+                "docker_context": "INCLUDED" if runtimes else "NOT INCLUDED",
+                "validation": "NOT RUN (decision blocked)",
+            },
+            {
+                "component": name,
+                "requirement": "Build command",
+                "source": [item.get("source_file") for item in build_commands],
+                "value": [item.get("command") for item in build_commands],
+                "repository_truth": "FOUND" if build_commands else "NOT FOUND",
+                "inspector": "EXTRACTED" if build_commands else "NOT EXTRACTED",
+                "persisted": "PERSISTED" if build_commands else "NOT PERSISTED",
+                "docker_context": "INCLUDED" if build_commands else "NOT INCLUDED",
+                "validation": "NOT RUN (decision blocked)",
+            },
+            {
+                "component": name,
+                "requirement": "Production start command",
+                "explicit_evidence": [dict(item) for item in start_commands],
+                "derived_deterministic": [dict(item) for item in derived_artifacts],
+                "unsupported": unsupported if unsupported.get("status") == "UNSUPPORTED" else None,
+                "source": [item.get("source_file") for item in start_commands]
+                + [ref.get("source_file") for item in derived_artifacts for ref in item.get("derived_from", [])],
+                "value": [item.get("command") for item in start_commands]
+                + [item.get("launch_command") for item in derived_artifacts],
+                "repository_truth": "FOUND" if start_commands or derived_artifacts else "NOT PROVEN",
+                "inspector": "EXTRACTED" if start_commands or derived_artifacts else "NOT EXTRACTED",
+                "persisted": "PERSISTED" if start_commands or derived_artifacts else "NOT PERSISTED",
+                "docker_context": "INCLUDED" if start_commands or derived_artifacts else "NOT INCLUDED",
+                "validation": "NOT RUN (decision blocked)",
+                "rejection": (
+                    "No explicit or deterministic production start strategy was classified; model inference is not accepted."
+                    if not start_commands and not derived_artifacts else ""
+                ),
+            },
+            {
+                "component": name,
+                "requirement": "Application port",
+                "source": [item.get("source_file") for item in application_ports],
+                "value": [item.get("port") for item in application_ports],
+                "repository_truth": "FOUND" if application_ports else "NOT FOUND",
+                "inspector": "EXTRACTED" if application_ports else "NOT EXTRACTED",
+                "persisted": "PERSISTED" if application_ports else "NOT PERSISTED",
+                "docker_context": "INCLUDED" if application_ports else "NOT INCLUDED",
+                "validation": "NOT RUN (decision blocked)",
+            },
+            {
+                "component": name,
+                "requirement": "Exact Docker base image",
+                "explicit_evidence": [dict(item) for item in component.get("base_images", []) if item.get("source_type", "EXPLICIT_EVIDENCE") == "EXPLICIT_EVIDENCE"],
+                "derived_deterministic": [],
+                "approved_platform_policy": [policy_base] if policy_base else [],
+                "unsupported": {"status": "UNSUPPORTED", "reason": "No exact base image evidence or applicable approved platform policy exists"} if not component.get("base_images") and not policy_base else None,
+                "source": [item.get("source_file") for item in component.get("base_images", [])],
+                "value": [item.get("image") for item in component.get("base_images", [])] + ([policy_base.get("value")] if policy_base else []),
+                "repository_truth": "FOUND" if component.get("base_images") else "NOT IN REPOSITORY",
+                "inspector": "EXTRACTED" if component.get("base_images") else "NOT EXTRACTED",
+                "persisted": "PERSISTED" if component.get("base_images") else ("POLICY REGISTRY" if policy_base else "NOT PERSISTED"),
+                "docker_context": "INCLUDED" if component.get("base_images") or policy_base else "NOT INCLUDED",
+                "validation": "NOT RUN (decision blocked)",
+            },
+            {
+                "component": name,
+                "requirement": "Exact working directory",
+                "explicit_evidence": [dict(item) for item in component.get("working_directories", []) if item.get("source_type", "EXPLICIT_EVIDENCE") == "EXPLICIT_EVIDENCE"],
+                "derived_deterministic": [],
+                "approved_platform_policy": [policy_workdir] if policy_workdir else [],
+                "unsupported": {"status": "UNSUPPORTED", "reason": "No exact working directory evidence or applicable approved platform policy exists"} if not component.get("working_directories") and not policy_workdir else None,
+                "source": [item.get("source_file") for item in component.get("working_directories", [])],
+                "value": [item.get("path") for item in component.get("working_directories", [])] + ([policy_workdir.get("value")] if policy_workdir else []),
+                "repository_truth": "FOUND" if component.get("working_directories") else "NOT IN REPOSITORY",
+                "inspector": "EXTRACTED" if component.get("working_directories") else "NOT EXTRACTED",
+                "persisted": "PERSISTED" if component.get("working_directories") else ("POLICY REGISTRY" if policy_workdir else "NOT PERSISTED"),
+                "docker_context": "INCLUDED" if component.get("working_directories") or policy_workdir else "NOT INCLUDED",
+                "validation": "NOT RUN (decision blocked)",
+            },
+        ])
+    if "working directory" in reason.lower():
+        recommendation = "Persist an exact authoritative WORKDIR or approved deterministic platform policy; Dockerize will not default to /app."
+    elif "base image" in reason.lower():
+        recommendation = "Persist an exact base image or approve a documented deterministic platform policy; Ollama cannot choose one."
+    else:
+        recommendation = "Run Inspect after adding or explicitly documenting the missing production start strategy; do not supply a model-generated default."
+    return {
+        "stage": "Evidence-bound decision validation",
+        "reason": reason,
+        "inspection_run_id": context.project.get("inspection_run_id"),
+        "repository_scan_during_dockerize": "NO",
+        "requirements": requirements,
+        "platform_policies": context.platform_policies,
+        "evidence_available": context.evidence,
+        "evidence_rejected": [],
+        "recommended_next_action": recommendation,
+    }
 
 
 class DockerAgent(BaseAgent):
@@ -53,7 +205,11 @@ class DockerAgent(BaseAgent):
         config = load_config(settings_path)
         self.model = model or config.devops_model
         self.provider = provider or OllamaProvider(
-            ProviderConfig(base_url=config.ollama_base_url, default_model=self.model)
+            ProviderConfig(
+                base_url=config.ollama_base_url,
+                default_model=self.model,
+                timeout=DOCKER_OLLAMA_TIMEOUT_SECONDS,
+            )
         )
         self.repository = repository
         self.acquisition_service = acquisition_service
@@ -74,6 +230,8 @@ class DockerAgent(BaseAgent):
         root = path.expanduser().resolve()
         if not root.exists() or not root.is_dir():
             return AgentResult.failure(f"Target folder does not exist: {root}")
+        if self.dry_run:
+            self.info("[DRY RUN] Render and validate only; no filesystem writes will be performed")
         repository = self.repository
         close_storage = False
         try:
@@ -84,6 +242,7 @@ class DockerAgent(BaseAgent):
             decision_engine = DockerDecisionEngine(
                 self.provider,
                 self.model,
+                on_model_call=lambda: self.info(f"Asking {self.model} for a bounded Docker decision"),
                 on_repair=lambda: self.warning(
                     "Model output format invalid; performing one bounded repair"
                 ),
@@ -122,7 +281,10 @@ class DockerAgent(BaseAgent):
             selected_components = components
             if docker_plan is not None and not selected_components:
                 selected_components = list((docker_plan.get("dockerfiles") or {}).keys())
-            for attempt in range(2):
+            # Dockerize is intentionally a single-snapshot workflow.  A model
+            # decision gap is reported; repository evidence can only change by
+            # running Inspect explicitly before Dockerize.
+            for attempt in range(1):
                 context = context_builder.build(
                     root,
                     selected_components,
@@ -150,6 +312,10 @@ class DockerAgent(BaseAgent):
                             data={
                                 "inspection_run_id": context.project.get("inspection_run_id"),
                                 "docker_plan": artifact_plan,
+                                "planned_actions": [
+                                    {"action": "keep", "path": str(path)} for path in kept
+                                ],
+                                "dry_run": self.dry_run,
                                 "context": context.to_dict(),
                             },
                         )
@@ -177,6 +343,10 @@ class DockerAgent(BaseAgent):
                             data={
                                 "inspection_run_id": context.project.get("inspection_run_id"),
                                 "docker_plan": artifact_plan,
+                                "planned_actions": [
+                                    {"action": "keep", "path": str(path)} for path in kept
+                                ],
+                                "dry_run": self.dry_run,
                                 "context": context.to_dict(),
                             },
                         )
@@ -203,58 +373,49 @@ class DockerAgent(BaseAgent):
                         "Selected Docker artifacts: "
                         + (", ".join(selected_artifacts) or "none")
                     )
-                self.info(f"Asking {self.model} for a bounded Docker decision")
                 self.info(
                     f"Docker context: {context.project['name']} · root {context.project['root_path']} · "
                     f"selected {', '.join(context.project['selected_components'])} · "
                     f"components {len(context.components)} · evidence {len(context.evidence)} · "
                     f"model {self.model}"
                 )
+                self.info("Running deterministic Docker requirement preflight")
                 decision = await decision_engine.decide(context)
+                self.info(
+                    "Ollama decision received"
+                    if decision.model_called
+                    else "Deterministic evidence preflight blocked before Ollama"
+                )
+                if not decision.model_called:
+                    self.warning("Missing authoritative Docker requirements")
+                    self.info("Ollama was not called")
                 if decision.repair_attempted:
                     self.info("Revalidating bounded repaired Docker decision")
                 if decision.status == "ready":
+                    self.info("Docker decision validated against persisted evidence")
                     break
-                if docker_plan is not None:
-                    self.info(
-                        "Dockerize evidence acquisition not started: "
-                        "the explicit plan is bound to the persisted inspection snapshot"
-                    )
-                    break
-                if attempt == 1:
-                    self.info("Dockerize retry not started: retry limit reached")
-                    break
-                gap_result = await self._acquire_evidence_once(
-                    root, context, decision, repository, acquisition_service,
-                    emit_stage_events=using_default_acquisition,
-                    allow_clarification=not bool(user_evidence),
+                self.info(
+                    "Dockerize evidence acquisition not started: "
+                    "the workflow is bound to the persisted inspection snapshot"
                 )
-                acquisition_details.append(gap_result)
-                if not gap_result["accepted_evidence_added"]:
-                    clarification = gap_result.get("clarification_request")
-                    if clarification is not None:
-                        clarification_data = (
-                            clarification.to_dict()
-                            if hasattr(clarification, "to_dict")
-                            else clarification
-                        )
-                        return AgentResult.controlled(
-                            "NEEDS_CLARIFICATION",
-                            f"Clarification required: {clarification_data['question']}",
-                            data={
-                                "decision": decision.raw,
-                                "evidence_acquisition": acquisition_details,
-                                "clarification_request": clarification_data,
-                            },
-                        )
-                    self.info(
-                        "Dockerize retry not started: no new deterministic evidence was accepted"
-                    )
-                    break
-                self.info("Retrying Dockerize once with refreshed Project Intelligence")
+                break
             assert decision is not None
             if decision.status != "ready":
                 reason = decision.raw.get("reason") or "The DevOps model requires more repository evidence"
+                diagnostic = _evidence_diagnostic(context, reason)
+                if decision.raw.get("stage") == "deterministic Docker requirement preflight":
+                    diagnostic["stage"] = decision.raw["stage"]
+                    diagnostic["preflight"] = decision.raw.get("evidence_boundary", [])
+                    diagnostic["missing_requirements"] = decision.raw.get("missing_requirements", [])
+                diagnostic["model_proposed"] = (
+                    decision.raw.get("model_proposed")
+                    or {
+                        "components": decision.raw.get("components", []),
+                        "compose": decision.raw.get("compose", {}),
+                    }
+                    if decision.model_called
+                    else None
+                )
                 return AgentResult.controlled(
                     "NEEDS_EVIDENCE",
                     f"Docker decision requires evidence: {reason}",
@@ -262,6 +423,12 @@ class DockerAgent(BaseAgent):
                         "decision": decision.raw,
                         "model": self.model,
                         "evidence_acquisition": acquisition_details,
+                        "inspection_run_id": context.project.get("inspection_run_id"),
+                        "context": context.to_dict(),
+                        "diagnostic": diagnostic,
+                        "repair_attempts": int(decision.repair_attempted),
+                        "model_called": decision.model_called,
+                        "dry_run": self.dry_run,
                     },
                 )
             if compose and not (decision.compose.get("services") or []):
@@ -270,6 +437,9 @@ class DockerAgent(BaseAgent):
             artifacts: dict[Path, str] = {}
             files_created: list[Path] = []
             files_skipped: list[Path] = []
+            pending_writes: list[tuple[Path, str, bool]] = []
+            planned_actions: list[dict[str, str]] = []
+            self.info("Rendering selected Docker artifacts")
             for component in decision.components:
                 intelligence = next(item for item in context.components if item["name"] == component["name"])
                 component_action = (
@@ -277,29 +447,45 @@ class DockerAgent(BaseAgent):
                     if artifact_plan is not None else "generate"
                 )
                 dockerfile_path = self._dockerfile_path(root, intelligence)
-                dockerfile = DockerDecisionEngine.render_dockerfile(component)
+                # Rendering receives the model's bounded decision together with
+                # persisted deterministic strategy facts.  The model cannot
+                # add or replace artifact identity while the renderer remains
+                # independent of repository access.
+                render_component = {
+                    **component,
+                    "artifacts": list(intelligence.get("artifacts") or []),
+                    "deployment_evidence": dict(intelligence.get("deployment_evidence") or {}),
+                    "language": intelligence.get("language"),
+                    "platform_policy": policy_for_component(
+                        context.platform_policies, str(component.get("name"))
+                    ),
+                }
+                dockerfile = DockerDecisionEngine.render_dockerfile(render_component)
                 if component_action == "keep":
                     artifacts[dockerfile_path] = dockerfile_path.read_text(encoding="utf-8")
                     files_skipped.append(dockerfile_path)
+                    planned_actions.append({"action": "keep", "path": str(dockerfile_path)})
                     continue
-                artifacts[dockerfile_path] = dockerfile
-                await self._write_generated(
-                    dockerfile_path, dockerfile,
-                    overwrite or component_action == "upgrade",
-                    files_created, files_skipped,
-                )
-                if dockerfile_path not in files_created and dockerfile_path.exists():
+                dockerfile_overwrite = overwrite or component_action == "upgrade"
+                if dockerfile_path.exists() and not dockerfile_overwrite:
                     artifacts[dockerfile_path] = dockerfile_path.read_text(encoding="utf-8")
+                    files_skipped.append(dockerfile_path)
+                    planned_actions.append({"action": "keep", "path": str(dockerfile_path)})
+                else:
+                    artifacts[dockerfile_path] = dockerfile
+                    pending_writes.append((dockerfile_path, dockerfile, dockerfile_overwrite))
+                    planned_actions.append({"action": component_action, "path": str(dockerfile_path)})
                 dockerignore_path = dockerfile_path.parent / ".dockerignore"
                 dockerignore = DockerDecisionEngine.render_dockerignore()
-                artifacts[dockerignore_path] = dockerignore
-                await self._write_generated(
-                    dockerignore_path, dockerignore,
-                    overwrite or component_action == "upgrade",
-                    files_created, files_skipped,
-                )
-                if dockerignore_path not in files_created and dockerignore_path.exists():
+                dockerignore_overwrite = overwrite or component_action == "upgrade"
+                if dockerignore_path.exists() and not dockerignore_overwrite:
                     artifacts[dockerignore_path] = dockerignore_path.read_text(encoding="utf-8")
+                    files_skipped.append(dockerignore_path)
+                    planned_actions.append({"action": "keep", "path": str(dockerignore_path)})
+                else:
+                    artifacts[dockerignore_path] = dockerignore
+                    pending_writes.append((dockerignore_path, dockerignore, dockerignore_overwrite))
+                    planned_actions.append({"action": component_action, "path": str(dockerignore_path)})
 
             compose_path = self._compose_path(root, context)
             compose_exists = compose_path.exists()
@@ -310,17 +496,20 @@ class DockerAgent(BaseAgent):
             )
             if generate_compose:
                 compose_content = DockerDecisionEngine.render_compose(decision)
-                artifacts[compose_path] = compose_content
-                await self._write_generated(
-                    compose_path, compose_content,
-                    overwrite or planned_compose == "upgrade",
-                    files_created, files_skipped,
-                )
-                if compose_path not in files_created and compose_path.exists():
+                compose_overwrite = overwrite or planned_compose == "upgrade"
+                if compose_path.exists() and not compose_overwrite:
                     artifacts[compose_path] = compose_path.read_text(encoding="utf-8")
+                    files_skipped.append(compose_path)
+                    planned_actions.append({"action": "keep", "path": str(compose_path)})
+                else:
+                    artifacts[compose_path] = compose_content
+                    pending_writes.append((compose_path, compose_content, compose_overwrite))
+                    planned_actions.append({"action": planned_compose or "generate", "path": str(compose_path)})
             elif compose and compose_exists:
                 artifacts[compose_path] = compose_path.read_text(encoding="utf-8")
+                planned_actions.append({"action": "keep", "path": str(compose_path)})
 
+            self.info("Validating rendered Docker artifacts")
             validation = validate_docker_result(
                 root,
                 context,
@@ -330,6 +519,14 @@ class DockerAgent(BaseAgent):
                 compose_path=compose_path,
             )
             self.info("Docker artifacts validated against persisted evidence")
+            if self.dry_run:
+                self.info("[DRY RUN] No files were written or modified")
+            else:
+                for write_path, content, write_overwrite in pending_writes:
+                    await self._write_generated(
+                        write_path, content, write_overwrite,
+                        files_created, files_skipped,
+                    )
             for created in files_created:
                 self.success(f"{'Would write' if self.dry_run else 'Wrote'} {created}")
             for skipped in files_skipped:
@@ -344,13 +541,28 @@ class DockerAgent(BaseAgent):
                     "context": context.to_dict(),
                     "decision": decision.raw,
                     "validation": validation,
+                    "inspection_run_id": context.project.get("inspection_run_id"),
+                    "rendered_artifacts": [
+                        {"path": str(path), "content": content}
+                        for path, content in artifacts.items()
+                    ],
+                    "repair_attempts": int(decision.repair_attempted),
+                    "model_called": decision.model_called,
                     "files_created": len(files_created),
                     "files_skipped": len(files_skipped),
                     "docker_plan": artifact_plan,
+                    "planned_actions": planned_actions,
+                    "dry_run": self.dry_run,
                 },
             )
         except (DockerContextError, DockerDecisionError, DockerValidationError) as exc:
-            return AgentResult.failure(str(exc))
+            if isinstance(exc, DockerContextError):
+                stage = "Persisted Docker context"
+            elif isinstance(exc, DockerDecisionError):
+                stage = "Ollama Docker decision"
+            else:
+                stage = "Docker artifact validation"
+            return AgentResult.failure(str(exc), data={"stage": stage})
         finally:
             if close_storage and repository is not None:
                 repository.storage.close()

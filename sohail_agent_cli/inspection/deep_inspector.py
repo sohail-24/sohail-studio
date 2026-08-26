@@ -11,6 +11,7 @@ import json
 import os
 import re
 import tomllib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -211,6 +212,9 @@ class DeepInspector:
         from core.evidence.patterns import recognize_verified_patterns
 
         intelligence.verified_patterns = recognize_verified_patterns(intelligence)
+        from .derivation import derive_deterministic_evidence
+
+        derive_deterministic_evidence(intelligence)
         return intelligence
 
     @staticmethod
@@ -304,6 +308,8 @@ class DeepInspector:
                     intelligence, source_file=relative, evidence_type="entrypoint",
                     key="manage_py", value="manage.py", confidence="high",
                 )
+            elif path.suffix.lower() == ".java":
+                self._java_source(intelligence, relative, content)
 
             self._source_ports(intelligence, relative, content, component)
             self._kubernetes(intelligence, relative, content)
@@ -334,6 +340,18 @@ class DeepInspector:
         normalized: dict[tuple[str, str, str | None], dict[str, Any]] = {}
         for raw in intelligence.ports:
             component = str(raw.get("component") or "root")
+            if component not in component_names:
+                source_file = str(raw.get("source_file") or "")
+                source_matches = []
+                for candidate in intelligence.components:
+                    candidate_name = str(candidate.get("name") or "")
+                    candidate_path = str(candidate.get("path") or ".").strip("./")
+                    if not candidate_name:
+                        continue
+                    if not candidate_path or source_file == candidate_path or source_file.startswith(candidate_path + "/"):
+                        source_matches.append(candidate_name)
+                if len(source_matches) == 1:
+                    component = source_matches[0]
             if component == "root":
                 raw_port_type = str(raw.get("port_type") or "application")
                 matching = [item for item in application_candidates if item.get("port") == raw.get("port") and item.get("component") not in {None, "root"}]
@@ -599,14 +617,154 @@ class DeepInspector:
         manager = "maven"
         intelligence.package_managers.append(manager)
         self._add(intelligence, source_file=source, evidence_type="package_manager", key="package_manager", value=manager, confidence="high")
+        metadata = self._parse_maven_metadata(source, content)
+        intelligence.build_metadata.append(metadata)
+        for key, value in (
+            ("groupId", metadata.get("group_id")),
+            ("artifactId", metadata.get("artifact_id")),
+            ("version", metadata.get("version")),
+            ("packaging", metadata.get("packaging")),
+            ("build.finalName", metadata.get("build_final_name")),
+            ("build.directory", metadata.get("build_directory")),
+        ):
+            if value:
+                self._add(
+                    intelligence, source_file=source, evidence_type="maven_configuration",
+                    key=key, value=value, confidence="high",
+                )
+        for plugin in metadata.get("plugins") or []:
+            if plugin.get("artifact_id"):
+                self._add(
+                    intelligence, source_file=source, evidence_type="maven_plugin",
+                    key=str(plugin.get("artifact_id")),
+                    value={"groupId": plugin.get("group_id"), "executions": plugin.get("executions") or []},
+                    confidence="high",
+                )
+        if metadata.get("parent", {}).get("artifact_id"):
+            self._add(
+                intelligence, source_file=source, evidence_type="maven_parent",
+                key="parent", value=metadata["parent"], confidence="high",
+            )
+        for module in metadata.get("modules") or []:
+            self._add(
+                intelligence, source_file=source, evidence_type="maven_module",
+                key="module", value=module, confidence="high",
+            )
         for name in re.findall(r"<artifactId>\s*([^<]+)\s*</artifactId>", content):
             intelligence.dependencies.append({"name": name.strip(), "version": "", "scope": "runtime", "source_file": source, "confidence": "medium"})
             self._add(intelligence, source_file=source, evidence_type="dependency", key=name.strip(), value="maven artifact", confidence="medium")
         match = re.search(r"<java\.version>\s*([^<]+)\s*</java\.version>", content)
         if match:
             self._runtime(intelligence, source, "Java", match.group(1).strip(), "high", "pom.xml java.version")
-        intelligence.commands.append({"name": "package", "command": "mvn package", "source_file": source, "confidence": "high", "component": component})
-        self._add(intelligence, source_file=source, evidence_type="build_system", key="build_command", value="mvn package", confidence="high")
+        intelligence.commands.append({
+            "name": "package", "command": "mvn package", "source_file": source,
+            "confidence": "high", "component": component,
+            "source_type": "DERIVED_DETERMINISTIC", "rule_id": "maven.lifecycle.package.v1",
+            "derived_from": [{"source_file": source, "key": "package_manager"}],
+            "model_inference": False,
+        })
+        self._add(
+            intelligence, source_file=source, evidence_type="build_system", key="build_command",
+            value="mvn package", confidence="high", source_type="DERIVED_DETERMINISTIC",
+            rule_id="maven.lifecycle.package.v1",
+            derived_from=[{"source_file": source, "key": "package_manager"}],
+        )
+
+    @staticmethod
+    def _parse_maven_metadata(source: str, content: str) -> dict[str, Any]:
+        """Extract a bounded Maven model without resolving external parents."""
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError as exc:
+            return {"source_file": source, "parse_error": str(exc), "plugins": [], "modules": []}
+
+        def tag(value: ET.Element) -> str:
+            return value.tag.rsplit("}", 1)[-1]
+
+        def child(parent: ET.Element, name: str) -> str | None:
+            for item in list(parent):
+                if tag(item) == name and (item.text or "").strip():
+                    return (item.text or "").strip()
+            return None
+
+        def config(element: ET.Element | None) -> dict[str, Any]:
+            if element is None:
+                return {}
+            result: dict[str, Any] = {}
+            for item in list(element):
+                key = tag(item)
+                if list(item):
+                    result[key] = {tag(child_item): (child_item.text or "").strip() for child_item in list(item)}
+                else:
+                    result[key] = (item.text or "").strip()
+            return result
+
+        parent_element = next((item for item in list(root) if tag(item) == "parent"), None)
+        parent = {
+            "group_id": child(parent_element, "groupId") if parent_element is not None else None,
+            "artifact_id": child(parent_element, "artifactId") if parent_element is not None else None,
+            "version": child(parent_element, "version") if parent_element is not None else None,
+            "relative_path": child(parent_element, "relativePath") if parent_element is not None else None,
+        }
+        parent_source = None
+        if parent.get("relative_path") and str(parent["relative_path"]).endswith(".xml"):
+            parent_source = str(Path(source).parent / str(parent["relative_path"])).replace("\\", "/")
+        build = next((item for item in list(root) if tag(item) == "build"), None)
+        plugins: list[dict[str, Any]] = []
+        if build is not None:
+            plugins_element = next((item for item in list(build) if tag(item) == "plugins"), None)
+            for plugin_element in list(plugins_element) if plugins_element is not None else []:
+                if tag(plugin_element) != "plugin":
+                    continue
+                executions_element = next((item for item in list(plugin_element) if tag(item) == "executions"), None)
+                executions: list[dict[str, Any]] = []
+                for execution_element in list(executions_element) if executions_element is not None else []:
+                    if tag(execution_element) != "execution":
+                        continue
+                    goals_element = next((item for item in list(execution_element) if tag(item) == "goals"), None)
+                    executions.append({
+                        "id": child(execution_element, "id"),
+                    "goals": [child_item.text.strip() for child_item in (list(goals_element) if goals_element is not None else []) if tag(child_item) == "goal" and (child_item.text or "").strip()],
+                        "configuration": config(next((item for item in list(execution_element) if tag(item) == "configuration"), None)),
+                    })
+                plugins.append({
+                    "group_id": child(plugin_element, "groupId"),
+                    "artifact_id": child(plugin_element, "artifactId"),
+                    "executions": executions,
+                    "configuration": config(next((item for item in list(plugin_element) if tag(item) == "configuration"), None)),
+                })
+        modules_element = next((item for item in list(root) if tag(item) == "modules"), None)
+        modules = [child_item.text.strip() for child_item in (list(modules_element) if modules_element is not None else []) if tag(child_item) == "module" and (child_item.text or "").strip()]
+        properties_element = next((item for item in list(root) if tag(item) == "properties"), None)
+        properties = {tag(item): (item.text or "").strip() for item in (list(properties_element) if properties_element is not None else []) if (item.text or "").strip()}
+        return {
+            "source_file": source,
+            "parent": parent,
+            "parent_source_file": parent_source,
+            "group_id": child(root, "groupId"),
+            "artifact_id": child(root, "artifactId"),
+            "version": child(root, "version"),
+            "packaging": child(root, "packaging"),
+            "build_final_name": child(build, "finalName") if build is not None else None,
+            "build_directory": child(build, "directory") if build is not None else None,
+            "plugins": plugins,
+            "modules": modules,
+            "properties": properties,
+        }
+
+    def _java_source(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
+        """Record uniquely identifiable Java main classes as explicit facts."""
+        if not re.search(r"\bpublic\s+static\s+void\s+main\s*\(", content):
+            return
+        class_match = re.search(r"\b(?:public\s+)?class\s+([A-Za-z_$][\w$]*)", content)
+        if class_match is None:
+            return
+        package_match = re.search(r"\bpackage\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;", content)
+        class_name = f"{package_match.group(1)}.{class_match.group(1)}" if package_match else class_match.group(1)
+        item = {"kind": "java_main_class", "class_name": class_name, "source_file": source, "confidence": "high"}
+        if item not in intelligence.entrypoints:
+            intelligence.entrypoints.append(item)
+        self._add(intelligence, source_file=source, evidence_type="entrypoint", key="java_main_class", value=class_name, confidence="high")
 
     def _package_manager_for_manifest(self, source: str, intelligence: ProjectIntelligence) -> str | None:
         directory = Path(source).parent
@@ -628,6 +786,26 @@ class DeepInspector:
 
     def _dockerfile(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> None:
         intelligence.docker.setdefault("dockerfiles", []).append(source)
+        base = re.search(r"^FROM\s+(\S+)", content, re.MULTILINE | re.IGNORECASE)
+        if base:
+            intelligence.docker.setdefault("base_images", []).append({
+                "image": base.group(1),
+                "source_file": source,
+                "component": component,
+                "source_type": "EXPLICIT_EVIDENCE",
+                "confidence": "high",
+                "model_inference": False,
+            })
+        workdir = re.search(r"^WORKDIR\s+(\S+)", content, re.MULTILINE | re.IGNORECASE)
+        if workdir:
+            intelligence.docker.setdefault("working_directories", []).append({
+                "path": workdir.group(1),
+                "source_file": source,
+                "component": component,
+                "source_type": "EXPLICIT_EVIDENCE",
+                "confidence": "high",
+                "model_inference": False,
+            })
         runtime = re.search(r"^FROM\s+node:(\S+)", content, re.MULTILINE | re.IGNORECASE)
         if runtime:
             version = runtime.group(1).split("-", 1)[0]

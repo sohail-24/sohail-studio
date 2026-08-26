@@ -10,6 +10,16 @@ from typing import Any
 Confidence = str
 
 
+class EvidenceSourceType:
+    """Stable provenance categories used by deterministic workflows."""
+
+    EXPLICIT = "EXPLICIT_EVIDENCE"
+    DERIVED_DETERMINISTIC = "DERIVED_DETERMINISTIC"
+    APPROVED_PLATFORM_POLICY = "APPROVED_PLATFORM_POLICY"
+    MODEL_PROPOSED = "MODEL_PROPOSED"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
 @dataclass(frozen=True)
 class Evidence:
     """One explainable fact extracted from one repository file."""
@@ -21,6 +31,10 @@ class Evidence:
     confidence: Confidence
     line_number: int | None = None
     extraction_method: str = "deterministic-parser"
+    source_type: str = EvidenceSourceType.EXPLICIT
+    derived_from: list[dict[str, Any]] = field(default_factory=list)
+    rule_id: str | None = None
+    model_inference: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -62,6 +76,8 @@ class ProjectIntelligence:
     services: list[dict[str, Any]] = field(default_factory=list)
     databases: list[str] = field(default_factory=list)
     environment_variables: list[dict[str, Any]] = field(default_factory=list)
+    build_metadata: list[dict[str, Any]] = field(default_factory=list)
+    entrypoints: list[dict[str, Any]] = field(default_factory=list)
     docker: dict[str, Any] = field(default_factory=dict)
     kubernetes: dict[str, Any] = field(default_factory=dict)
     ci_cd: dict[str, Any] = field(default_factory=dict)
@@ -90,7 +106,7 @@ class ProjectIntelligence:
         for field_name in (
             "files", "components", "languages", "frameworks", "runtimes", "package_managers",
             "dependencies", "commands", "ports", "services", "databases", "environment_variables",
-            "verified_patterns", "evidence", "user_evidence", "warnings",
+            "build_metadata", "entrypoints", "verified_patterns", "evidence", "user_evidence", "warnings",
         ):
             if field_name in summary:
                 known[field_name] = summary[field_name]
@@ -142,6 +158,8 @@ class ProjectIntelligence:
             "services": self.services,
             "databases": self.databases,
             "environment_variables": self.environment_variables,
+            "build_metadata": self.build_metadata,
+            "entrypoints": self.entrypoints,
             "docker": self.docker,
             "kubernetes": self.kubernetes,
             "ci_cd": self.ci_cd,

@@ -88,6 +88,9 @@ project_evidence = Table(
     Column("source_file", String(2048), nullable=False), Column("evidence_type", String(128), nullable=False),
     Column("key", String(255), nullable=False), Column("value", JSON, nullable=False), Column("confidence", String(16), nullable=False),
     Column("line_number", Integer), Column("extraction_method", String(128), nullable=False),
+    Column("source_type", String(64), nullable=False, default="EXPLICIT_EVIDENCE"),
+    Column("derived_from", JSON, nullable=False, default=list), Column("rule_id", String(128)),
+    Column("model_inference", Boolean, nullable=False, default=False),
 )
 
 
@@ -263,6 +266,9 @@ class ProjectIntelligenceRepository:
                         source_file=row["source_file"], evidence_type=row["evidence_type"],
                         key=row["key"], value=row["value"], confidence=row["confidence"],
                         line_number=row["line_number"], extraction_method=row["extraction_method"],
+                        source_type=row.get("source_type") or "EXPLICIT_EVIDENCE",
+                        derived_from=row.get("derived_from") or [], rule_id=row.get("rule_id"),
+                        model_inference=bool(row.get("model_inference", False)),
                     )
                     for row in evidence_rows
                 ]
