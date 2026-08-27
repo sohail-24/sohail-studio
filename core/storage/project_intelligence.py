@@ -25,7 +25,12 @@ from sqlalchemy import (
     update,
 )
 
-from sohail_agent_cli.inspection.models import DiscoveredFile, Evidence, ProjectIntelligence
+from sohail_agent_cli.inspection.models import (
+    DiscoveredFile,
+    Evidence,
+    ProjectIntelligence,
+    RuntimeDependency,
+)
 
 from .database import Storage
 
@@ -60,6 +65,12 @@ project_dependencies = Table(
     "project_dependencies", metadata,
     Column("id", String(36), primary_key=True), Column("run_id", String(36), ForeignKey("inspection_runs.id"), nullable=False),
     Column("name", String(255), nullable=False), Column("version", String(255)), Column("scope", String(64)),
+    Column("source_file", String(2048), nullable=False), Column("confidence", String(16), nullable=False),
+)
+project_runtime_dependencies = Table(
+    "project_runtime_dependencies", metadata,
+    Column("id", String(36), primary_key=True), Column("run_id", String(36), ForeignKey("inspection_runs.id"), nullable=False),
+    Column("component", String(255), nullable=False), Column("dependency", String(255), nullable=False),
     Column("source_file", String(2048), nullable=False), Column("confidence", String(16), nullable=False),
 )
 project_runtimes = Table(
@@ -233,6 +244,15 @@ class ProjectIntelligenceRepository:
             dependency_rows = connection.execute(
                 select(project_dependencies).where(project_dependencies.c.run_id == run_id)
             ).mappings().all()
+
+            inspector_db = inspect(connection)
+            if "project_runtime_dependencies" in inspector_db.get_table_names():
+                runtime_deps_rows = connection.execute(
+                    select(project_runtime_dependencies).where(project_runtime_dependencies.c.run_id == run_id)
+                ).mappings().all()
+            else:
+                runtime_deps_rows = []
+
             runtime_rows = connection.execute(
                 select(project_runtimes).where(project_runtimes.c.run_id == run_id)
             ).mappings().all()
@@ -241,6 +261,14 @@ class ProjectIntelligenceRepository:
             ).mappings().all()
             if dependency_rows:
                 intelligence.dependencies = [dict(row) for row in dependency_rows]
+            if runtime_deps_rows:
+                intelligence.runtime_dependencies = [
+                    RuntimeDependency(
+                        component=row["component"], dependency=row["dependency"],
+                        source_file=row["source_file"], confidence=row["confidence"]
+                    )
+                    for row in runtime_deps_rows
+                ]
             if runtime_rows:
                 intelligence.runtimes = [
                     {
@@ -370,6 +398,13 @@ class ProjectIntelligenceRepository:
                  "version": item.get("version"), "scope": item.get("scope"),
                  "source_file": item.get("source_file", ""), "confidence": item.get("confidence", "low")}
                 for item in intelligence.dependencies
+            ])
+        if hasattr(intelligence, "runtime_dependencies") and intelligence.runtime_dependencies:
+            connection.execute(insert(project_runtime_dependencies), [
+                {"id": str(uuid4()), "run_id": run_id, "component": dep.component,
+                 "dependency": dep.dependency, "source_file": dep.source_file,
+                 "confidence": dep.confidence}
+                for dep in intelligence.runtime_dependencies
             ])
         if intelligence.runtimes:
             connection.execute(insert(project_runtimes), [

@@ -68,7 +68,7 @@ class RepoAnalysis:
     missing_devops_files: list[str] = field(default_factory=list)
     structure_summary: str = ""
     components: list[ComponentAnalysis] = field(default_factory=list)
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -100,11 +100,11 @@ class RepoAnalyzer:
     """
     Analyzes repositories for structure, stack, and DevOps configuration.
     """
-    
+
     def __init__(self) -> None:
         """Initialize the repository analyzer."""
         self.stack_detector = StackDetector()
-    
+
     def analyze(self, directory: Path, deep: bool = True) -> RepoAnalysis:
         """
         Analyze a repository.
@@ -118,10 +118,10 @@ class RepoAnalyzer:
         """
         # Detect stack
         stack = self.stack_detector.detect(directory)
-        
+
         # Get project name
         name = self._get_project_name(directory)
-        
+
         # Check for DevOps files
         has_docker = (directory / "Dockerfile").exists()
         has_docker_compose = (directory / "docker-compose.yml").exists() or \
@@ -135,26 +135,26 @@ class RepoAnalyzer:
         has_terraform = (directory / "terraform").exists()
         has_makefile = (directory / "Makefile").exists()
         has_env_example = (directory / ".env.example").exists()
-        
+
         # Find missing DevOps files
         missing = self._find_missing_files(
             has_docker, has_docker_compose, has_tests, has_ci_cd,
             has_readme, has_k8s, has_helm, has_env_example
         )
-        
+
         # Get dependencies
         deps = self.stack_detector.get_dependencies(directory, stack.primary)
         dev_deps = self._get_dev_dependencies(directory, stack.primary)
-        
+
         # Find entry points
         entry_points = self._find_entry_points(directory, stack.primary)
-        
+
         # Count files by extension
         file_counts = self._count_files(directory) if deep else {}
-        
+
         # Get structure summary
         structure = self._get_structure_summary(directory) if deep else ""
-        
+
         return RepoAnalysis(
             name=name,
             path=directory,
@@ -339,7 +339,7 @@ class RepoAnalyzer:
             if (directory / name).is_dir():
                 found.append(f"{name}/")
         return found
-    
+
     def _get_project_name(self, directory: Path) -> str:
         """Get project name from common sources."""
         # Try pyproject.toml
@@ -352,7 +352,7 @@ class RepoAnalyzer:
                         return line.split("=")[1].strip().strip('"\'')
             except Exception:
                 pass
-        
+
         # Try package.json
         package_json = directory / "package.json"
         if package_json.exists():
@@ -363,7 +363,7 @@ class RepoAnalyzer:
                     return data["name"]
             except Exception:
                 pass
-        
+
         # Try Cargo.toml
         cargo = directory / "Cargo.toml"
         if cargo.exists():
@@ -374,10 +374,10 @@ class RepoAnalyzer:
                         return line.split("=")[1].strip().strip('"\'')
             except Exception:
                 pass
-        
+
         # Fallback to directory name
         return directory.name
-    
+
     def _find_missing_files(
         self,
         has_docker: bool,
@@ -391,7 +391,7 @@ class RepoAnalyzer:
     ) -> list[str]:
         """Find missing DevOps files."""
         missing: list[str] = []
-        
+
         if not has_docker:
             missing.append("Dockerfile")
         if not has_docker_compose:
@@ -408,13 +408,13 @@ class RepoAnalyzer:
             missing.append("Helm charts")
         if not has_env_example:
             missing.append(".env.example")
-        
+
         return missing
-    
+
     def _get_dev_dependencies(self, directory: Path, stack: Any) -> list[str]:
         """Get development dependencies."""
         deps: list[str] = []
-        
+
         # Node.js dev dependencies
         package_json = directory / "package.json"
         if package_json.exists():
@@ -425,14 +425,14 @@ class RepoAnalyzer:
                     deps.extend(data["devDependencies"].keys())
             except Exception:
                 pass
-        
+
         return deps[:20]
-    
+
     def _find_entry_points(self, directory: Path, stack: Any) -> list[str]:
         """Find likely entry points."""
         entry_points: list[str] = []
         stack_value = stack.value if hasattr(stack, 'value') else str(stack)
-        
+
         if stack_value in ("python", "django", "fastapi", "flask"):
             candidates = [
                 "main.py", "app.py", "manage.py", "wsgi.py", "asgi.py",
@@ -441,18 +441,18 @@ class RepoAnalyzer:
             for candidate in candidates:
                 if (directory / candidate).exists():
                     entry_points.append(candidate)
-            
+
             # Look for package with __main__.py
             for subdir in directory.iterdir():
                 if subdir.is_dir() and (subdir / "__main__.py").exists():
                     entry_points.append(f"{subdir.name}/__main__.py")
-        
+
         elif stack_value in ("node", "react", "nextjs"):
             candidates = ["index.js", "server.js", "app.js", "main.js", "index.ts", "server.ts"]
             for candidate in candidates:
                 if (directory / candidate).exists():
                     entry_points.append(candidate)
-        
+
         elif stack_value == "go":
             for go_file in directory.rglob("*.go"):
                 try:
@@ -462,30 +462,30 @@ class RepoAnalyzer:
                         entry_points.append(str(rel_path))
                 except Exception:
                     pass
-        
+
         return entry_points[:5]
-    
+
     def _count_files(self, directory: Path) -> dict[str, int]:
         """Count files by extension."""
         counts: dict[str, int] = {}
-        
+
         extensions = [".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".rb", ".php"]
-        
+
         for ext in extensions:
             count = len(list(directory.rglob(f"*{ext}")))
             if count > 0:
                 counts[ext] = count
-        
+
         return counts
-    
+
     def _get_structure_summary(self, directory: Path, max_depth: int = 2) -> str:
         """Get a summary of directory structure."""
         lines: list[str] = [f"{directory.name}/"]
-        
+
         def _tree(path: Path, prefix: str = "", depth: int = 0) -> None:
             if depth >= max_depth:
                 return
-            
+
             try:
                 entries = sorted(
                     [e for e in path.iterdir() if not e.name.startswith(".")],
@@ -493,15 +493,15 @@ class RepoAnalyzer:
                 )[:20]  # Limit entries
             except PermissionError:
                 return
-            
+
             for i, entry in enumerate(entries):
                 is_last = i == len(entries) - 1
                 connector = "└── " if is_last else "├── "
                 lines.append(f"{prefix}{connector}{entry.name}{'/' if entry.is_dir() else ''}")
-                
+
                 if entry.is_dir():
                     extension = "    " if is_last else "│   "
                     _tree(entry, prefix + extension, depth + 1)
-        
+
         _tree(directory)
         return "\n".join(lines)

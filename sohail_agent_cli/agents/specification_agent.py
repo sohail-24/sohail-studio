@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base_agent import AgentResult, BaseAgent
 from sohail_agent_cli.generators.specification_generator import SpecificationGenerator
 from sohail_agent_cli.specification.loader import SpecificationLoader
 from sohail_agent_cli.specification.writer import SpecificationWriter
+
+from .base_agent import AgentResult, BaseAgent
 
 
 class SpecificationAgent(BaseAgent):

@@ -70,39 +70,39 @@ Examples:
   sohail-agent all ./my-project
         """,
     )
-    
+
     parser.add_argument(
         "--version",
         action="version",
         version="%(prog)s 2.0.0",
     )
-    
+
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable verbose output",
     )
-    
+
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be done without making changes",
     )
-    
+
     parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite existing files",
     )
-    
+
     parser.add_argument(
         "--ollama",
         action="store_true",
         help="Use Ollama for AI-enhanced generation (docs, interview)",
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-    
+
     # inspect command
     inspect_parser = subparsers.add_parser(
         "inspect",
@@ -114,7 +114,7 @@ Examples:
         default=".",
         help="Path to repository (default: current directory)",
     )
-    
+
     # dockerize command
     dockerize_parser = subparsers.add_parser(
         "dockerize",
@@ -166,7 +166,7 @@ Examples:
         default="",
         help="Internal artifact plan produced by the Terminal Dockerize workflow",
     )
-    
+
     # k8s command
     k8s_parser = subparsers.add_parser(
         "k8s",
@@ -208,7 +208,7 @@ Examples:
         default="",
         help="Canonical persisted inspection run to reuse",
     )
-    
+
     # cicd command
     cicd_parser = subparsers.add_parser(
         "cicd",
@@ -237,7 +237,7 @@ Examples:
         default="",
         help="Canonical persisted inspection run to reuse",
     )
-    
+
     # docs command
     docs_parser = subparsers.add_parser(
         "docs",
@@ -249,7 +249,7 @@ Examples:
         default=".",
         help="Path to repository (default: current directory)",
     )
-    
+
     # interview command
     interview_parser = subparsers.add_parser(
         "interview",
@@ -387,7 +387,7 @@ Examples:
         default="./blueprints",
         help="Blueprint output directory (default: ./blueprints)",
     )
-    
+
     # all command
     all_parser = subparsers.add_parser(
         "all",
@@ -399,18 +399,18 @@ Examples:
         default=".",
         help="Path to repository (default: current directory)",
     )
-    
+
     return parser
 
 
 async def cmd_inspect(args: argparse.Namespace) -> int:
     """Execute the inspect command."""
     path = Path(args.path).resolve()
-    
+
     if not path.exists():
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
-    
+
     console.print("[cyan][Running][/cyan] Starting complete repository inspection...")
     intelligence = DeepInspector().inspect(
         path,
@@ -772,11 +772,11 @@ def _print_docker_blocked(result: Any, *, dry_run: bool, stage: str) -> None:
 async def cmd_dockerize(args: argparse.Namespace) -> int:
     """Execute the dockerize command."""
     path = Path(args.path).resolve()
-    
+
     if not path.exists():
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
-    
+
     agent = DockerAgent(
         dry_run=args.dry_run,
         verbose=args.verbose,
@@ -857,11 +857,11 @@ def _load_required_inspection(path: Path, expected_run_id: str = ""):
 async def cmd_k8s(args: argparse.Namespace) -> int:
     """Execute the k8s command."""
     path = Path(args.path).resolve()
-    
+
     if not path.exists():
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
-    
+
     intelligence = _load_required_inspection(path, getattr(args, "inspection_run_id", ""))
     if intelligence is None:
         return 1
@@ -878,7 +878,7 @@ async def cmd_k8s(args: argparse.Namespace) -> int:
         organization=args.organization,
         intelligence=intelligence,
     )
-    
+
     if result.success:
         console.print(f"[bold green]{result.message}[/bold green]")
         _print_created_files(result)
@@ -890,11 +890,11 @@ async def cmd_k8s(args: argparse.Namespace) -> int:
 async def cmd_cicd(args: argparse.Namespace) -> int:
     """Execute the cicd command."""
     path = Path(args.path).resolve()
-    
+
     if not path.exists():
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
-    
+
     intelligence = _load_required_inspection(path, getattr(args, "inspection_run_id", ""))
     if intelligence is None:
         return 1
@@ -909,7 +909,7 @@ async def cmd_cicd(args: argparse.Namespace) -> int:
         platform=args.platform,
         intelligence=intelligence,
     )
-    
+
     if result.success:
         console.print(f"[bold green]{result.message}[/bold green]")
         _print_created_files(result)
@@ -921,11 +921,11 @@ async def cmd_cicd(args: argparse.Namespace) -> int:
 async def cmd_docs(args: argparse.Namespace) -> int:
     """Execute the docs command."""
     path = Path(args.path).resolve()
-    
+
     if not path.exists():
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
-    
+
     agent = DocsAgent(
         dry_run=args.dry_run,
         verbose=args.verbose,
@@ -935,7 +935,7 @@ async def cmd_docs(args: argparse.Namespace) -> int:
         path,
         overwrite=args.overwrite,
     )
-    
+
     if result.success:
         console.print(f"[bold green]{result.message}[/bold green]")
         _print_created_files(result)
@@ -947,11 +947,11 @@ async def cmd_docs(args: argparse.Namespace) -> int:
 async def cmd_interview(args: argparse.Namespace) -> int:
     """Execute the interview command."""
     path = Path(args.path).resolve()
-    
+
     if not path.exists():
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
-    
+
     agent = InterviewAgent(
         dry_run=args.dry_run,
         verbose=args.verbose,
@@ -961,7 +961,7 @@ async def cmd_interview(args: argparse.Namespace) -> int:
         path,
         overwrite=args.overwrite,
     )
-    
+
     return 0 if result.success else 1
 
 
@@ -1065,7 +1065,7 @@ async def cmd_specification(args: argparse.Namespace) -> int:
         output_dir=Path(args.output),
         overwrite=args.overwrite,
     )
-   
+
     return 0 if result.success else 1
 
 
@@ -1088,22 +1088,22 @@ async def cmd_blueprint(args: argparse.Namespace) -> int:
 async def cmd_all(args: argparse.Namespace) -> int:
     """Execute all commands."""
     path = Path(args.path).resolve()
-    
+
     if not path.exists():
         console.print(f"[red]Error: Path does not exist: {path}[/red]")
         return 1
-    
+
     console.print(f"\n[bold blue]Running all agents on:[/bold blue] {path}")
-    
+
     if args.dry_run:
         console.print("[yellow]DRY RUN - No files will be modified[/yellow]")
-    
+
     # Run inspect first
     console.print("\n" + "=" * 60)
     console.print("[bold]1. Repository Inspection[/bold]")
     console.print("=" * 60)
     await cmd_inspect(args)
-    
+
     # Run other agents
     agents = [
         ("2. Docker Generation", cmd_dockerize),
@@ -1112,7 +1112,7 @@ async def cmd_all(args: argparse.Namespace) -> int:
         ("5. Documentation Generation", cmd_docs),
         ("6. Interview Notes Generation", cmd_interview),
     ]
-    
+
     for title, cmd_func in agents:
         console.print("\n" + "=" * 60)
         console.print(f"[bold]{title}[/bold]")
@@ -1121,11 +1121,11 @@ async def cmd_all(args: argparse.Namespace) -> int:
             await cmd_func(args)
         except Exception as e:
             console.print(f"[red]Error: {e}[/red]")
-    
+
     console.print("\n" + "=" * 60)
     console.print("[bold green]All agents completed![/bold green]")
     console.print("=" * 60)
-    
+
     return 0
 
 
@@ -1151,11 +1151,11 @@ async def main_async() -> int:
     """Main async entry point."""
     parser = create_parser()
     args = parser.parse_args()
-    
+
     if not args.command:
         parser.print_help()
         return 0
-    
+
     commands = {
         "inspect": cmd_inspect,
         "dockerize": cmd_dockerize,
@@ -1171,7 +1171,7 @@ async def main_async() -> int:
         "blueprint": cmd_blueprint,
         "all": cmd_all,
     }
-    
+
     command_func = commands.get(args.command)
     if command_func:
         return await run_command_safely(command_func, args)

@@ -179,4 +179,3 @@ class K8sAgent(BaseAgent):
 def stack_context_components(analysis: Any) -> list[Any]:
     """Keep component selection local to the analyzed shared context."""
     return list(getattr(analysis, "components", []))
-        

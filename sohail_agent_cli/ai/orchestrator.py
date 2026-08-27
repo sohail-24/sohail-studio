@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from sohail_agent_cli.providers import BaseProvider, GenerationRequest
 from rich.console import Console
+
+from sohail_agent_cli.providers import BaseProvider, GenerationRequest
 
 from .exceptions import AIProviderError, AIValidationError
 from .models import AIExecutionMetadata, AIRequest, AIResult

@@ -1,15 +1,17 @@
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import backend.main as api
 from core.cli_bridge import CliBridge
 from sohail_agent_cli.agents.cicd_agent import CicdAgent
 from sohail_agent_cli.agents.k8s_agent import K8sAgent
-from sohail_agent_cli.inspection import ProjectIntelligence
-from sohail_agent_cli.inspection import DeepInspector
-from sohail_agent_cli.inspection import repo_analysis_from_intelligence
-import pytest
+from sohail_agent_cli.inspection import (
+    DeepInspector,
+    ProjectIntelligence,
+    repo_analysis_from_intelligence,
+)
 
 
 def test_terminal_project_selection_validates_without_running_inspection(tmp_path: Path):

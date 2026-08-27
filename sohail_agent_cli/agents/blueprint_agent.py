@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base_agent import AgentResult, BaseAgent
 from sohail_agent_cli.blueprint.loader import BlueprintLoader
 from sohail_agent_cli.blueprint.writer import BlueprintWriter
 from sohail_agent_cli.generators.blueprint_generator import BlueprintGenerator
+
+from .base_agent import AgentResult, BaseAgent
 
 
 class BlueprintAgent(BaseAgent):

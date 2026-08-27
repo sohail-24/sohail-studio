@@ -5,9 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base_agent import AgentResult, BaseAgent
 from sohail_agent_cli.generators.stack_generator import StackGenerator
 from sohail_agent_cli.stack.project_writer import StackProjectWriter
+
+from .base_agent import AgentResult, BaseAgent
 
 
 class StackAgent(BaseAgent):

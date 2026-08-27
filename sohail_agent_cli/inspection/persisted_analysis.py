@@ -11,7 +11,6 @@ from sohail_agent_cli.analyzers.stack_detector import DetectedStack, StackType
 
 from .models import ProjectIntelligence
 
-
 _STACK_BY_NAME = {
     "angular": StackType.ANGULAR,
     "django": StackType.DJANGO,

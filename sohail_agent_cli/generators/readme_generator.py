@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from sohail_agent_cli.analyzers import RepoAnalysis, StackType
 
 
 class ReadmeGenerator:
     """Generator for README and documentation files."""
-    
+
     def generate(
         self,
         analysis: RepoAnalysis,
@@ -23,19 +21,19 @@ class ReadmeGenerator:
         """
         readme = self._generate_readme(analysis)
         deployment = None
-        
+
         if include_deployment and (analysis.has_docker or analysis.has_k8s):
             deployment = self._generate_deployment(analysis)
-        
+
         return readme, deployment
-    
+
     def _generate_readme(self, analysis: RepoAnalysis) -> str:
         """Generate README.md content."""
         name = analysis.name
         stack = analysis.stack.primary
         deps = analysis.dependencies[:10]
         entry_points = analysis.entry_points[:3]
-        
+
         lines = [
             f"# {name}",
             "",
@@ -55,36 +53,36 @@ class ReadmeGenerator:
             "",
             f"- **Primary:** {stack.value}",
         ]
-        
+
         if analysis.stack.secondary:
             lines.append(f"- **Secondary:** {', '.join(s.value for s in analysis.stack.secondary)}")
-        
+
         lines.append("")
-        
+
         # Prerequisites
         lines.extend([
             "## Prerequisites",
             "",
         ])
-        
+
         prereqs = self._get_prerequisites(stack, analysis)
         for prereq in prereqs:
             lines.append(f"- {prereq}")
-        
+
         lines.append("")
-        
+
         # Installation
         lines.extend([
             "## Installation",
             "",
             "```bash",
             "# Clone the repository",
-            f"git clone <repository-url>",
+            "git clone <repository-url>",
             f"cd {name}",
             "```",
             "",
         ])
-        
+
         install_steps = self._get_install_steps(stack)
         if install_steps:
             lines.append("```bash")
@@ -92,13 +90,13 @@ class ReadmeGenerator:
                 lines.append(step)
             lines.append("```")
             lines.append("")
-        
+
         # Usage
         lines.extend([
             "## Usage",
             "",
         ])
-        
+
         if entry_points:
             lines.append("### Running the application")
             lines.append("")
@@ -108,7 +106,7 @@ class ReadmeGenerator:
                 lines.append(run_cmd)
             lines.append("```")
             lines.append("")
-        
+
         # Docker
         if analysis.has_docker:
             lines.extend([
@@ -124,7 +122,7 @@ class ReadmeGenerator:
                 "```",
                 "",
             ])
-        
+
         # Testing
         if analysis.has_tests:
             lines.extend([
@@ -136,7 +134,7 @@ class ReadmeGenerator:
             lines.append(test_cmd)
             lines.append("```")
             lines.append("")
-        
+
         # Key dependencies
         if deps:
             lines.extend([
@@ -146,7 +144,7 @@ class ReadmeGenerator:
             for dep in deps:
                 lines.append(f"- {dep}")
             lines.append("")
-        
+
         # Contributing
         lines.extend([
             "## Contributing",
@@ -158,7 +156,7 @@ class ReadmeGenerator:
             "5. Open a Pull Request",
             "",
         ])
-        
+
         # License
         lines.extend([
             "## License",
@@ -166,14 +164,14 @@ class ReadmeGenerator:
             "This project is licensed under the MIT License - see the LICENSE file for details.",
             "",
         ])
-        
+
         return "\n".join(lines)
-    
+
     def _generate_deployment(self, analysis: RepoAnalysis) -> str:
         """Generate DEPLOYMENT.md content."""
         name = analysis.name
         stack = analysis.stack.primary
-        
+
         lines = [
             f"# Deployment Guide: {name}",
             "",
@@ -182,14 +180,14 @@ class ReadmeGenerator:
             "## Table of Contents",
             "",
         ]
-        
+
         if analysis.has_docker:
             lines.append("- [Docker Deployment](#docker-deployment)")
         if analysis.has_k8s:
             lines.append("- [Kubernetes Deployment](#kubernetes-deployment)")
         lines.append("- [Environment Variables](#environment-variables)")
         lines.append("")
-        
+
         # Docker section
         if analysis.has_docker:
             lines.extend([
@@ -212,7 +210,7 @@ class ReadmeGenerator:
                 f"docker build -t {name}:production .",
                 "",
                 "# Run with environment variables",
-                f"docker run -d \\",
+                "docker run -d \\",
                 "  --name app \\",
                 "  -p 8000:8000 \\",
                 "  -e ENVIRONMENT=production \\",
@@ -220,7 +218,7 @@ class ReadmeGenerator:
                 "```",
                 "",
             ])
-        
+
         # K8s section
         if analysis.has_k8s:
             lines.extend([
@@ -255,7 +253,7 @@ class ReadmeGenerator:
                 "```",
                 "",
             ])
-        
+
         # Environment variables
         lines.extend([
             "## Environment Variables",
@@ -281,13 +279,13 @@ class ReadmeGenerator:
             "```",
             "",
         ])
-        
+
         return "\n".join(lines)
-    
+
     def _get_prerequisites(self, stack: StackType, analysis: RepoAnalysis) -> list[str]:
         """Get prerequisites for a stack."""
         prereqs = []
-        
+
         if stack in (StackType.PYTHON, StackType.DJANGO, StackType.FASTAPI, StackType.FLASK):
             prereqs.append("Python 3.11+")
             prereqs.append("pip or poetry")
@@ -307,13 +305,13 @@ class ReadmeGenerator:
         elif stack in (StackType.PHP, StackType.LARAVEL):
             prereqs.append("PHP 8.0+")
             prereqs.append("Composer")
-        
+
         if analysis.has_docker:
             prereqs.append("Docker (optional)")
             prereqs.append("Docker Compose (optional)")
-        
+
         return prereqs
-    
+
     def _get_install_steps(self, stack: StackType) -> list[str]:
         """Get installation steps for a stack."""
         if stack in (StackType.PYTHON, StackType.DJANGO, StackType.FASTAPI, StackType.FLASK):
@@ -353,7 +351,7 @@ class ReadmeGenerator:
                 "composer install",
             ]
         return []
-    
+
     def _get_run_command(self, stack: StackType, entry_point: str) -> str:
         """Get run command for a stack."""
         if stack in (StackType.PYTHON, StackType.DJANGO, StackType.FASTAPI, StackType.FLASK):
@@ -375,7 +373,7 @@ class ReadmeGenerator:
                 return "php artisan serve"
             return f"php {entry_point}"
         return f"./{entry_point}"
-    
+
     def _get_test_command(self, stack: StackType) -> str:
         """Get test command for a stack."""
         if stack in (StackType.PYTHON, StackType.DJANGO, StackType.FASTAPI, StackType.FLASK):

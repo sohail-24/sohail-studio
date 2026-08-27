@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 class TaskStatus(Enum):
@@ -55,19 +55,19 @@ class ExecutionPlan:
     original_task: str
     steps: list[PlanStep] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
-    
+
     def get_ready_steps(self) -> list[PlanStep]:
         """Get steps that are ready to execute (dependencies met)."""
         completed_ids = {s.step_id for s in self.steps if s.completed}
         return [
-            s for s in self.steps 
+            s for s in self.steps
             if not s.completed and all(d in completed_ids for d in s.depends_on)
         ]
-    
+
     def is_complete(self) -> bool:
         """Check if all steps are completed."""
         return all(s.completed for s in self.steps)
-    
+
     def has_failures(self) -> bool:
         """Check if any step has failed."""
         return any(s.error is not None for s in self.steps)
@@ -86,7 +86,7 @@ class Task:
     created_at: datetime = field(default_factory=datetime.now)
     plan: ExecutionPlan | None = None
     assigned_agent: str | None = None
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Convert task to dictionary."""
         return {
@@ -114,7 +114,7 @@ class TaskResult:
     execution_time_ms: float = 0.0
     agent_name: str | None = None
     error: str | None = None
-    
+
     @classmethod
     def success_result(
         cls,
@@ -131,7 +131,7 @@ class TaskResult:
             outputs=outputs or {},
             generated_files=generated_files or [],
         )
-    
+
     @classmethod
     def failure_result(
         cls,
@@ -156,11 +156,11 @@ class AgentInfo:
     capabilities: list[AgentCapability]
     version: str = "1.0.0"
     config: dict[str, Any] = field(default_factory=dict)
-    
+
     def has_capability(self, capability: AgentCapability) -> bool:
         """Check if agent has a specific capability."""
         return capability in self.capabilities
-    
+
     def can_handle_task(self, task: Task) -> bool:
         """Check if agent can handle a task based on required capabilities."""
         return all(self.has_capability(c) for c in task.required_capabilities)

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 from .models import (
-    AgentCapability,
     ExecutionPlan,
     PlanStep,
     Task,
@@ -22,7 +20,7 @@ class ExecutionPlanner:
     The planner analyzes tasks and creates execution plans that may
     involve multiple agents working in sequence or parallel.
     """
-    
+
     def __init__(self, registry: AgentRegistry) -> None:
         """
         Initialize the execution planner.
@@ -31,7 +29,7 @@ class ExecutionPlanner:
             registry: The agent registry to use for planning
         """
         self._registry = registry
-    
+
     def plan(self, task: Task) -> ExecutionPlan:
         """
         Create an execution plan for a task.
@@ -43,7 +41,7 @@ class ExecutionPlanner:
             An execution plan with steps
         """
         plan_id = str(uuid.uuid4())[:8]
-        
+
         # Route based on task type
         planners = {
             "inspect_repo": self._plan_repo_inspection,
@@ -55,21 +53,21 @@ class ExecutionPlanner:
             "scaffold": self._plan_scaffolding,
             "full_setup": self._plan_full_setup,
         }
-        
+
         planner = planners.get(task.task_type, self._plan_simple)
         steps = planner(task)
-        
+
         plan = ExecutionPlan(
             plan_id=plan_id,
             original_task=task.description,
             steps=steps,
         )
-        
+
         task.plan = plan
         task.status = TaskStatus.PLANNED
-        
+
         return plan
-    
+
     def _plan_simple(self, task: Task) -> list[PlanStep]:
         """Create a simple single-step plan."""
         return [
@@ -80,11 +78,11 @@ class ExecutionPlanner:
                 inputs=task.inputs,
             )
         ]
-    
+
     def _plan_repo_inspection(self, task: Task) -> list[PlanStep]:
         """Plan repository inspection task."""
         path = task.inputs.get("path", ".")
-        
+
         return [
             PlanStep(
                 step_id="analyze_repo",
@@ -93,11 +91,11 @@ class ExecutionPlanner:
                 inputs={"path": path, "deep_analysis": True},
             ),
         ]
-    
+
     def _plan_dockerization(self, task: Task) -> list[PlanStep]:
         """Plan Docker generation task."""
         path = task.inputs.get("path", ".")
-        
+
         return [
             PlanStep(
                 step_id="detect_stack",
@@ -113,11 +111,11 @@ class ExecutionPlanner:
                 depends_on=["detect_stack"],
             ),
         ]
-    
+
     def _plan_k8s_generation(self, task: Task) -> list[PlanStep]:
         """Plan Kubernetes generation task."""
         path = task.inputs.get("path", ".")
-        
+
         return [
             PlanStep(
                 step_id="detect_stack",
@@ -133,11 +131,11 @@ class ExecutionPlanner:
                 depends_on=["detect_stack"],
             ),
         ]
-    
+
     def _plan_cicd_generation(self, task: Task) -> list[PlanStep]:
         """Plan CI/CD generation task."""
         path = task.inputs.get("path", ".")
-        
+
         return [
             PlanStep(
                 step_id="detect_stack",
@@ -153,11 +151,11 @@ class ExecutionPlanner:
                 depends_on=["detect_stack"],
             ),
         ]
-    
+
     def _plan_doc_generation(self, task: Task) -> list[PlanStep]:
         """Plan documentation generation task."""
         path = task.inputs.get("path", ".")
-        
+
         return [
             PlanStep(
                 step_id="analyze_repo",
@@ -173,11 +171,11 @@ class ExecutionPlanner:
                 depends_on=["analyze_repo"],
             ),
         ]
-    
+
     def _plan_interview_prep(self, task: Task) -> list[PlanStep]:
         """Plan interview preparation task."""
         path = task.inputs.get("path", ".")
-        
+
         return [
             PlanStep(
                 step_id="analyze_repo",
@@ -193,12 +191,12 @@ class ExecutionPlanner:
                 depends_on=["analyze_repo"],
             ),
         ]
-    
+
     def _plan_scaffolding(self, task: Task) -> list[PlanStep]:
         """Plan scaffolding task."""
         project_type = task.inputs.get("project_type", "python")
         output_path = task.inputs.get("output_path", ".")
-        
+
         return [
             PlanStep(
                 step_id="scaffold",
@@ -211,11 +209,11 @@ class ExecutionPlanner:
                 },
             ),
         ]
-    
+
     def _plan_full_setup(self, task: Task) -> list[PlanStep]:
         """Plan full DevOps setup (all generators)."""
         path = task.inputs.get("path", ".")
-        
+
         return [
             PlanStep(
                 step_id="analyze_repo",
