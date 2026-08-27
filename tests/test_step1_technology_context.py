@@ -8,7 +8,11 @@ from sqlalchemy import create_engine
 
 from core.storage.database import Storage, StorageConfig
 from core.storage.project_intelligence import ProjectIntelligenceRepository, metadata
-from sohail_agent_cli.dockerize import DockerContextBuilder, DockerDecisionEngine, DockerDecisionError
+from sohail_agent_cli.dockerize import (
+    DockerContextBuilder,
+    DockerDecisionEngine,
+    DockerDecisionError,
+)
 from sohail_agent_cli.inspection import DeepInspector, ProjectIntelligence
 from sohail_agent_cli.providers import MockProvider
 

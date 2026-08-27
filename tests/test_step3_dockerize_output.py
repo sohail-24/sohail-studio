@@ -8,10 +8,10 @@ from rich.console import Console
 from sqlalchemy import create_engine
 
 import sohail_agent_cli.main as cli
-from sohail_agent_cli.agents.base_agent import AgentResult
-from sohail_agent_cli.agents.docker_agent import DockerAgent
 from core.storage.database import Storage, StorageConfig
 from core.storage.project_intelligence import ProjectIntelligenceRepository, metadata
+from sohail_agent_cli.agents.base_agent import AgentResult
+from sohail_agent_cli.agents.docker_agent import DockerAgent
 from sohail_agent_cli.dockerize.context_builder import DockerContext, DockerContextBuilder
 from sohail_agent_cli.dockerize.decision import DockerDecision, DockerDecisionEngine
 from sohail_agent_cli.inspection import DeepInspector

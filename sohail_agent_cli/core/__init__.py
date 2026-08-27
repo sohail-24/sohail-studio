@@ -1,16 +1,16 @@
 """Core multi-agent system components."""
 
 from .models import (
-    Task,
-    TaskResult,
-    TaskStatus,
     AgentCapability,
     ExecutionPlan,
     PlanStep,
+    Task,
+    TaskResult,
+    TaskStatus,
 )
+from .planner import ExecutionPlanner
 from .registry import AgentRegistry
 from .router import TaskRouter
-from .planner import ExecutionPlanner
 
 __all__ = [
     "Task",

@@ -1,8 +1,8 @@
 """Provider layer for AI model backends."""
 
-from .base_provider import BaseProvider, ProviderConfig, GenerationRequest, GenerationResult
-from .ollama_provider import OllamaProvider
+from .base_provider import BaseProvider, GenerationRequest, GenerationResult, ProviderConfig
 from .mock_provider import MockProvider
+from .ollama_provider import OllamaProvider
 
 __all__ = [
     "BaseProvider",

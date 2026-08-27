@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from sohail_agent_cli.analyzers import DetectedStack, StackType
@@ -829,7 +829,7 @@ CMD ["serve", "-s", "build", "-l", "80"]
             "services:",
             "  app:",
             "    build: .",
-            f"    ports:",
+            "    ports:",
             f'      - "{port}:{port}"',
         ]
 

@@ -11,7 +11,7 @@ from sohail_agent_cli.generators import CicdGenerator
 
 class CicdAgent(BaseAgent):
     """Agent that generates CI/CD workflows."""
-    
+
     def __init__(self, dry_run: bool = False, verbose: bool = False) -> None:
         super().__init__(
             name="cicd_agent",
@@ -20,7 +20,7 @@ class CicdAgent(BaseAgent):
             verbose=verbose,
         )
         self.generator = CicdGenerator()
-    
+
     async def execute(
         self,
         path: Path,
@@ -31,7 +31,7 @@ class CicdAgent(BaseAgent):
     ) -> AgentResult:
         """Execute CI/CD generation."""
         self.info(f"Generating CI/CD workflows for: {path}")
-        
+
         # Analyze repository
         intelligence = kwargs.get("intelligence")
         if intelligence is None:
@@ -40,7 +40,7 @@ class CicdAgent(BaseAgent):
             )
         analysis = await self.analyze_repo(path, intelligence=intelligence)
         stack = analysis.stack.primary
-        
+
         self.info(f"Detected stack: {stack.value}")
         if analysis.ci_cd_files:
             self.info(f"Existing CI/CD configuration detected: {', '.join(analysis.ci_cd_files)}")
@@ -81,12 +81,12 @@ class CicdAgent(BaseAgent):
             has_docker=analysis.has_docker,
             stack_context=analysis.stack,
         )
-        
+
         # Create .github/workflows directory
         workflows_dir = path / ".github" / "workflows"
         if not self.dry_run:
             workflows_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Write files
         # ci.yml
         ci_path = workflows_dir / "ci.yml"
@@ -104,7 +104,7 @@ class CicdAgent(BaseAgent):
         else:
             self.warning(msg)
             files_skipped.append(ci_path)
-        
+
         # docker.yml (only if Dockerfile exists)
         if docker:
             docker_path = workflows_dir / "docker.yml"
@@ -122,7 +122,7 @@ class CicdAgent(BaseAgent):
             else:
                 self.warning(msg)
                 files_skipped.append(docker_path)
-        
+
         # release.yml
         release_path = workflows_dir / "release.yml"
         success, msg, is_dry_run = await self.write_file(
@@ -139,9 +139,9 @@ class CicdAgent(BaseAgent):
         else:
             self.warning(msg)
             files_skipped.append(release_path)
-        
+
         return AgentResult.success(
-            message=f"CI/CD workflows generated in .github/workflows/",
+            message="CI/CD workflows generated in .github/workflows/",
             files_created=files_created,
             data={
                 "stack": stack.value,

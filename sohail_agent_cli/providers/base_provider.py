@@ -20,7 +20,7 @@ class ProviderConfig:
     default_model: str = field(
         default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.2")
     )
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary."""
         return {
@@ -44,7 +44,7 @@ class GenerationRequest:
     options: dict[str, Any] = field(default_factory=dict)
     messages: list[dict[str, str]] | None = None
     think: bool | None = None
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Convert request to dictionary."""
         data: dict[str, Any] = {
@@ -81,12 +81,12 @@ class GenerationResult:
     prompt_eval_count: int | None = None
     eval_count: int | None = None
     error: str | None = None
-    
+
     @property
     def success(self) -> bool:
         """Check if generation was successful."""
         return self.error is None
-    
+
     @classmethod
     def error_result(cls, error: str, model: str = "") -> GenerationResult:
         """Create an error result."""
@@ -105,7 +105,7 @@ class BaseProvider(ABC):
     Providers implement the interface for interacting with
     different AI model backends (Ollama, OpenAI, etc.).
     """
-    
+
     def __init__(self, config: ProviderConfig | None = None) -> None:
         """
         Initialize the provider.
@@ -114,7 +114,7 @@ class BaseProvider(ABC):
             config: Provider configuration
         """
         self.config = config or ProviderConfig()
-    
+
     @abstractmethod
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         """
@@ -127,10 +127,10 @@ class BaseProvider(ABC):
             The generation result
         """
         pass
-    
+
     @abstractmethod
     async def generate_stream(
-        self, 
+        self,
         request: GenerationRequest,
     ) -> AsyncIterator[GenerationResult]:
         """
@@ -143,7 +143,7 @@ class BaseProvider(ABC):
             Generation results as they become available
         """
         pass
-    
+
     @abstractmethod
     async def list_models(self) -> list[str]:
         """
@@ -153,7 +153,7 @@ class BaseProvider(ABC):
             List of model names
         """
         pass
-    
+
     @abstractmethod
     async def health_check(self) -> bool:
         """
@@ -163,13 +163,13 @@ class BaseProvider(ABC):
             True if the provider is available
         """
         pass
-    
+
     @property
     @abstractmethod
     def name(self) -> str:
         """Get the provider name."""
         pass
-    
+
     @property
     @abstractmethod
     def is_local(self) -> bool:

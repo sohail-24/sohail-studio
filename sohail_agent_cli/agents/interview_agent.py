@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from sohail_agent_cli.agents.base_agent import AgentResult, BaseAgent
-from sohail_agent_cli.providers import OllamaProvider, ProviderConfig, GenerationRequest
+from sohail_agent_cli.providers import GenerationRequest, OllamaProvider, ProviderConfig
 
 
 class InterviewAgent(BaseAgent):
     """Agent that generates interview-ready project summaries."""
-    
+
     def __init__(
         self,
         dry_run: bool = False,
@@ -26,10 +26,10 @@ class InterviewAgent(BaseAgent):
         )
         self.use_ollama = use_ollama
         self.ollama: OllamaProvider | None = None
-        
+
         if use_ollama:
             self.ollama = OllamaProvider(ProviderConfig())
-    
+
     async def execute(
         self,
         path: Path,
@@ -38,16 +38,16 @@ class InterviewAgent(BaseAgent):
     ) -> AgentResult:
         """Execute interview notes generation."""
         self.info(f"Generating interview notes for: {path}")
-        
+
         # Analyze repository
         analysis = await self.analyze_repo(path)
-        
+
         # Generate interview notes
         if self.use_ollama and self.ollama:
             notes = await self._generate_with_ollama(analysis)
         else:
             notes = self._generate_template(analysis)
-        
+
         # Write file
         notes_path = path / "INTERVIEW_NOTES.md"
         success, msg, is_dry_run = await self.write_file(
@@ -68,7 +68,7 @@ class InterviewAgent(BaseAgent):
         else:
             self.warning(msg)
             files_skipped.append(notes_path)
-        
+
         return AgentResult.success(
             message="Interview notes generated",
             files_created=files_created,
@@ -78,14 +78,14 @@ class InterviewAgent(BaseAgent):
                 "ollama_enhanced": self.use_ollama,
             },
         )
-    
+
     def _generate_template(self, analysis) -> str:
         """Generate interview notes from template."""
         name = analysis.name
         stack = analysis.stack.primary.value
         deps = analysis.dependencies[:5]
         entry_points = analysis.entry_points[:2]
-        
+
         lines = [
             f"# Interview Notes: {name}",
             "",
@@ -93,19 +93,19 @@ class InterviewAgent(BaseAgent):
             "",
             f'"{name} is a {stack} project',
         ]
-        
+
         if deps:
             lines[-1] += f" built with {', '.join(deps[:3])}"
-        
+
         if analysis.has_docker:
             lines[-1] += ", containerized with Docker"
-        
+
         if analysis.has_k8s:
             lines[-1] += ", deployed on Kubernetes"
-        
+
         lines[-1] += '."'
         lines.append("")
-        
+
         # Architecture
         lines.extend([
             "## Architecture",
@@ -113,16 +113,16 @@ class InterviewAgent(BaseAgent):
             f"- **Stack:** {stack}",
             f"- **Entry Points:** {', '.join(entry_points) if entry_points else 'N/A'}",
         ])
-        
+
         if analysis.has_docker:
             lines.append("- **Containerization:** Docker")
         if analysis.has_k8s:
             lines.append("- **Orchestration:** Kubernetes")
         if analysis.has_ci_cd:
             lines.append("- **CI/CD:** GitHub Actions")
-        
+
         lines.append("")
-        
+
         # Key talking points
         lines.extend([
             "## Key Talking Points",
@@ -130,7 +130,7 @@ class InterviewAgent(BaseAgent):
             "### Technical Highlights",
             "",
         ])
-        
+
         if analysis.has_docker:
             lines.extend([
                 "- **Containerization:** Implemented Docker for consistent deployments",
@@ -138,7 +138,7 @@ class InterviewAgent(BaseAgent):
                 "  - Proper layer caching for faster builds",
                 "",
             ])
-        
+
         if analysis.has_k8s:
             lines.extend([
                 "- **Kubernetes:** Production-ready K8s manifests",
@@ -147,7 +147,7 @@ class InterviewAgent(BaseAgent):
                 "  - Kustomize for environment management",
                 "",
             ])
-        
+
         if analysis.has_ci_cd:
             lines.extend([
                 "- **CI/CD:** Automated pipeline with GitHub Actions",
@@ -156,7 +156,7 @@ class InterviewAgent(BaseAgent):
                 "  - Automated releases on tag push",
                 "",
             ])
-        
+
         # Common questions
         lines.extend([
             "## Common Interview Questions",
@@ -175,7 +175,7 @@ class InterviewAgent(BaseAgent):
             "### Q: How did you handle deployment?",
             "",
         ])
-        
+
         if analysis.has_docker and analysis.has_k8s:
             lines.append(
                 '"I containerized the application with Docker and deployed it on Kubernetes. '
@@ -193,7 +193,7 @@ class InterviewAgent(BaseAgent):
                 '"The project is designed to be deployed [describe approach]. '
                 'I focused on [deployment considerations]."'
             )
-        
+
         lines.extend([
             "",
             "## Tips",
@@ -204,22 +204,22 @@ class InterviewAgent(BaseAgent):
             "- Have specific examples ready",
             "",
         ])
-        
+
         return "\n".join(lines)
-    
+
     async def _generate_with_ollama(self, analysis) -> str:
         """Generate interview notes with Ollama."""
         if not self.ollama:
             return self._generate_template(analysis)
-        
+
         try:
             is_healthy = await self.ollama.health_check()
             if not is_healthy:
                 self.warning("Ollama not available, using template")
                 return self._generate_template(analysis)
-            
+
             self.info("Generating interview notes with Ollama...")
-            
+
             prompt = f"""Generate professional interview notes for this project:
 
 Project: {analysis.name}
@@ -237,19 +237,19 @@ Create an INTERVIEW_NOTES.md with:
 5. Talking points
 
 Make it professional and interview-ready."""
-            
+
             request = GenerationRequest(
                 prompt=prompt,
                 temperature=0.7,
             )
-            
+
             result = await self.ollama.generate(request)
-            
+
             if result.success and result.text:
                 self.success("Interview notes generated with Ollama")
                 return result.text
-            
+
         except Exception as e:
             self.warning(f"Ollama generation failed: {e}")
-        
+
         return self._generate_template(analysis)

@@ -9,7 +9,10 @@ from core.storage.database import Storage, StorageConfig
 from core.storage.project_intelligence import ProjectIntelligenceRepository, metadata
 from sohail_agent_cli.agents.docker_agent import DockerAgent
 from sohail_agent_cli.dockerize import DockerContext, DockerContextBuilder, DockerDecisionEngine
-from sohail_agent_cli.dockerize.platform_policy import APPROVED_PLATFORM_POLICY, applicable_platform_policies
+from sohail_agent_cli.dockerize.platform_policy import (
+    APPROVED_PLATFORM_POLICY,
+    applicable_platform_policies,
+)
 from sohail_agent_cli.inspection import DeepInspector
 from sohail_agent_cli.providers import MockProvider
 

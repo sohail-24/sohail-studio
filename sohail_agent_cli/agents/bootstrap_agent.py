@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base_agent import BaseAgent, AgentResult
 from sohail_agent_cli.generators.bootstrap_generator import BootstrapGenerator
+
+from .base_agent import AgentResult, BaseAgent
 
 
 class BootstrapAgent(BaseAgent):

@@ -31,7 +31,10 @@ from core.control_plane import ControlPlane
 from core.evidence import ClarificationRequest, ClarificationRequestError
 from core.session_store import SessionStore
 from core.storage import Storage, StorageConfigurationError
-from core.storage.project_intelligence import ProjectIntelligenceRepository, ProjectIntelligencePersistenceError
+from core.storage.project_intelligence import (
+    ProjectIntelligencePersistenceError,
+    ProjectIntelligenceRepository,
+)
 from sohail_agent_cli.inspection import DeepInspector
 from sohail_agent_cli.providers import GenerationRequest, OllamaProvider, ProviderConfig
 

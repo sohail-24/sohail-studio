@@ -40,6 +40,19 @@ class Evidence:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class RuntimeDependency:
+    """A verified runtime dependency for a specific component."""
+
+    component: str
+    dependency: str
+    source_file: str
+    confidence: Confidence
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class DiscoveredFile:
     """Metadata for a discovered file; source contents are never retained."""
@@ -76,6 +89,7 @@ class ProjectIntelligence:
     services: list[dict[str, Any]] = field(default_factory=list)
     relationships: list[dict[str, Any]] = field(default_factory=list)
     databases: list[str] = field(default_factory=list)
+    runtime_dependencies: list[RuntimeDependency] = field(default_factory=list)
     environment_variables: list[dict[str, Any]] = field(default_factory=list)
     build_metadata: list[dict[str, Any]] = field(default_factory=list)
     entrypoints: list[dict[str, Any]] = field(default_factory=list)
@@ -106,7 +120,7 @@ class ProjectIntelligence:
         }
         for field_name in (
             "files", "components", "languages", "frameworks", "runtimes", "package_managers",
-            "dependencies", "commands", "ports", "services", "relationships", "databases", "environment_variables",
+            "dependencies", "commands", "ports", "services", "relationships", "databases", "runtime_dependencies", "environment_variables",
             "build_metadata", "entrypoints", "verified_patterns", "evidence", "user_evidence", "warnings",
         ):
             if field_name in summary:
@@ -118,6 +132,10 @@ class ProjectIntelligence:
         known["evidence"] = [
             item if isinstance(item, Evidence) else Evidence(**item)
             for item in known.get("evidence", [])
+        ]
+        known["runtime_dependencies"] = [
+            item if isinstance(item, RuntimeDependency) else RuntimeDependency(**item)
+            for item in known.get("runtime_dependencies", [])
         ]
         for field_name in ("docker", "kubernetes", "ci_cd", "documentation"):
             known[field_name] = summary.get(field_name) or {}
@@ -159,6 +177,7 @@ class ProjectIntelligence:
             "services": self.services,
             "relationships": self.relationships,
             "databases": self.databases,
+            "runtime_dependencies": [item.to_dict() for item in self.runtime_dependencies],
             "environment_variables": self.environment_variables,
             "build_metadata": self.build_metadata,
             "entrypoints": self.entrypoints,

@@ -8,7 +8,11 @@ from sohail_agent_cli.ai.context import AIContextBuilder
 from sohail_agent_cli.ai.models import AIRequest
 from sohail_agent_cli.ai.orchestrator import AIOrchestrator
 from sohail_agent_cli.ai.provider import ProviderSpec
-from sohail_agent_cli.specification.models import Specification, SpecificationInput, SpecificationOutput
+from sohail_agent_cli.specification.models import (
+    Specification,
+    SpecificationInput,
+    SpecificationOutput,
+)
 
 
 class SpecificationGenerator:
@@ -42,14 +46,14 @@ class SpecificationGenerator:
                 allowed_kinds=("specification",),
                 max_retries=1,
             )
-          
+
         )
-        
+
 
         return SpecificationOutput(
             specification=Specification.from_ai_output(ai_result.output)
         )
-        
+
 
     def _build_instruction(self, specification_input: SpecificationInput) -> str:
         return "\n\n".join(

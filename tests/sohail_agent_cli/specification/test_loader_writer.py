@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 
 from sohail_agent_cli.bootstrap.validator import PlanningValidationError
-from sohail_agent_cli.specification import SpecificationLoader, SpecificationOutput, SpecificationWriter
+from sohail_agent_cli.specification import (
+    SpecificationLoader,
+    SpecificationOutput,
+    SpecificationWriter,
+)
 from sohail_agent_cli.specification.models import Specification
 
 

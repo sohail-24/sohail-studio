@@ -301,4 +301,3 @@ class FileWorker(BaseWorker):
             path = self.base_path / path
 
         return path.resolve()
-        

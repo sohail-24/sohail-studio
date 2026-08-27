@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sohail_agent_cli.bootstrap.loader import BootstrapPlan, PlanningLoader
+from sohail_agent_cli.bootstrap.loader import PlanningLoader
 from sohail_agent_cli.bootstrap.scaffold import ProjectScaffold
 from sohail_agent_cli.bootstrap.templates import ProjectTemplates
 from sohail_agent_cli.bootstrap.validator import PlanningValidator

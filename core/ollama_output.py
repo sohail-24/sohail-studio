@@ -12,7 +12,6 @@ import re
 import time
 from dataclasses import dataclass
 
-
 RESPONSE_START = "\x00SOHAIL_OLLAMA_RESPONSE_START\x00"
 
 

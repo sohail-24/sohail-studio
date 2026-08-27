@@ -180,8 +180,7 @@ class BaseAgent(ABC):
             return False, f"Unexpected error while writing {path}: {e}", False
 
     @abstractmethod
-    
+
     async def execute(self, *args: Any, **kwargs: Any) -> AgentResult:
         """Execute the agent's main task."""
         pass
-    

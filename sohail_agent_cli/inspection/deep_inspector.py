@@ -269,6 +269,14 @@ class DeepInspector:
     def _add(self, intelligence: ProjectIntelligence, **kwargs: Any) -> None:
         intelligence.evidence.append(Evidence(**kwargs))
 
+    def _runtime_dependency(self, intelligence: ProjectIntelligence, component: str, dependency: str, source_file: str, confidence: str) -> None:
+        from .models import RuntimeDependency
+        item = RuntimeDependency(
+            component=component, dependency=dependency, source_file=source_file, confidence=confidence
+        )
+        if item not in intelligence.runtime_dependencies:
+            intelligence.runtime_dependencies.append(item)
+
     def _extract(self, intelligence: ProjectIntelligence, root: Path, files: dict[str, str]) -> None:
         package_metadata: dict[str, dict[str, Any]] = {}
         manifest_paths: list[str] = []
@@ -453,6 +461,17 @@ class DeepInspector:
                 dependency = {"name": str(name), "version": str(version), "scope": scope, "source_file": source, "confidence": "high"}
                 intelligence.dependencies.append(dependency)
                 self._add(intelligence, source_file=source, evidence_type="dependency", key=str(name), value=str(version), confidence="high")
+
+                name_lower = str(name).lower()
+                if "mongoose" in name_lower or "mongodb" in name_lower:
+                    self._runtime_dependency(intelligence, component, "MongoDB", source_file=source, confidence="high")
+                elif "pg" in name_lower or "postgres" in name_lower:
+                    self._runtime_dependency(intelligence, component, "PostgreSQL", source_file=source, confidence="high")
+                elif "mysql" in name_lower:
+                    self._runtime_dependency(intelligence, component, "MySQL", source_file=source, confidence="high")
+                elif "redis" in name_lower:
+                    self._runtime_dependency(intelligence, component, "Redis", source_file=source, confidence="high")
+
         for script, command in (data.get("scripts") or {}).items():
             item = {"name": str(script), "command": str(command), "source_file": source, "confidence": "high", "component": component}
             intelligence.commands.append(item)
@@ -1147,6 +1166,20 @@ class DeepInspector:
             if key == "PORT" and value.isdigit():
                 self._port(intelligence, source, "root_port", int(value), "high", "environment PORT", line_number, component="root", port_type="application")
 
+            key_lower = key.lower()
+            if "mongo" in key_lower:
+                component_name = _component_name(Path(intelligence.root_path), Path(intelligence.root_path) / source)
+                self._runtime_dependency(intelligence, component_name, "MongoDB", source_file=source, confidence="high")
+            elif "postgres" in key_lower:
+                component_name = _component_name(Path(intelligence.root_path), Path(intelligence.root_path) / source)
+                self._runtime_dependency(intelligence, component_name, "PostgreSQL", source_file=source, confidence="high")
+            elif "mysql" in key_lower:
+                component_name = _component_name(Path(intelligence.root_path), Path(intelligence.root_path) / source)
+                self._runtime_dependency(intelligence, component_name, "MySQL", source_file=source, confidence="high")
+            elif "redis" in key_lower:
+                component_name = _component_name(Path(intelligence.root_path), Path(intelligence.root_path) / source)
+                self._runtime_dependency(intelligence, component_name, "Redis", source_file=source, confidence="high")
+
     def _readme(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
         intelligence.documentation.setdefault("files", []).append(source)
         self._add(intelligence, source_file=source, evidence_type="documentation", key="readme", value=True, confidence="high")
@@ -1295,6 +1328,8 @@ class DeepInspector:
             if marker in lower:
                 intelligence.databases.append(database)
                 self._add(intelligence, source_file=source, evidence_type="database", key="database", value=database, confidence="medium")
+                component_name = _component_name(Path(intelligence.root_path), Path(intelligence.root_path) / source)
+                self._runtime_dependency(intelligence, component_name, database, source_file=source, confidence="medium")
                 break
 
     def _component(self, intelligence: ProjectIntelligence, name: str, files: dict[str, str]) -> dict[str, Any]:

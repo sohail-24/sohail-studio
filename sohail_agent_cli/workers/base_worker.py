@@ -5,7 +5,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from pathlib import Path
 from typing import Any
 
 
@@ -25,7 +24,7 @@ class WorkerResult:
     message: str
     data: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
-    
+
     @classmethod
     def success_result(
         cls,
@@ -38,7 +37,7 @@ class WorkerResult:
             message=message,
             data=data or {},
         )
-    
+
     @classmethod
     def failure_result(
         cls,
@@ -60,7 +59,7 @@ class BaseWorker(ABC):
     Workers provide safe execution of operations like
     file operations and shell commands.
     """
-    
+
     def __init__(
         self,
         safety_level: WorkerSafetyLevel = WorkerSafetyLevel.READ_ONLY,
@@ -75,7 +74,7 @@ class BaseWorker(ABC):
         """
         self.safety_level = safety_level
         self.dry_run = dry_run
-    
+
     @abstractmethod
     async def execute(self, operation: str, **kwargs: Any) -> WorkerResult:
         """
@@ -89,7 +88,7 @@ class BaseWorker(ABC):
             The result of the operation
         """
         pass
-    
+
     def can_execute(self, required_level: WorkerSafetyLevel) -> bool:
         """
         Check if this worker can execute at the required safety level.
@@ -108,12 +107,12 @@ class BaseWorker(ABC):
             WorkerSafetyLevel.EXECUTE_SAFE,
             WorkerSafetyLevel.EXECUTE_UNSAFE,
         ]
-        
+
         current_idx = level_order.index(self.safety_level)
         required_idx = level_order.index(required_level)
-        
+
         return current_idx >= required_idx
-    
+
     def _check_safety(self, required_level: WorkerSafetyLevel) -> None:
         """
         Check safety level and raise if insufficient.

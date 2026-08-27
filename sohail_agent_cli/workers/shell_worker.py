@@ -17,7 +17,7 @@ class ShellWorker(BaseWorker):
     Provides methods for executing shell commands
     with safety checks, timeouts, and output capture.
     """
-    
+
     # Commands that are always blocked for safety
     BLOCKED_COMMANDS = {
         "rm -rf /",
@@ -28,7 +28,7 @@ class ShellWorker(BaseWorker):
         "fdisk",
         ":(){ :|:& };:",  # Fork bomb
     }
-    
+
     # Commands allowed at EXECUTE_SAFE level
     SAFE_COMMANDS = {
         "git",
@@ -63,7 +63,7 @@ class ShellWorker(BaseWorker):
         "tail",
         "wc",
     }
-    
+
     def __init__(
         self,
         safety_level: WorkerSafetyLevel = WorkerSafetyLevel.EXECUTE_SAFE,
@@ -83,7 +83,7 @@ class ShellWorker(BaseWorker):
         super().__init__(safety_level, dry_run)
         self.timeout = timeout
         self.cwd = cwd or Path.cwd()
-    
+
     async def execute(self, operation: str, **kwargs: Any) -> WorkerResult:
         """
         Execute a shell operation.
@@ -96,7 +96,7 @@ class ShellWorker(BaseWorker):
             The result of the operation
         """
         return await self.run(operation, **kwargs)
-    
+
     async def run(
         self,
         command: str,
@@ -125,20 +125,20 @@ class ShellWorker(BaseWorker):
                     f"Command blocked for safety: {blocked}",
                     "SafetyError",
                 )
-        
+
         # Check safety level
         if not self._is_safe_command(command):
             self._check_safety(WorkerSafetyLevel.EXECUTE_UNSAFE)
-        
+
         if self.dry_run:
             return WorkerResult.success_result(
                 f"[DRY RUN] Would execute: {command}",
                 {"command": command},
             )
-        
+
         timeout = timeout or self.timeout
         cwd = cwd or self.cwd
-        
+
         try:
             # Run the command
             process = await asyncio.create_subprocess_shell(
@@ -148,7 +148,7 @@ class ShellWorker(BaseWorker):
                 cwd=cwd,
                 env=env,
             )
-            
+
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
@@ -161,17 +161,17 @@ class ShellWorker(BaseWorker):
                     f"Command timed out after {timeout}s: {command}",
                     "TimeoutError",
                 )
-            
+
             # Build result
             result_data: dict[str, Any] = {
                 "command": command,
                 "returncode": process.returncode,
             }
-            
+
             if capture_output:
                 result_data["stdout"] = stdout.decode("utf-8", errors="replace") if stdout else ""
                 result_data["stderr"] = stderr.decode("utf-8", errors="replace") if stderr else ""
-            
+
             if process.returncode == 0:
                 return WorkerResult.success_result(
                     f"Command succeeded: {command[:50]}...",
@@ -182,13 +182,13 @@ class ShellWorker(BaseWorker):
                     f"Command failed with exit code {process.returncode}: {command[:50]}...",
                     f"Exit code: {process.returncode}",
                 )
-        
+
         except Exception as e:
             return WorkerResult.failure_result(
                 f"Error executing command: {e}",
                 str(e),
             )
-    
+
     async def run_safe(
         self,
         command: list[str],
@@ -209,16 +209,16 @@ class ShellWorker(BaseWorker):
             WorkerResult with command output
         """
         cmd_str = shlex.join(command)
-        
+
         if self.dry_run:
             return WorkerResult.success_result(
                 f"[DRY RUN] Would execute: {cmd_str}",
                 {"command": cmd_str},
             )
-        
+
         timeout = timeout or self.timeout
         cwd = cwd or self.cwd
-        
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -227,7 +227,7 @@ class ShellWorker(BaseWorker):
                 cwd=cwd,
                 env=env,
             )
-            
+
             try:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(),
@@ -240,14 +240,14 @@ class ShellWorker(BaseWorker):
                     f"Command timed out after {timeout}s: {cmd_str}",
                     "TimeoutError",
                 )
-            
+
             result_data: dict[str, Any] = {
                 "command": cmd_str,
                 "returncode": process.returncode,
                 "stdout": stdout.decode("utf-8", errors="replace") if stdout else "",
                 "stderr": stderr.decode("utf-8", errors="replace") if stderr else "",
             }
-            
+
             if process.returncode == 0:
                 return WorkerResult.success_result(
                     f"Command succeeded: {cmd_str[:50]}...",
@@ -258,13 +258,13 @@ class ShellWorker(BaseWorker):
                     f"Command failed with exit code {process.returncode}: {cmd_str[:50]}...",
                     f"Exit code: {process.returncode}",
                 )
-        
+
         except Exception as e:
             return WorkerResult.failure_result(
                 f"Error executing command: {e}",
                 str(e),
             )
-    
+
     def _is_safe_command(self, command: str) -> bool:
         """
         Check if a command is in the safe list.
@@ -279,7 +279,7 @@ class ShellWorker(BaseWorker):
         parts = command.strip().split()
         if not parts:
             return False
-        
+
         base_cmd = parts[0]
-        
+
         return base_cmd in self.SAFE_COMMANDS
