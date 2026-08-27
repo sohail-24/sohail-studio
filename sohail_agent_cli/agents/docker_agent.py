@@ -18,6 +18,7 @@ from core.evidence import (
 from core.storage.project_intelligence import ProjectIntelligenceRepository
 from sohail_agent_cli.agents.base_agent import AgentResult, BaseAgent
 from sohail_agent_cli.dockerize import (
+    ComposeContextBuilder,
     DockerClarificationPolicy,
     DockerContextBuilder,
     DockerContextError,
@@ -28,8 +29,8 @@ from sohail_agent_cli.dockerize import (
     validate_docker_result,
 )
 from sohail_agent_cli.dockerize.platform_policy import policy_for_component, policy_value
+from sohail_agent_cli.dockerize.strategies import STATIC_ARTIFACT_SERVER
 from sohail_agent_cli.providers import BaseProvider, OllamaProvider, ProviderConfig
-
 
 DOCKER_OLLAMA_TIMEOUT_SECONDS = 120.0
 
@@ -58,6 +59,7 @@ def _evidence_diagnostic(context: Any, reason: str) -> dict[str, Any]:
         policy = policy_for_component(context.platform_policies, name)
         policy_base = policy_value(policy, "base_image")
         policy_workdir = policy_value(policy, "working_directory")
+        static_serving = policy_value(policy, "static_serving_command")
         unsupported = component.get("deployment_evidence") or {}
         build_commands = [
             item for item in commands
@@ -103,22 +105,34 @@ def _evidence_diagnostic(context: Any, reason: str) -> dict[str, Any]:
             },
             {
                 "component": name,
-                "requirement": "Production start command",
-                "explicit_evidence": [dict(item) for item in start_commands],
-                "derived_deterministic": [dict(item) for item in derived_artifacts],
+                "requirement": (
+                    "Static serving strategy"
+                    if component.get("execution_strategy") == STATIC_ARTIFACT_SERVER
+                    else "Production start command"
+                ),
+                "explicit_evidence": (
+                    [] if component.get("execution_strategy") == STATIC_ARTIFACT_SERVER
+                    else [dict(item) for item in start_commands]
+                ),
+                "derived_deterministic": (
+                    [] if component.get("execution_strategy") == STATIC_ARTIFACT_SERVER
+                    else [dict(item) for item in derived_artifacts]
+                ),
+                "approved_platform_policy": [static_serving] if static_serving else [],
                 "unsupported": unsupported if unsupported.get("status") == "UNSUPPORTED" else None,
-                "source": [item.get("source_file") for item in start_commands]
+                "source": ([] if component.get("execution_strategy") == STATIC_ARTIFACT_SERVER else [item.get("source_file") for item in start_commands])
                 + [ref.get("source_file") for item in derived_artifacts for ref in item.get("derived_from", [])],
-                "value": [item.get("command") for item in start_commands]
+                "value": ([static_serving.get("value")] if static_serving else [item.get("command") for item in start_commands])
                 + [item.get("launch_command") for item in derived_artifacts],
-                "repository_truth": "FOUND" if start_commands or derived_artifacts else "NOT PROVEN",
-                "inspector": "EXTRACTED" if start_commands or derived_artifacts else "NOT EXTRACTED",
-                "persisted": "PERSISTED" if start_commands or derived_artifacts else "NOT PERSISTED",
-                "docker_context": "INCLUDED" if start_commands or derived_artifacts else "NOT INCLUDED",
+                "repository_truth": "NOT APPLICABLE" if component.get("execution_strategy") == STATIC_ARTIFACT_SERVER else "FOUND" if start_commands or derived_artifacts else "NOT PROVEN",
+                "inspector": "NOT APPLICABLE" if component.get("execution_strategy") == STATIC_ARTIFACT_SERVER else "EXTRACTED" if start_commands or derived_artifacts else "NOT EXTRACTED",
+                "persisted": "POLICY REGISTRY" if static_serving else "PERSISTED" if start_commands or derived_artifacts else "NOT PERSISTED",
+                "docker_context": "INCLUDED" if static_serving or start_commands or derived_artifacts else "NOT INCLUDED",
                 "validation": "NOT RUN (decision blocked)",
                 "rejection": (
                     "No explicit or deterministic production start strategy was classified; model inference is not accepted."
-                    if not start_commands and not derived_artifacts else ""
+                    if component.get("execution_strategy") != STATIC_ARTIFACT_SERVER
+                    and not start_commands and not derived_artifacts else ""
                 ),
             },
             {
@@ -163,7 +177,9 @@ def _evidence_diagnostic(context: Any, reason: str) -> dict[str, Any]:
                 "validation": "NOT RUN (decision blocked)",
             },
         ])
-    if "working directory" in reason.lower():
+    if "port" in reason.lower():
+        recommendation = "Persist an explicit application port if the project requires one; otherwise omit port fields. Dockerize will not infer a port."
+    elif "working directory" in reason.lower():
         recommendation = "Persist an exact authoritative WORKDIR or approved deterministic platform policy; Dockerize will not default to /app."
     elif "base image" in reason.lower():
         recommendation = "Persist an exact base image or approve a documented deterministic platform policy; Ollama cannot choose one."
@@ -380,6 +396,13 @@ class DockerAgent(BaseAgent):
                     f"model {self.model}"
                 )
                 self.info("Running deterministic Docker requirement preflight")
+                # Compose context is normalized from this exact persisted
+                # DockerContext before the model sees it.  It never reads the
+                # repository and therefore cannot introduce fresh evidence.
+                context = replace(
+                    context,
+                    compose_context=ComposeContextBuilder.build(context).to_dict(),
+                )
                 decision = await decision_engine.decide(context)
                 self.info(
                     "Ollama decision received"
@@ -393,6 +416,16 @@ class DockerAgent(BaseAgent):
                     self.info("Revalidating bounded repaired Docker decision")
                 if decision.status == "ready":
                     self.info("Docker decision validated against persisted evidence")
+                    # Enrich the same immutable Compose context with the
+                    # already validated component decision.  This remains a
+                    # normalization step over persisted facts; it does not
+                    # inspect the repository or grant the model authority.
+                    context = replace(
+                        context,
+                        compose_context=ComposeContextBuilder.build(
+                            context, decision
+                        ).to_dict(),
+                    )
                     break
                 self.info(
                     "Dockerize evidence acquisition not started: "
@@ -438,6 +471,7 @@ class DockerAgent(BaseAgent):
             files_created: list[Path] = []
             files_skipped: list[Path] = []
             pending_writes: list[tuple[Path, str, bool]] = []
+            modified_candidates: list[Path] = []
             planned_actions: list[dict[str, str]] = []
             self.info("Rendering selected Docker artifacts")
             for component in decision.components:
@@ -456,6 +490,10 @@ class DockerAgent(BaseAgent):
                     "artifacts": list(intelligence.get("artifacts") or []),
                     "deployment_evidence": dict(intelligence.get("deployment_evidence") or {}),
                     "language": intelligence.get("language"),
+                    "strategy_id": intelligence.get("strategy_id"),
+                    "files": list(intelligence.get("files") or []),
+                    "build_metadata": list(intelligence.get("build_metadata") or []),
+                    "entrypoints": list(intelligence.get("entrypoints") or []),
                     "platform_policy": policy_for_component(
                         context.platform_policies, str(component.get("name"))
                     ),
@@ -474,19 +512,13 @@ class DockerAgent(BaseAgent):
                 else:
                     artifacts[dockerfile_path] = dockerfile
                     pending_writes.append((dockerfile_path, dockerfile, dockerfile_overwrite))
+                    if (
+                        dockerfile_path.exists()
+                        and dockerfile_overwrite
+                        and dockerfile_path.read_text(encoding="utf-8") != dockerfile
+                    ):
+                        modified_candidates.append(dockerfile_path)
                     planned_actions.append({"action": component_action, "path": str(dockerfile_path)})
-                dockerignore_path = dockerfile_path.parent / ".dockerignore"
-                dockerignore = DockerDecisionEngine.render_dockerignore()
-                dockerignore_overwrite = overwrite or component_action == "upgrade"
-                if dockerignore_path.exists() and not dockerignore_overwrite:
-                    artifacts[dockerignore_path] = dockerignore_path.read_text(encoding="utf-8")
-                    files_skipped.append(dockerignore_path)
-                    planned_actions.append({"action": "keep", "path": str(dockerignore_path)})
-                else:
-                    artifacts[dockerignore_path] = dockerignore
-                    pending_writes.append((dockerignore_path, dockerignore, dockerignore_overwrite))
-                    planned_actions.append({"action": component_action, "path": str(dockerignore_path)})
-
             compose_path = self._compose_path(root, context)
             compose_exists = compose_path.exists()
             planned_compose = artifact_plan["compose"] if artifact_plan is not None else None
@@ -495,7 +527,7 @@ class DockerAgent(BaseAgent):
                 else (not compose_exists or compose_action in {"improve", "generate"})
             )
             if generate_compose:
-                compose_content = DockerDecisionEngine.render_compose(decision)
+                compose_content = DockerDecisionEngine.render_compose(decision, context)
                 compose_overwrite = overwrite or planned_compose == "upgrade"
                 if compose_path.exists() and not compose_overwrite:
                     artifacts[compose_path] = compose_path.read_text(encoding="utf-8")
@@ -504,6 +536,12 @@ class DockerAgent(BaseAgent):
                 else:
                     artifacts[compose_path] = compose_content
                     pending_writes.append((compose_path, compose_content, compose_overwrite))
+                    if (
+                        compose_path.exists()
+                        and compose_overwrite
+                        and compose_path.read_text(encoding="utf-8") != compose_content
+                    ):
+                        modified_candidates.append(compose_path)
                     planned_actions.append({"action": planned_compose or "generate", "path": str(compose_path)})
             elif compose and compose_exists:
                 artifacts[compose_path] = compose_path.read_text(encoding="utf-8")
@@ -546,10 +584,29 @@ class DockerAgent(BaseAgent):
                         {"path": str(path), "content": content}
                         for path, content in artifacts.items()
                     ],
+                    "artifact_previews": [
+                        {
+                            "path": str(path),
+                            "content": content,
+                            "action": next(
+                                (
+                                    item.get("action")
+                                    for item in planned_actions
+                                    if item.get("path") == str(path)
+                                ),
+                                "keep",
+                            ),
+                        }
+                        for path, content in artifacts.items()
+                    ],
                     "repair_attempts": int(decision.repair_attempted),
                     "model_called": decision.model_called,
                     "files_created": len(files_created),
                     "files_skipped": len(files_skipped),
+                    "files_written": len(files_created),
+                    "files_modified": [] if self.dry_run else [str(path) for path in modified_candidates],
+                    "planned_modifications": [str(path) for path in modified_candidates],
+                    "files_preserved": [str(path) for path in files_skipped],
                     "docker_plan": artifact_plan,
                     "planned_actions": planned_actions,
                     "dry_run": self.dry_run,

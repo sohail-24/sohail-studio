@@ -12,7 +12,7 @@ from sohail_agent_cli.providers import GenerationRequest, OllamaProvider
 
 from .context_builder import DockerContext
 from .platform_policy import policy_for_component, policy_value
-
+from .strategies import STATIC_ARTIFACT_SERVER, strategy_for_component
 
 DOCKER_DECISION_OUTPUT_TOKENS = 2048
 DOCKER_DECISION_SCHEMA: dict[str, Any] = {
@@ -28,7 +28,7 @@ DOCKER_DECISION_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "required": [
                     "name", "base_image", "working_directory", "package_manager",
-                    "install_command", "build_command", "start_command", "port",
+                    "install_command", "build_command",
                 ],
                 "properties": {
                     "name": {"type": "string", "minLength": 1},
@@ -56,7 +56,7 @@ DOCKER_DECISION_SCHEMA: dict[str, Any] = {
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "required": ["name", "component", "build_context", "port", "target_port"],
+                        "required": ["name", "component", "build_context"],
                         "properties": {
                             "name": {"type": "string", "minLength": 1},
                             "component": {"type": "string", "minLength": 1},
@@ -107,16 +107,21 @@ For example, a safe evidence outcome is:
 Each component decision must use the supplied component name and evidence.
 For ready decisions, each component should include base_image, working_directory,
 package_manager, install_command, build_command when the evidence or verified
-pattern requires a build, start_command, and
+pattern requires a build, and port. A PROCESS_RUNTIME component must also
+include its evidence-backed start_command. A STATIC_ARTIFACT_SERVER component
+does not require an application start_command; its exact serving command is
+supplied by the applicable approved platform policy.
 port, including the supplied component name. The compose object must contain a
 services array. Compose services must include name, component, build_context,
 port, and target_port and may include only evidence-supported environment or
-dependency references. The component's start_command must match the exact
-command from its literal start script or the exact DERIVED_DETERMINISTIC launch
-command supplied in the component artifact evidence. A dev or preview script is
-not production start evidence and must never be selected as start_command. If no
-explicit or deterministically derived production start strategy exists for a
-component, return NEEDS_EVIDENCE.
+dependency references. For PROCESS_RUNTIME components, start_command must
+match the exact command from its literal start script or the exact
+DERIVED_DETERMINISTIC launch command supplied in the component artifact
+evidence. A dev or preview script is not production start evidence and must
+never be selected as start_command. A STATIC_ARTIFACT_SERVER component does
+not require an application start_command; its approved static serving policy is
+authoritative. If no authorized execution strategy exists for a component,
+return NEEDS_EVIDENCE.
 When the supplied context contains a verified pattern for a component, include
 that pattern's pattern_id verbatim as deployment_pattern; this field is
 required and omission is invalid. A static_frontend pattern
@@ -125,9 +130,10 @@ port remain evidence-bound; do not treat the pattern as permission to invent
 runtime versions, ports, environment variables, or dependencies.
 For a static_frontend component, put deployment_pattern and build_command on
 that component object, never on a Compose service. The build_command must match
-the verified pattern policy exactly. The start_command must use an allowed
-static-serving family from that policy; never use dev, preview, vite dev, or
-vite preview as a production Docker start command. Use the exact Node runtime
+the verified pattern policy exactly. Do not require an application start_command;
+the deterministic static serving strategy supplies it. If a start_command is
+present, it must use the verified pattern's authorized static-serving family. Never use
+dev, preview, vite dev, or vite preview as a production Docker start command. Use the exact Node runtime
 as the build image and include an evidence-compatible package install command;
 do not use a runtime-only image such as nginx as the build image.
 The supplied artifact_plan is authoritative: generate or upgrade only those
@@ -136,8 +142,9 @@ for skipped components.
 For every component whose supplied ports contain a non-conflicting port with
 port_type application, copy that exact integer to component.port. The matching
 Compose service must copy that same integer to both port and target_port. Do
-not omit an evidence-backed application port and do not use documented or
-service-only ports in its place.
+If a component has no application port evidence, omit component.port and omit
+the Compose service port and target_port fields. Never invent or use documented
+or service-only ports in their place.
 Return a decision, not file contents and do not modify files."""
 
 REPAIR_SYSTEM_PROMPT = """You repair one invalid JSON Docker decision for Sohail Studio.
@@ -148,8 +155,8 @@ contain status, reason, components, and compose. reason must be a concise,
 non-empty string grounded only in the original response or the supplied
 validation error. For every supplied component with a non-conflicting
 application port, copy the exact port into the component and into the matching
-Compose service's port and target_port. Do not omit an evidence-backed
-application port. Use each component's evidence-backed path as the Compose
+Compose service's port and target_port. If no application port evidence is
+supplied, omit those fields instead of inventing a port. Use each component's evidence-backed path as the Compose
 build_context, expressed as a relative ./path. For a verified static_frontend
 component, keep deployment_pattern and build_command inside its component
 object, use the exact verified build command, use the exact Node runtime as the
@@ -177,6 +184,13 @@ class DockerDecisionEngine:
         self.on_model_call = on_model_call
 
     async def decide(self, context: DockerContext) -> DockerDecision:
+        if not context.compose_context:
+            from .compose_context import ComposeContextBuilder
+
+            context = replace(
+                context,
+                compose_context=ComposeContextBuilder.build(context).to_dict(),
+            )
         preflight = self._preflight(context)
         if preflight is not None:
             return preflight
@@ -204,7 +218,9 @@ class DockerDecisionEngine:
         except (TypeError, ValueError) as exc:
             repair_attempted = True
             payload = await self._repair_payload(result.text, str(exc), context.prompt())
-        payload = self._normalize_evidence_bound_fields(payload, context)
+        payload = self._normalize_evidence_bound_fields(
+            payload, context, repair_optional_ports=repair_attempted
+        )
         decision = DockerDecision(
             status=payload["status"],
             components=payload["components"],
@@ -239,14 +255,16 @@ class DockerDecisionEngine:
                         repair_context.prompt(),
                         repair_scope=repair_scope,
                     )
-                except DockerDecisionError as repair_exc:
+                except DockerDecisionError:
                     return self._needs_evidence(
                         str(exc),
                         repair_attempted=True,
                         proposed=decision.raw,
                     )
                 payload = self._merge_scope_repair(decision.raw, payload, context)
-                payload = self._normalize_evidence_bound_fields(payload, context)
+                payload = self._normalize_evidence_bound_fields(
+                    payload, context, repair_optional_ports=True
+                )
                 repaired_decision = DockerDecision(
                     status=payload["status"],
                     components=payload["components"],
@@ -261,7 +279,7 @@ class DockerDecisionEngine:
                     self._validate_decision(repaired_decision, context)
                 except DockerDecisionError as repaired_error:
                     return self._needs_evidence(
-                        str(exc),
+                        str(repaired_error),
                         repair_attempted=True,
                         proposed=repaired_decision.raw,
                     )
@@ -327,14 +345,20 @@ class DockerDecisionEngine:
     def _normalize_evidence_bound_fields(
         payload: dict[str, Any],
         context: DockerContext,
+        *,
+        repair_optional_ports: bool = False,
     ) -> dict[str, Any]:
-        """Copy only deterministic pattern identity omitted by the model.
+        """Normalize only safe, deterministic fields in a model response.
 
         A verified pattern is already an accepted Project Intelligence fact. If
         the model omits that identity while returning a ready decision, adding
         the exact persisted pattern_id is safe normalization, not inference.
         Any conflicting non-empty value remains untouched and is rejected by
-        the strict validator.
+        the strict validator. A bounded repair may remove optional port claims
+        when the selected persisted component has no application port evidence.
+        When exactly one authoritative application port exists, repair
+        canonicalizes component and Compose claims to that exact value. This
+        keeps repair from becoming a second source of truth for port mappings.
         """
         if payload.get("status") != "ready":
             return payload
@@ -355,6 +379,83 @@ class DockerDecisionEngine:
                 component["deployment_pattern"] = pattern_id
                 changed = True
         if changed:
+            normalized["components"] = components
+        # Verified patterns and execution strategies are deterministic facts,
+        # not optional model-owned fields. Restore their exact identities and
+        # the policy-authorized static contract before validation, including
+        # an install command proven by a compatible lockfile policy.
+        for source in context.components:
+            name = str(source.get("name") or "")
+            component = by_name.get(name)
+            if component is None:
+                continue
+            if "strategy_id" not in component and source.get("strategy_id"):
+                component["strategy_id"] = source["strategy_id"]
+            if "execution_strategy" not in component and (
+                source.get("execution_strategy")
+            ):
+                component["execution_strategy"] = (
+                    source["execution_strategy"]
+                )
+            pattern = next(
+                (
+                    item for item in context.verified_patterns
+                    if str(item.get("component")) == name
+                    and item.get("origin") == "VERIFIED_INFERENCE"
+                ),
+                None,
+            )
+            if pattern is not None and pattern.get("pattern_id"):
+                component["deployment_pattern"] = pattern["pattern_id"]
+                pattern_build = (pattern.get("policy") or {}).get("build_command")
+                if pattern_build:
+                    component["build_command"] = pattern_build
+            policy = policy_for_component(context.platform_policies, name)
+            policy_install = policy_value(policy, "install_command")
+            if policy_install is not None:
+                component["install_command"] = policy_install["value"]
+        normalized["components"] = components
+        if repair_optional_ports:
+            application_ports: dict[str, int | None] = {}
+            for item in context.components:
+                values = {
+                    int(port["port"])
+                    for port in item.get("ports", [])
+                    if port.get("port_type") == "application"
+                    and port.get("port") is not None
+                    and not port.get("conflict")
+                }
+                application_ports[str(item.get("name"))] = (
+                    next(iter(values)) if len(values) == 1 else None
+                )
+            for component in components:
+                application_port = application_ports.get(str(component.get("name")))
+                if application_port is None:
+                    component.pop("port", None)
+                else:
+                    # A repaired model value is never authoritative. Replace
+                    # it with the exact persisted component port instead of
+                    # allowing a conflicting value to reach validation.
+                    component["port"] = application_port
+            compose = dict(normalized.get("compose") or {})
+            services = [
+                dict(item) for item in compose.get("services", [])
+                if isinstance(item, dict)
+            ]
+            for service in services:
+                application_port = application_ports.get(str(service.get("component")))
+                if application_port is None:
+                    service.pop("port", None)
+                    service.pop("target_port", None)
+                else:
+                    # Compose is downstream of the validated component
+                    # context; never preserve a model mapping such as 81:81
+                    # for an evidenced component port of 80.
+                    service["port"] = application_port
+                    service["target_port"] = application_port
+            if services or "services" in compose:
+                compose["services"] = services
+                normalized["compose"] = compose
             normalized["components"] = components
         return normalized
 
@@ -379,7 +480,12 @@ class DockerDecisionEngine:
             f"ORIGINAL_RESPONSE:\n{original}\n\n"
             "Before returning a ready response, check every component in the supplied context:\n"
             "preserve its exact name; copy any non-conflicting port_type=application\n"
-            "port into component.port and into its Compose service's port and target_port;\n"
+            "port into component.port and into its Compose service's port and target_port.\n"
+            "If no application port is supplied, remove component.port, service.port,\n"
+            "and service.target_port rather than inventing any of them. If exactly\n"
+            "one application port is supplied, preserve that exact integer in the\n"
+            "component and matching Compose service; never transform it into a\n"
+            "different host or target port;\n"
             "copy its component path into build_context as a relative ./path; preserve\n"
             "each verified_patterns.pattern_id verbatim as deployment_pattern on its\n"
             "matching component, and preserve exact policy commands. If a required fact cannot\n"
@@ -475,13 +581,18 @@ class DockerDecisionEngine:
     def _explicit_deployment_facts(
         source: dict[str, Any], field: str, value_key: str,
     ) -> list[dict[str, Any]]:
-        return [
+        facts = [
             dict(item)
             for item in source.get(field, [])
             if item.get("source_type", "EXPLICIT_EVIDENCE") == "EXPLICIT_EVIDENCE"
             and item.get("model_inference") is False
             and str(item.get(value_key) or "").strip()
         ]
+        if field == "base_images":
+            runtime_facts = [item for item in facts if item.get("role") == "runtime"]
+            if runtime_facts:
+                return runtime_facts
+        return facts
 
     @staticmethod
     def _authorized_deployment_facts(
@@ -503,10 +614,8 @@ class DockerDecisionEngine:
 
         This gate deliberately consumes only the already-built DockerContext.
         There is no repository access, convention fallback, or model proposal
-        path here.  A platform-policy source can be added as a separate,
-        explicitly persisted authority later; no such policy is currently
-        present, so only explicit repository facts are accepted for deployment
-        layout values.
+        path here. Approved platform policy values are accepted only through
+        their validated provenance records.
         """
         patterns = {
             str(item.get("component")): item
@@ -518,6 +627,7 @@ class DockerDecisionEngine:
 
         for component in context.components:
             name = str(component.get("name"))
+            strategy = strategy_for_component(component, context.verified_patterns)
             explicit_start = [
                 item for item in component.get("commands", [])
                 if item.get("name") == "start" and str(item.get("command") or "").strip()
@@ -533,10 +643,16 @@ class DockerDecisionEngine:
             ]
             unsupported = component.get("deployment_evidence") or {}
             policy = policy_for_component(context.platform_policies, name)
+            execution_strategy = (
+                component.get("execution_strategy")
+                or (strategy.execution_strategy if strategy else None)
+            )
             base_images = DockerDecisionEngine._explicit_deployment_facts(component, "base_images", "image")
             working_directories = DockerDecisionEngine._explicit_deployment_facts(component, "working_directories", "path")
             policy_base_image = policy_value(policy, "base_image")
             policy_working_directory = policy_value(policy, "working_directory")
+            policy_start_command = policy_value(policy, "start_command")
+            policy_static_serving_command = policy_value(policy, "static_serving_command")
             explicit_base_values = {str(item.get("image")) for item in base_images}
             explicit_workdir_values = {str(item.get("path")) for item in working_directories}
             base_conflict = (
@@ -549,11 +665,18 @@ class DockerDecisionEngine:
                 or bool(policy_working_directory and explicit_workdir_values
                         and explicit_workdir_values != {str(policy_working_directory.get("value"))})
             )
-            start_authorized = bool(explicit_start or derived or name in patterns)
+            if execution_strategy == STATIC_ARTIFACT_SERVER:
+                # A static frontend has no application process start command.
+                # Its final serving command is an explicit policy value, while
+                # the build/output/port contract remains pattern-bound.
+                start_authorized = bool(name in patterns and policy_static_serving_command)
+            else:
+                start_authorized = bool(explicit_start or derived or policy_start_command)
             base_authorized = bool(base_images or policy_base_image) and not base_conflict
             workdir_authorized = bool(working_directories or policy_working_directory) and not workdir_conflict
             boundaries.append({
                 "component": name,
+                "strategy_id": strategy.strategy_id if strategy else None,
                 "explicit": explicit_start,
                 "derived_deterministic": derived,
                 "base_image": {
@@ -592,10 +715,27 @@ class DockerDecisionEngine:
                     ),
                     "authorized": workdir_authorized,
                 },
+                "production_start": {
+                    "explicit": explicit_start,
+                    "derived_deterministic": derived,
+                    "approved_platform_policy": [policy_start_command] if policy_start_command else [],
+                    "authorized": start_authorized,
+                },
+                "execution_strategy": execution_strategy,
+                "static_serving": {
+                    "approved_platform_policy": [policy_static_serving_command] if policy_static_serving_command else [],
+                    "authorized": execution_strategy == STATIC_ARTIFACT_SERVER and bool(policy_static_serving_command),
+                },
                 "unsupported": unsupported if unsupported.get("status") == "UNSUPPORTED" else None,
             })
             if not start_authorized:
-                missing.append(f"{name}: exact production start command")
+                missing.append(
+                    f"{name}: deterministic static serving strategy"
+                    if execution_strategy == STATIC_ARTIFACT_SERVER
+                    else f"{name}: exact production start command"
+                )
+            if strategy is None:
+                missing.append(f"{name}: one unambiguous validated Docker strategy")
             if not base_authorized:
                 missing.append(f"{name}: exact Docker base image" if not base_conflict else f"{name}: conflicting Docker base image evidence")
             if not workdir_authorized:
@@ -668,6 +808,28 @@ class DockerDecisionEngine:
             raise DockerDecisionError("Ollama returned Docker components different from the selected evidence")
         for name, component in actual.items():
             source = expected[name]
+            for identity_key in ("language", "framework"):
+                proposed_identity = component.get(identity_key)
+                detected_identity = source.get(identity_key)
+                if proposed_identity is not None and proposed_identity != detected_identity:
+                    raise DockerDecisionError(
+                        f"Docker decision changed the detected {identity_key} for {name}"
+                    )
+            proposed_strategy = component.get("strategy_id")
+            detected_strategy = source.get("strategy_id")
+            if proposed_strategy is not None and proposed_strategy != detected_strategy:
+                raise DockerDecisionError(
+                    f"Docker decision changed the selected technology strategy for {name}"
+                )
+            policy = policy_for_component(context.platform_policies, name)
+            execution_strategy = source.get("execution_strategy")
+            if (
+                component.get("execution_strategy") is not None
+                and component.get("execution_strategy") != execution_strategy
+            ):
+                raise DockerDecisionError(
+                    f"Docker decision changed the execution strategy for {name}"
+                )
             pattern = next(
                 (
                     item for item in context.verified_patterns
@@ -681,7 +843,7 @@ class DockerDecisionEngine:
                     raise DockerDecisionError(
                         f"Docker decision did not preserve the verified pattern for {name}"
                     )
-                self._validate_verified_pattern(name, component, source, pattern)
+                self._validate_verified_pattern(name, component, source, pattern, policy)
             working_directory = str(component.get("working_directory") or "").strip()
             allowed_working_directories = {
                 str(item.get("path") or item.get("value") or "")
@@ -696,6 +858,9 @@ class DockerDecisionEngine:
             package_manager = source.get("package_manager")
             if package_manager and component.get("package_manager") not in {None, package_manager}:
                 raise DockerDecisionError(f"Docker decision changed the detected package manager for {name}")
+            policy_install = policy_value(policy, "install_command")
+            if policy_install is not None and str(component.get("install_command") or "") != str(policy_install.get("value")):
+                raise DockerDecisionError(f"Docker decision changed the authorized install command for {name}")
             if any(
                 item.get("conflict") and item.get("port_type") == "application"
                 for item in source.get("ports", [])
@@ -733,6 +898,14 @@ class DockerDecisionEngine:
                         continue
                 if command_name == "start" and pattern is not None:
                     continue
+                if command_name == "start":
+                    policy_start = policy_value(policy, "start_command")
+                    if policy_start is not None:
+                        value = policy_start.get("value")
+                        allowed.add(
+                            " ".join(str(token) for token in value)
+                            if isinstance(value, list) else str(value or "")
+                        )
                 if allowed:
                     manager = str(source.get("package_manager") or "npm")
                     allowed |= {
@@ -760,10 +933,19 @@ class DockerDecisionEngine:
             ]
             service_port = service.get("port")
             target_port = service.get("target_port", service_port)
-            if component_ports and (service_port, target_port) not in {
+            expected_port_pairs = {
                 (item.get("port"), item.get("port")) for item in component_ports
-            }:
-                raise DockerDecisionError("Docker Compose port is inconsistent with Project Intelligence")
+            }
+            if component_ports and (service_port, target_port) not in expected_port_pairs:
+                raise DockerDecisionError(
+                    "Docker Compose service port conflicts with authoritative "
+                    f"component port evidence for {component_name}"
+                )
+            if not component_ports and (service_port is not None or target_port is not None):
+                raise DockerDecisionError(
+                    f"Docker Compose service invented a port for {component_name}; "
+                    "no component port evidence exists"
+                )
             allowed_environment = {
                 str(item.get("name") or item.get("key"))
                 for item in expected[component_name].get("environment", [])
@@ -772,6 +954,12 @@ class DockerDecisionEngine:
                 raise DockerDecisionError("Docker decision invented a Compose environment variable")
             if any(item not in expected for item in service.get("depends_on") or []):
                 raise DockerDecisionError("Docker decision invented a Compose dependency")
+        from .compose_context import ComposeContextBuilder, ComposeContextError
+
+        try:
+            ComposeContextBuilder.validate_proposal(context, decision.compose)
+        except ComposeContextError as exc:
+            raise DockerDecisionError(str(exc)) from exc
 
     @staticmethod
     def _validate_verified_pattern(
@@ -779,6 +967,7 @@ class DockerDecisionEngine:
         component: dict[str, Any],
         source: dict[str, Any],
         pattern: dict[str, Any],
+        platform_policy: dict[str, Any] | None,
     ) -> None:
         """Validate model details against a deterministic pattern policy."""
         if pattern.get("category") != "static_frontend":
@@ -799,17 +988,24 @@ class DockerDecisionEngine:
             raise DockerDecisionError(f"Docker decision changed the verified build command for {name}")
         start = component.get("start_command")
         start_text = " ".join(start) if isinstance(start, list) else str(start or "")
-        if not start_text.strip() or any(token in start_text for token in (";", "&&", "||", "|", "`", "$")):
-            raise DockerDecisionError(f"Docker decision supplied an unsafe static server command for {name}")
-        tokens = start if isinstance(start, list) else shlex.split(start_text)
-        if not tokens:
-            raise DockerDecisionError(f"Docker decision supplied an empty static server command for {name}")
-        if any(".." in str(token) or str(token).startswith("/") for token in tokens):
-            raise DockerDecisionError(f"Docker decision supplied a traversal-shaped static serving path for {name}")
-        family = " ".join(str(token) for token in tokens[:2])
-        allowed_families = set(policy.get("allowed_start_command_families") or [])
-        if str(tokens[0]) not in allowed_families and family not in allowed_families:
-            raise DockerDecisionError(f"Docker decision supplied an unsupported static server for {name}")
+        static_serving = policy_value(platform_policy, "static_serving_command")
+        if not start_text.strip():
+            if static_serving is None:
+                raise DockerDecisionError(
+                    f"Static frontend {name} lacks an authorized static serving strategy"
+                )
+        else:
+            if any(token in start_text for token in (";", "&&", "||", "|", "`", "$")):
+                raise DockerDecisionError(f"Docker decision supplied an unsafe static server command for {name}")
+            tokens = start if isinstance(start, list) else shlex.split(start_text)
+            if not tokens:
+                raise DockerDecisionError(f"Docker decision supplied an empty static server command for {name}")
+            if any(".." in str(token) or str(token).startswith("/") for token in tokens):
+                raise DockerDecisionError(f"Docker decision supplied a traversal-shaped static serving path for {name}")
+            family = " ".join(str(token) for token in tokens[:2])
+            allowed_families = set(policy.get("allowed_start_command_families") or [])
+            if str(tokens[0]) not in allowed_families and family not in allowed_families:
+                raise DockerDecisionError(f"Docker decision supplied an unsupported static server for {name}")
         expected_port = policy.get("port")
         if component.get("port") != expected_port:
             raise DockerDecisionError(f"Docker decision changed the verified application port for {name}")
@@ -868,6 +1064,13 @@ class DockerDecisionEngine:
                     f"but Project Intelligence only contains the non-authoritative range "
                     f"'Node.js {version}' from {source_file}."
                 )
+            policy = policy_for_component(context.platform_policies, name)
+            policy_runtime = policy_value(policy, "runtime_version")
+            if policy_runtime is not None:
+                expected_version = str(policy_runtime.get("value") or "")
+                selected = re.fullmatch(r"node:(\d+(?:\.\d+){0,2})(?:-.+)?", base_image)
+                if selected and selected.group(1) == expected_version:
+                    return
             raise DockerDecisionError(
                 f"An exact Node.js runtime version is required for {name}; "
                 "Project Intelligence contains no authoritative Node.js runtime evidence."
@@ -882,12 +1085,32 @@ class DockerDecisionEngine:
 
     @staticmethod
     def render_dockerfile(component: dict[str, Any]) -> str:
-        if component.get("package_manager") == "maven" or component.get("language") == "Java":
-            return DockerDecisionEngine._render_maven_dockerfile(component)
+        renderers = {
+            "java-maven-spring-boot": DockerDecisionEngine._render_maven_dockerfile,
+            "java-gradle-spring-boot": DockerDecisionEngine._render_gradle_dockerfile,
+            "python-application": DockerDecisionEngine._render_python_dockerfile,
+            "node-backend": DockerDecisionEngine._render_node_dockerfile,
+            "react-vite-static": DockerDecisionEngine._render_static_dockerfile,
+            "nginx-server": DockerDecisionEngine._render_nginx_dockerfile,
+            "go-application": DockerDecisionEngine._render_go_dockerfile,
+            "rust-application": DockerDecisionEngine._render_rust_dockerfile,
+        }
+        strategy_id = str(component.get("strategy_id") or "")
+        renderer = renderers.get(strategy_id)
+        if renderer is None:
+            raise DockerDecisionError(
+                f"No validated Docker rendering strategy exists for {component.get('name')}"
+            )
+        return renderer(component)
+
+    @staticmethod
+    def _render_node_dockerfile(component: dict[str, Any]) -> str:
         base_image = str(component.get("base_image") or "")
         if not base_image:
             raise DockerDecisionError(f"Docker decision did not provide a base image for {component.get('name')}")
-        workdir = str(component.get("working_directory") or "/app")
+        workdir = str(component.get("working_directory") or "")
+        if not workdir:
+            raise DockerDecisionError(f"Docker decision did not provide a working directory for {component.get('name')}")
         install = component.get("install_command")
         build = component.get("build_command")
         start = component.get("start_command")
@@ -904,6 +1127,135 @@ class DockerDecisionEngine:
         if start:
             command = start if isinstance(start, list) else shlex.split(str(start))
             lines.append("CMD " + json.dumps(command))
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _render_static_dockerfile(component: dict[str, Any]) -> str:
+        # STATIC_ARTIFACT_SERVER has no application start script.  The final
+        # serving command must come from the approved policy, never from a
+        # renderer default or an Ollama invention.
+        if not component.get("start_command"):
+            policy_command = policy_value(
+                component.get("platform_policy"), "static_serving_command"
+            )
+            if policy_command is None:
+                raise DockerDecisionError(
+                    f"Static frontend {component.get('name')} lacks an authorized static serving strategy"
+                )
+            component = {
+                **component,
+                "start_command": policy_command.get("value"),
+            }
+        return DockerDecisionEngine._render_node_dockerfile(component)
+
+    @staticmethod
+    def _render_python_dockerfile(component: dict[str, Any]) -> str:
+        base_image = str(component.get("base_image") or "")
+        workdir = str(component.get("working_directory") or "")
+        install = str(component.get("install_command") or "").strip()
+        start = component.get("start_command")
+        if not base_image or not workdir or not install or not start:
+            raise DockerDecisionError(f"Python component {component.get('name')} lacks an authorized runtime/install/start strategy")
+        files = {str(item.get("relative_path") or "") for item in component.get("files", [])}
+        requirements = next((item for item in sorted(files) if item.endswith("requirements.txt")), None)
+        lines = [f"FROM {base_image}", f"WORKDIR {workdir}"]
+        if requirements:
+            lines.extend([f"COPY {requirements} .", f"RUN {install}", "COPY . ."])
+        else:
+            lines.extend(["COPY . .", f"RUN {install}"])
+        if component.get("port") is not None:
+            lines.append(f"EXPOSE {int(component['port'])}")
+        command = start if isinstance(start, list) else shlex.split(str(start))
+        lines.append("CMD " + json.dumps(command))
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _render_compiled_dockerfile(component: dict[str, Any], *, build_command: str, runtime_image: str) -> str:
+        base_image = str(component.get("base_image") or "")
+        workdir = str(component.get("working_directory") or "")
+        artifacts = [
+            item for item in component.get("artifacts", [])
+            if item.get("executable") is True
+            and item.get("source_type") == "DERIVED_DETERMINISTIC"
+            and item.get("model_inference") is False
+        ]
+        start = component.get("start_command")
+        if not base_image or not workdir or len(artifacts) != 1 or not start:
+            raise DockerDecisionError(f"Compiled component {component.get('name')} lacks a proven build/runtime strategy")
+        artifact = str(artifacts[0].get("path") or "")
+        if not artifact or artifact.startswith("/") or ".." in artifact.split("/"):
+            raise DockerDecisionError(f"Compiled component {component.get('name')} has an unsafe artifact path")
+        command = start if isinstance(start, list) else shlex.split(str(start))
+        if not command or " ".join(command) != " ".join(str(item) for item in artifacts[0].get("launch_command", [])):
+            raise DockerDecisionError(f"Compiled component {component.get('name')} changed its derived launch command")
+        source_path = f"{workdir.rstrip('/')}/{artifact}"
+        lines = [
+            f"FROM {base_image} AS build", f"WORKDIR {workdir}",
+            "COPY . .", f"RUN {build_command}",
+            f"FROM {runtime_image}", f"WORKDIR {workdir}",
+            f"COPY --from=build {source_path} {source_path}",
+        ]
+        if component.get("port") is not None:
+            lines.append(f"EXPOSE {int(component['port'])}")
+        lines.append("CMD " + json.dumps(command))
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _render_gradle_dockerfile(component: dict[str, Any]) -> str:
+        policy = component.get("platform_policy")
+        build_policy = policy_value(policy, "build_image")
+        if build_policy is None:
+            raise DockerDecisionError(f"Gradle component {component.get('name')} lacks an approved build image")
+        build = str(component.get("build_command") or "")
+        if build not in {"./gradlew bootJar", "gradle bootJar"}:
+            raise DockerDecisionError(f"Gradle component {component.get('name')} lacks the exact bootJar command")
+        return DockerDecisionEngine._render_compiled_dockerfile(
+            component, build_command=build,
+            runtime_image=str(component.get("base_image") or ""),
+        ).replace(
+            f"FROM {component.get('base_image')} AS build",
+            f"FROM {build_policy['value']} AS build",
+        )
+
+    @staticmethod
+    def _render_go_dockerfile(component: dict[str, Any]) -> str:
+        build = str(component.get("build_command") or "")
+        if not re.search(r"""\bgo\s+build\b""", build):
+            raise DockerDecisionError(f"Go component {component.get('name')} lacks its exact go build command")
+        return DockerDecisionEngine._render_compiled_dockerfile(
+            component, build_command=build,
+            runtime_image=str(component.get("base_image") or ""),
+        )
+
+    @staticmethod
+    def _render_rust_dockerfile(component: dict[str, Any]) -> str:
+        if str(component.get("build_command") or "") != "cargo build --release":
+            raise DockerDecisionError(f"Rust component {component.get('name')} lacks cargo build --release")
+        return DockerDecisionEngine._render_compiled_dockerfile(
+            component, build_command="cargo build --release",
+            runtime_image=str(component.get("base_image") or ""),
+        )
+
+    @staticmethod
+    def _render_nginx_dockerfile(component: dict[str, Any]) -> str:
+        base_image = str(component.get("base_image") or "")
+        workdir = str(component.get("working_directory") or "")
+        files = [
+            str(item.get("relative_path"))
+            for item in component.get("files", [])
+            if str(item.get("relative_path") or "").endswith("nginx.conf")
+        ]
+        start = component.get("start_command")
+        if not base_image or not workdir or len(files) != 1 or not start:
+            raise DockerDecisionError(f"Nginx component {component.get('name')} lacks an authorized configuration strategy")
+        command = start if isinstance(start, list) else shlex.split(str(start))
+        lines = [
+            f"FROM {base_image}", f"WORKDIR {workdir}",
+            f"COPY {files[0]} {workdir.rstrip('/')}/default.conf",
+        ]
+        if component.get("port") is not None:
+            lines.append(f"EXPOSE {int(component['port'])}")
+        lines.append("CMD " + json.dumps(command))
         return "\n".join(lines) + "\n"
 
     @staticmethod
@@ -966,17 +1318,59 @@ class DockerDecisionEngine:
         return "\n".join(lines) + "\n"
 
     @staticmethod
-    def render_dockerignore() -> str:
-        return "node_modules\n.venv\n__pycache__\n.git\n.env\n.env.*\n!.env.example\n"
+    def render_compose(
+        decision: DockerDecision,
+        context: DockerContext | None = None,
+    ) -> str:
+        """Render only the validated services from the selected Docker context.
 
-    @staticmethod
-    def render_compose(decision: DockerDecision) -> str:
+        Compose is intentionally conservative: the model may describe the
+        already-authorized service fields, but it cannot change a selected
+        component's repository path or container working directory.  Those
+        values are canonicalized from the validated context when available.
+        No dependency service is synthesized here.
+        """
+        context_components = {
+            str(item.get("name")): item for item in (context.components if context else [])
+        }
+        decision_components = {
+            str(item.get("name")): item for item in decision.components
+        }
         lines = ["services:"]
         for service in decision.compose.get("services") or []:
             name = str(service["name"])
             component = str(service["component"])
-            build_context = str(service.get("build_context") or f"./{component}")
-            lines.extend([f"  {name}:", f"    build: {build_context}"])
+            source = context_components.get(component)
+            if source is not None:
+                source_path = str(source.get("path") or ".").strip("/") or "."
+                build_context = "." if source_path == "." else f"./{source_path}"
+                dockerfiles = [
+                    str(item) for item in source.get("dockerfiles", []) if str(item).strip()
+                ]
+                dockerfile_path = dockerfiles[0] if dockerfiles else (
+                    "Dockerfile" if source_path == "." else f"{source_path}/Dockerfile"
+                )
+            else:
+                build_context = str(service.get("build_context") or f"./{component}")
+                dockerfile_path = "Dockerfile"
+            default_dockerfile = "Dockerfile" if build_context == "." else f"{build_context[2:]}/Dockerfile"
+            if dockerfile_path == default_dockerfile:
+                lines.extend([f"  {name}:", f"    build: {build_context}"])
+            else:
+                context_relative = "." if build_context == "." else build_context[2:]
+                dockerfile_relative = dockerfile_path
+                if context_relative != "." and dockerfile_path.startswith(context_relative + "/"):
+                    dockerfile_relative = dockerfile_path[len(context_relative) + 1:]
+                lines.extend([
+                    f"  {name}:",
+                    "    build:",
+                    f"      context: {build_context}",
+                    f"      dockerfile: {dockerfile_relative}",
+                ])
+            component_decision = decision_components.get(component) or {}
+            working_directory = str(component_decision.get("working_directory") or "").strip()
+            if working_directory:
+                lines.append(f"    working_dir: {working_directory}")
             port = service.get("port")
             target = service.get("target_port", port)
             if port is not None and target is not None:

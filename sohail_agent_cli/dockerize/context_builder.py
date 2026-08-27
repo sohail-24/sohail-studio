@@ -12,10 +12,35 @@ from core.storage.project_intelligence import ProjectIntelligenceRepository
 from sohail_agent_cli.inspection.models import ProjectIntelligence
 
 from .platform_policy import applicable_platform_policies
+from .strategies import strategy_for_component
 
 
 class DockerContextError(ValueError):
     """Raised when a Docker context cannot be built from project evidence."""
+
+
+def _technology_profile(
+    component: dict[str, Any],
+    runtimes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Normalize technology identity without inventing missing classifications."""
+    profile: dict[str, Any] = {}
+    languages = [str(item) for item in component.get("languages") or [] if str(item).strip()]
+    if not languages and component.get("language"):
+        languages = [str(component["language"])]
+    if languages:
+        profile["languages"] = languages
+    if runtimes:
+        profile["runtimes"] = [dict(item) for item in runtimes]
+    if component.get("framework"):
+        profile["frameworks"] = [component["framework"]]
+    if component.get("package_manager"):
+        profile["build_system"] = component["package_manager"]
+    if component.get("kind"):
+        profile["application_type"] = component["kind"]
+    if component.get("role"):
+        profile["component_role"] = component["role"]
+    return profile
 
 
 @dataclass(frozen=True)
@@ -30,6 +55,7 @@ class DockerContext:
     verified_patterns: list[dict[str, Any]] = field(default_factory=list)
     artifact_plan: dict[str, Any] = field(default_factory=dict)
     platform_policies: list[dict[str, Any]] = field(default_factory=list)
+    compose_context: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +67,7 @@ class DockerContext:
             "verified_patterns": self.verified_patterns,
             "artifact_plan": self.artifact_plan or {},
             "platform_policies": self.platform_policies or [],
+            "compose_context": self.compose_context or {},
         }
 
     def prompt(self) -> str:
@@ -55,7 +82,9 @@ class DockerContext:
             "DERIVED_DETERMINISTIC production start strategy with provenance is acceptable.\n"
             "Treat 'dev' and 'preview' scripts as non-production roles; never place them in start_command.\n"
             "If neither explicit nor deterministically derived production start evidence is\n"
-            "supplied for a component, return NEEDS_EVIDENCE.\n"
+            "supplied for a PROCESS_RUNTIME component, return NEEDS_EVIDENCE. A\n"
+            "STATIC_ARTIFACT_SERVER component does not need an application start\n"
+            "script; its approved static serving policy is authoritative instead.\n"
             "A verified engineering pattern is a deterministic policy boundary, not a model fact.\n"
             "When a component has a verified pattern, include its pattern_id as deployment_pattern\n"
             "verbatim as a required field on that component, and propose implementation\n"
@@ -66,7 +95,8 @@ class DockerContext:
             "with no omitted or additional component names.\n"
             "For every component with a non-conflicting port whose port_type is application,\n"
             "copy that exact port into component.port and into its Compose service's port\n"
-            "and target_port. Use the evidence-backed component path as a relative Compose\n"
+            "and target_port. If no application port evidence is supplied, omit those\n"
+            "fields. Never invent a port. Use the evidence-backed component path as a relative Compose\n"
             "build_context. Do not omit or substitute documented/service-only ports.\n"
             "Return JSON only with status, a non-empty reason, a components array, and a compose object.\n"
             "A ready response must include each component name and compose.services as an array.\n\n"
@@ -95,14 +125,18 @@ class DockerContextBuilder:
         expected_inspection_run_id: str | None = None,
     ) -> DockerContext:
         root = project_path.expanduser().resolve()
-        intelligence = self.repository.load_latest(str(root))
+        intelligence = (
+            self.repository.load_run(str(root), expected_inspection_run_id)
+            if expected_inspection_run_id
+            else self.repository.load_latest(str(root))
+        )
         if intelligence is None:
+            if expected_inspection_run_id:
+                raise DockerContextError(
+                    "The stored Project Intelligence snapshot does not match the requested inspection run; re-inspect explicitly"
+                )
             raise DockerContextError(
                 "No successful Project Intelligence snapshot exists for this project; run Inspect first"
-            )
-        if expected_inspection_run_id and intelligence.inspection_run_id != expected_inspection_run_id:
-            raise DockerContextError(
-                "The stored Project Intelligence snapshot does not match the requested inspection run; re-inspect explicitly"
             )
         return self.from_intelligence(intelligence, selected_components)
 
@@ -130,7 +164,19 @@ class DockerContextBuilder:
                 return False
             component_path = str(component.get("path") or ".").strip("./")
             if not component_path:
-                return True
+                # A root component owns repository-level files and source
+                # paths that are not owned by another selected component.
+                # This keeps a root Java app from absorbing a nested Node or
+                # Python component's evidence.
+                other_paths = [
+                    str(item.get("path") or ".").strip("./")
+                    for item in selected
+                    if str(item.get("path") or ".").strip("./")
+                ]
+                return not any(
+                    source == path or source.startswith(path + "/")
+                    for path in other_paths
+                )
             return source == component_path or source.startswith(component_path + "/")
 
         def selected_fact(item: dict[str, Any]) -> bool:
@@ -185,8 +231,50 @@ class DockerContextBuilder:
             runtimes = [
                 fields(item, ("runtime", "version", "source_file", "confidence"))
                 for item in intelligence.runtimes
-                if belongs(str(item.get("source_file", "")), component)
-                or "/" not in str(item.get("source_file", ""))
+                if (
+                    belongs(str(item.get("source_file", "")), component)
+                    and (
+                        str(component.get("path") or ".").strip("./")
+                        or str(item.get("runtime")) == str(component.get("framework"))
+                        or component.get("package_manager") in {"maven", "gradle"}
+                        or component.get("package_manager") in {"npm", "yarn", "pnpm"}
+                        or component.get("package_manager") in {"pip", "poetry", "pipenv", "go", "cargo"}
+                    )
+                )
+                or (
+                    "/" not in str(item.get("source_file", ""))
+                    and (
+                        (
+                            str(item.get("runtime")) == "Java"
+                            and (
+                                component.get("framework") == "Spring Boot"
+                                or component.get("package_manager") in {"maven", "gradle"}
+                            )
+                        )
+                        or (
+                            str(item.get("runtime")) == "Node.js"
+                            and (
+                                component.get("package_manager") in {"npm", "yarn", "pnpm"}
+                                or component.get("framework") in {"Express", "NestJS", "React", "Vite", "Next.js", "Angular"}
+                            )
+                        )
+                        or (
+                            str(item.get("runtime")) == "Python"
+                            and (
+                                component.get("package_manager") in {"pip", "poetry", "pipenv"}
+                                or component.get("language") == "Python"
+                            )
+                        )
+                        or (
+                            str(item.get("runtime")) == "Go"
+                            and component.get("package_manager") == "go"
+                        )
+                        or (
+                            str(item.get("runtime")) == "Rust"
+                            and component.get("package_manager") == "cargo"
+                        )
+                    )
+                )
             ]
             ports = [
                 fields(item, ("name", "port", "source_file", "confidence", "component", "port_type", "target_port", "service_name", "conflict"))
@@ -210,14 +298,35 @@ class DockerContextBuilder:
                 or "/" not in str(item.get("source_file", ""))
             ]
             framework = component.get("framework")
-            local_languages = [
-                file.language for file in intelligence.files
-                if (path == "." or file.relative_path.startswith(path + "/")) and file.language
-            ]
+            local_languages = sorted({
+                str(file.language) for file in intelligence.files
+                if belongs(file.relative_path, component) and file.language
+            })
+            manager = component.get("package_manager")
+            technology_languages = local_languages
+            if framework == "Spring Boot" or manager in {"maven", "gradle"}:
+                technology_languages = ["Java"] if "Java" in local_languages or "Java" in intelligence.languages else []
+            elif manager in {"npm", "yarn", "pnpm"} or component.get("kind") == "frontend":
+                technology_languages = [
+                    item for item in ("JavaScript", "TypeScript")
+                    if item in local_languages
+                ]
+            elif manager in {"pip", "poetry", "pipenv"}:
+                technology_languages = ["Python"] if "Python" in local_languages else []
+            elif manager == "go":
+                technology_languages = ["Go"] if "Go" in local_languages else []
+            elif manager == "cargo":
+                technology_languages = ["Rust"] if "Rust" in local_languages else []
             language = (
                 "Java" if framework == "Spring Boot" and "Java" in intelligence.languages
-                else next(iter(local_languages), None)
+                else technology_languages[0] if len(technology_languages) == 1 else None
             )
+            profile_component = {**component, "language": language, "languages": technology_languages}
+            strategy = strategy_for_component(profile_component, verified_patterns)
+            technology_profile = _technology_profile(profile_component, runtimes)
+            if strategy:
+                technology_profile["strategy_id"] = strategy.strategy_id
+                technology_profile["execution_strategy"] = strategy.execution_strategy
             components.append({
                 "name": name,
                 "path": path,
@@ -230,6 +339,17 @@ class DockerContextBuilder:
                 "artifacts": [dict(item) for item in component.get("artifacts") or []],
                 "deployment_evidence": dict(component.get("deployment_evidence") or {}),
                 "runtimes": runtimes,
+                "technology_profile": technology_profile,
+                **({"strategy_id": strategy.strategy_id} if strategy else {}),
+                **({"execution_strategy": strategy.execution_strategy} if strategy else {}),
+                "build_metadata": [
+                    dict(item) for item in intelligence.build_metadata
+                    if belongs(str(item.get("source_file", "")), component)
+                ],
+                "entrypoints": [
+                    dict(item) for item in intelligence.entrypoints
+                    if belongs(str(item.get("source_file", "")), component)
+                ],
                 "commands": commands,
                 "dependencies": dependencies,
                 "ports": ports,
@@ -288,9 +408,10 @@ class DockerContextBuilder:
             },
             "databases": intelligence.databases,
             "services": [
-                fields(item, ("name", "component", "type", "port", "target_port"))
+                fields(item, ("name", "component", "type", "port", "target_port", "depends_on", "source_file", "image", "image_source_file", "image_source_type", "model_inference"))
                 for item in intelligence.services
             ],
+            "relationships": [dict(item) for item in intelligence.relationships],
             "documentation": {
                 "detected": bool(intelligence.documentation.get("files")),
                 "files": list(intelligence.documentation.get("files", [])),
@@ -307,8 +428,8 @@ class DockerContextBuilder:
             dict(item) for item in intelligence.user_evidence
             if item.get("component") in {None, *names}
         ]
-        platform_policies = applicable_platform_policies(components)
+        platform_policies = applicable_platform_policies(components, verified_patterns)
         return DockerContext(
             project, components, infrastructure, evidence, selected_user_evidence,
-            verified_patterns, {}, platform_policies,
+            verified_patterns, {}, platform_policies, None,
         )

@@ -124,7 +124,7 @@ async def test_accepted_user_evidence_persists_separately_and_allows_one_retry(t
     write(tmp_path / "backend/src/server.js", "app.listen(5001);\n")
     write(
         tmp_path / "backend/Dockerfile",
-        "FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nEXPOSE 5001\nCMD [\"node\", \"src/server.js\"]\n",
+        "FROM node:20-alpine\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nEXPOSE 5001\n",
     )
     repository = repository_for(tmp_path)
     analysis_response = json.dumps({
@@ -166,7 +166,10 @@ async def test_accepted_user_evidence_persists_separately_and_allows_one_retry(t
 
     second = await DockerAgent(
         dry_run=True, repository=repository, provider=provider, model="mock",
-    ).execute(tmp_path, components=["backend"], compose=False, user_evidence=json.dumps(evidence.to_dict()))
+    ).execute(
+        tmp_path, components=["backend"], compose=False, overwrite=True,
+        user_evidence=json.dumps(evidence.to_dict()),
+    )
 
     assert first.status == "NEEDS_EVIDENCE"
     assert second.success is True, second.message

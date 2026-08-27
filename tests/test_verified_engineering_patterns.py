@@ -10,7 +10,7 @@ from core.storage.project_intelligence import ProjectIntelligenceRepository, met
 from sohail_agent_cli.agents.docker_agent import DockerAgent
 from sohail_agent_cli.dockerize import DockerContextBuilder, DockerDecisionEngine
 from sohail_agent_cli.inspection import DeepInspector, ProjectIntelligence
-from sohail_agent_cli.providers import MockProvider
+from sohail_agent_cli.providers import GenerationResult, MockProvider
 
 
 def write(path: Path, content: str) -> None:
@@ -178,6 +178,70 @@ async def test_omitted_verified_pattern_identity_is_restored_from_persisted_cont
 
 
 @pytest.mark.asyncio
+async def test_static_verified_contract_is_restored_when_model_omits_strategy_fields(tmp_path: Path):
+    static_site(tmp_path)
+    repository = repository_for(tmp_path)
+    response = json.loads(static_decision_response())
+    response["components"][0].pop("deployment_pattern")
+    response["components"][0].pop("install_command")
+    response["components"][0].pop("start_command")
+    provider = MockProvider(responses={"project": json.dumps(response)})
+    context = DockerContextBuilder(repository).build(tmp_path, ["site"])
+
+    decision = await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
+
+    assert decision.status == "ready"
+    component = decision.components[0]
+    assert component["deployment_pattern"] == "static-frontend"
+    assert component["strategy_id"] == "react-vite-static"
+    assert component["execution_strategy"] == "STATIC_ARTIFACT_SERVER"
+    assert component["install_command"] == "npm ci"
+    policy = context.platform_policies[0]
+    serving = policy["values"]["static_serving_command"]
+    assert serving["source_type"] == "APPROVED_PLATFORM_POLICY"
+    assert serving["model_inference"] is False
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_bounded_repair_restores_omitted_static_verified_contract(tmp_path: Path):
+    static_site(tmp_path)
+    repository = repository_for(tmp_path)
+    first = json.loads(static_decision_response())
+    first["compose"]["services"][0]["port"] = 81
+    first["compose"]["services"][0]["target_port"] = 81
+    repaired = json.loads(static_decision_response())
+    for key in ("deployment_pattern", "install_command", "start_command"):
+        repaired["components"][0].pop(key, None)
+
+    class SequencedProvider(MockProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.responses_for_calls = [json.dumps(first), json.dumps(repaired)]
+
+        async def generate(self, request):
+            self.call_history.append(request)
+            return GenerationResult(
+                text=self.responses_for_calls.pop(0), model=request.model or "mock"
+            )
+
+    provider = SequencedProvider()
+    decision = await DockerDecisionEngine(
+        provider, "devops-qwen:latest",
+    ).decide(DockerContextBuilder(repository).build(tmp_path, ["site"]))
+
+    assert decision.status == "ready"
+    component = decision.components[0]
+    assert component["deployment_pattern"] == "static-frontend"
+    assert component["execution_strategy"] == "STATIC_ARTIFACT_SERVER"
+    assert component["install_command"] == "npm ci"
+    assert decision.compose["services"][0]["port"] == 80
+    assert decision.compose["services"][0]["target_port"] == 80
+    assert decision.repair_attempted is True
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
 async def test_dockerize_uses_verified_pattern_before_clarification(tmp_path: Path):
     static_site(tmp_path)
     repository = repository_for(tmp_path)
@@ -194,6 +258,56 @@ async def test_dockerize_uses_verified_pattern_before_clarification(tmp_path: Pa
     assert result.status == "SUCCESS"
     assert len(provider.call_history) == 1
     assert "static-frontend" in provider.call_history[0].prompt
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_static_artifact_server_does_not_require_application_start_script(tmp_path: Path):
+    static_site(tmp_path)
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["site"])
+    component = context.components[0]
+
+    assert component["execution_strategy"] == "STATIC_ARTIFACT_SERVER"
+    response = json.loads(static_decision_response())
+    response["components"][0].pop("start_command")
+    response["components"][0]["build_command"] = "compile-assets"
+
+    decision = await DockerDecisionEngine(
+        MockProvider(responses={"project": json.dumps(response)}), "devops-qwen:latest",
+    ).decide(context)
+
+    assert decision.status == "ready"
+    rendered = DockerDecisionEngine.render_dockerfile({
+        **decision.components[0],
+        "artifacts": component["artifacts"],
+        "files": component["files"],
+        "strategy_id": component["strategy_id"],
+        "platform_policy": context.platform_policies[0],
+    })
+    assert 'CMD ["npx", "serve", "-s", "build"]' in rendered
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_repair_canonicalizes_compose_port_to_evidenced_static_component_port(tmp_path: Path):
+    static_site(tmp_path)
+    repository = repository_for(tmp_path)
+    response = json.loads(static_decision_response())
+    response["compose"]["services"][0]["port"] = 81
+    response["compose"]["services"][0]["target_port"] = 81
+    provider = MockProvider(responses={"project": json.dumps(response)})
+
+    decision = await DockerDecisionEngine(
+        provider, "devops-qwen:latest",
+    ).decide(DockerContextBuilder(repository).build(tmp_path, ["site"]))
+
+    assert decision.status == "ready"
+    assert decision.components[0]["port"] == 80
+    assert decision.compose["services"][0]["port"] == 80
+    assert decision.compose["services"][0]["target_port"] == 80
+    assert decision.repair_attempted is True
+    assert len(provider.call_history) == 2
     repository.storage.close()
 
 

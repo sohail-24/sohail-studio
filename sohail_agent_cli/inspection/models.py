@@ -74,6 +74,7 @@ class ProjectIntelligence:
     commands: list[dict[str, Any]] = field(default_factory=list)
     ports: list[dict[str, Any]] = field(default_factory=list)
     services: list[dict[str, Any]] = field(default_factory=list)
+    relationships: list[dict[str, Any]] = field(default_factory=list)
     databases: list[str] = field(default_factory=list)
     environment_variables: list[dict[str, Any]] = field(default_factory=list)
     build_metadata: list[dict[str, Any]] = field(default_factory=list)
@@ -105,7 +106,7 @@ class ProjectIntelligence:
         }
         for field_name in (
             "files", "components", "languages", "frameworks", "runtimes", "package_managers",
-            "dependencies", "commands", "ports", "services", "databases", "environment_variables",
+            "dependencies", "commands", "ports", "services", "relationships", "databases", "environment_variables",
             "build_metadata", "entrypoints", "verified_patterns", "evidence", "user_evidence", "warnings",
         ):
             if field_name in summary:
@@ -156,6 +157,7 @@ class ProjectIntelligence:
             "commands": self.commands,
             "ports": self.ports,
             "services": self.services,
+            "relationships": self.relationships,
             "databases": self.databases,
             "environment_variables": self.environment_variables,
             "build_metadata": self.build_metadata,

@@ -7,6 +7,7 @@ tests against a previously extracted snapshot.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable
 
 from .models import Evidence, EvidenceSourceType, ProjectIntelligence
@@ -17,6 +18,9 @@ MAVEN_PACKAGING_RULE = "maven.default-packaging.jar.v1"
 MAVEN_FINAL_NAME_RULE = "maven.default-final-name.v1"
 MAVEN_DIRECTORY_RULE = "maven.default-build-directory.v1"
 SPRING_BOOT_PARENT_RULE = "spring-boot.parent-repackage.v1"
+GRADLE_ARTIFACT_RULE = "gradle.executable-artifact.spring-boot.v1"
+GO_ARTIFACT_RULE = "go.explicit-build-output.v1"
+RUST_ARTIFACT_RULE = "rust.single-package-binary.v1"
 
 
 def _ref(source_file: str, key: str, value: Any = None) -> dict[str, Any]:
@@ -255,6 +259,191 @@ def _derive_maven(
     ])
 
 
+def _set_compiled_artifact(
+    intelligence: ProjectIntelligence,
+    component: dict[str, Any],
+    *,
+    path: str,
+    packaging: str,
+    launch_command: list[str],
+    rule_id: str,
+    source_file: str,
+    derived_from: list[dict[str, Any]],
+) -> None:
+    artifact = {
+        "path": path,
+        "filename": path.rsplit("/", 1)[-1],
+        "packaging": packaging,
+        "classifier": None,
+        "executable": True,
+        "launch_command": launch_command,
+        "source_type": EvidenceSourceType.DERIVED_DETERMINISTIC,
+        "derived_from": derived_from,
+        "rule_id": rule_id,
+        "confidence": "deterministic",
+        "model_inference": False,
+    }
+    component["artifacts"] = [artifact]
+    component["deployment_evidence"] = {
+        "status": EvidenceSourceType.DERIVED_DETERMINISTIC,
+        "source_type": EvidenceSourceType.DERIVED_DETERMINISTIC,
+        "derived_from": derived_from,
+        "rule_id": rule_id,
+        "confidence": "deterministic",
+        "model_inference": False,
+        "artifact_path": path,
+        "production_start_command": " ".join(launch_command),
+    }
+    intelligence.evidence.extend([
+        _evidence(
+            source_file=source_file,
+            key=f"{component.get('name')}.executable_artifact",
+            value=artifact,
+            rule_id=rule_id,
+            derived_from=derived_from,
+        ),
+        _evidence(
+            source_file=source_file,
+            key=f"{component.get('name')}.production_start_command",
+            value=launch_command,
+            rule_id=rule_id,
+            derived_from=derived_from,
+        ),
+    ])
+
+
+def _derive_gradle(
+    intelligence: ProjectIntelligence,
+    component: dict[str, Any],
+    metadata: list[dict[str, Any]],
+) -> None:
+    builds = [item for item in metadata if not item.get("settings")]
+    settings = [item for item in metadata if item.get("settings")]
+    if len(builds) != 1 or any(item.get("modules") for item in settings):
+        _unsupported(intelligence, component, "Gradle project is ambiguous or multi-module; one deployable module is required", source_file=str((builds or settings or [{}])[0].get("source_file") or "build.gradle"))
+        return
+    build = builds[0]
+    source = str(build.get("source_file") or "build.gradle")
+    if not build.get("spring_boot_plugin") or "java" not in {str(item.get("id")) for item in build.get("plugins") or []}:
+        _unsupported(intelligence, component, "Gradle Spring Boot and Java plugins are not both proven", source_file=source)
+        return
+    if not build.get("main_class") and len(_entrypoints_for(component, intelligence.entrypoints)) != 1:
+        _unsupported(intelligence, component, "Gradle executable main class is not uniquely proven", source_file=source)
+        return
+    version = str(build.get("version") or "").strip()
+    project_name = next((str(item.get("root_project_name") or "").strip() for item in settings if item.get("root_project_name")), "")
+    archive = str(build.get("archive_file_name") or "").strip()
+    if archive:
+        filename = archive if archive.endswith(".jar") else archive + ".jar"
+        refs = [_ref(source, "bootJar.archiveFileName", archive)]
+    elif project_name and version and build.get("archive_base_name") is None:
+        filename = f"{project_name}-{version}.jar"
+        refs = [_ref(source, "settings.rootProject.name", project_name), _ref(source, "version", version), _ref(source, "Gradle default build/libs", "build/libs")]
+    else:
+        _unsupported(intelligence, component, "Gradle archive filename is not exactly proven by rootProject.name/version or archiveFileName", source_file=source)
+        return
+    main_class = str(build.get("main_class") or _entrypoints_for(component, intelligence.entrypoints)[0].get("class_name"))
+    refs.extend([
+        _ref(source, "spring-boot plugin", "bootJar"),
+        _ref(source, "java plugin", "java"),
+        _ref(source, "mainClass", main_class),
+    ])
+    _set_compiled_artifact(
+        intelligence, component,
+        path=f"build/libs/{filename}",
+        packaging="jar",
+        launch_command=["java", "-jar", f"build/libs/{filename}"],
+        rule_id=GRADLE_ARTIFACT_RULE,
+        source_file=source,
+        derived_from=refs,
+    )
+    wrapper = any(
+        str(item.relative_path if hasattr(item, "relative_path") else item.get("relative_path")) == "gradlew"
+        for item in intelligence.files
+    )
+    command = "./gradlew bootJar" if wrapper else "gradle bootJar"
+    intelligence.commands.append({"name": "build", "command": command, "source_file": source, "confidence": "high"})
+    intelligence.evidence.append(_evidence(
+        source_file=source, key=f"{component.get('name')}.build_command",
+        value=command, rule_id="gradle.bootJar.lifecycle.v1",
+        derived_from=[_ref(source, "spring-boot plugin", "bootJar")],
+    ))
+
+
+def _derive_go(
+    intelligence: ProjectIntelligence,
+    component: dict[str, Any],
+    metadata: list[dict[str, Any]],
+) -> None:
+    if len(metadata) != 1:
+        _unsupported(intelligence, component, "Go module metadata is ambiguous", source_file="go.mod")
+        return
+    builds = [
+        item for item in intelligence.commands
+        if item.get("name") == "build"
+        and _belongs(str(item.get("source_file") or ""), component)
+        and re.search(r"""\bgo\s+build\b""", str(item.get("command") or ""))
+    ]
+    if len(builds) != 1:
+        _unsupported(intelligence, component, "Go executable output is not explicitly configured with one go build -o command", source_file=str(metadata[0].get("source_file") or "go.mod"))
+        return
+    match = re.search(r"""(?:^|\s)-o\s+([^\s]+)""", str(builds[0].get("command") or ""))
+    if not match or match.group(1).startswith("/") or ".." in match.group(1).split("/"):
+        _unsupported(intelligence, component, "Go build output path is missing or unsafe", source_file=str(builds[0].get("source_file") or "Makefile"))
+        return
+    output = match.group(1).strip()
+    entrypoints = [
+        item for item in intelligence.entrypoints
+        if _belongs(str(item.get("source_file") or ""), component)
+        and item.get("kind") == "go_main_package"
+    ]
+    if len(entrypoints) != 1:
+        _unsupported(intelligence, component, "Go main package is not uniquely proven", source_file=str(metadata[0].get("source_file") or "go.mod"))
+        return
+    source = str(metadata[0].get("source_file") or "go.mod")
+    refs = [_ref(source, "module"), _ref(str(builds[0].get("source_file") or "Makefile"), "go build -o", output), _ref(str(entrypoints[0].get("source_file")), "go_main_package")]
+    launch = output if output.startswith("./") else f"./{output}"
+    _set_compiled_artifact(
+        intelligence, component, path=output, packaging="go-binary",
+        launch_command=[launch], rule_id=GO_ARTIFACT_RULE,
+        source_file=source, derived_from=refs,
+    )
+
+
+def _derive_rust(
+    intelligence: ProjectIntelligence,
+    component: dict[str, Any],
+    metadata: list[dict[str, Any]],
+) -> None:
+    if len(metadata) != 1:
+        _unsupported(intelligence, component, "Rust Cargo metadata is ambiguous", source_file="Cargo.toml")
+        return
+    cargo = metadata[0]
+    binaries = [str(item).strip() for item in cargo.get("binaries") or [] if str(item).strip()]
+    package = str(cargo.get("package_name") or "").strip()
+    if cargo.get("workspace") or len(binaries) > 1 or not (binaries or package):
+        _unsupported(intelligence, component, "Rust workspace or multiple binary targets prevent exact executable selection", source_file=str(cargo.get("source_file") or "Cargo.toml"))
+        return
+    binary = binaries[0] if binaries else package
+    main_files = [
+        item for item in intelligence.entrypoints
+        if _belongs(str(item.get("source_file") or ""), component)
+        and item.get("kind") == "rust_main_function"
+    ]
+    if len(main_files) != 1:
+        _unsupported(intelligence, component, "Rust main function is not uniquely proven", source_file=str(cargo.get("source_file") or "Cargo.toml"))
+        return
+    source = str(cargo.get("source_file") or "Cargo.toml")
+    refs = [_ref(source, "package.name", package), _ref(source, "[[bin]].name", binary), _ref(str(main_files[0].get("source_file")), "rust_main_function")]
+    _set_compiled_artifact(
+        intelligence, component, path=f"target/release/{binary}",
+        packaging="rust-binary", launch_command=[f"./target/release/{binary}"],
+        rule_id=RUST_ARTIFACT_RULE, source_file=source, derived_from=refs,
+    )
+    command = "cargo build --release"
+    intelligence.commands.append({"name": "build", "command": command, "source_file": source, "confidence": "high"})
+
+
 def derive_deterministic_evidence(intelligence: ProjectIntelligence) -> ProjectIntelligence:
     """Add only facts proven by extracted build metadata and source facts."""
 
@@ -266,7 +455,14 @@ def derive_deterministic_evidence(intelligence: ProjectIntelligence) -> ProjectI
     for item in intelligence.build_metadata:
         item["pom_count"] = len(intelligence.build_metadata)
     for component in intelligence.components:
-        if component.get("package_manager") != "maven":
-            continue
-        _derive_maven(intelligence, component, _metadata_for(component, intelligence.build_metadata), parent_by_source)
+        manager = component.get("package_manager")
+        metadata = _metadata_for(component, intelligence.build_metadata)
+        if manager == "maven":
+            _derive_maven(intelligence, component, metadata, parent_by_source)
+        elif manager == "gradle":
+            _derive_gradle(intelligence, component, metadata)
+        elif manager == "go":
+            _derive_go(intelligence, component, metadata)
+        elif manager == "cargo":
+            _derive_rust(intelligence, component, metadata)
     return intelligence

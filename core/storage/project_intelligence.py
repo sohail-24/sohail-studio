@@ -140,26 +140,50 @@ class ProjectIntelligenceRepository:
                 ).one_or_none()
                 if project is None or project.current_inspection_id is None:
                     return None
-                row = connection.execute(
-                    select(inspection_runs.c.summary, inspection_runs.c.completed_at).where(
-                        inspection_runs.c.id == project.current_inspection_id,
-                        inspection_runs.c.project_id == project.id,
-                        inspection_runs.c.status == "completed",
-                    )
-                ).one_or_none()
-            if row is None:
-                return None
-            completed_at = row.completed_at.isoformat() if row.completed_at else None
-            intelligence = ProjectIntelligence.from_summary(
-                row.summary or {}, root_path=canonical_root, inspected_at=completed_at,
-                inspection_run_id=str(project.current_inspection_id),
+            return self._load_project_run(
+                canonical_root, str(project.id), str(project.current_inspection_id)
             )
-            self._hydrate_normalized_facts(intelligence, str(project.current_inspection_id))
-            return intelligence
         except Exception as exc:
             raise ProjectIntelligencePersistenceError(
                 "Project Intelligence retrieval failed; no project context was returned"
             ) from exc
+
+    def load_run(self, root_path: str, inspection_run_id: str) -> ProjectIntelligence | None:
+        """Load one exact successful snapshot without consulting newer runs."""
+        try:
+            canonical_root = self._canonical_root_path(root_path)
+            with self.storage.engine.connect() as connection:
+                project_id = connection.execute(
+                    select(projects.c.id).where(projects.c.root_path == canonical_root)
+                ).scalar_one_or_none()
+            if project_id is None:
+                return None
+            return self._load_project_run(canonical_root, str(project_id), str(inspection_run_id))
+        except Exception as exc:
+            raise ProjectIntelligencePersistenceError(
+                "Project Intelligence retrieval failed; no project context was returned"
+            ) from exc
+
+    def _load_project_run(
+        self, canonical_root: str, project_id: str, inspection_run_id: str,
+    ) -> ProjectIntelligence | None:
+        with self.storage.engine.connect() as connection:
+            row = connection.execute(
+                select(inspection_runs.c.summary, inspection_runs.c.completed_at).where(
+                    inspection_runs.c.id == inspection_run_id,
+                    inspection_runs.c.project_id == project_id,
+                    inspection_runs.c.status == "completed",
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        completed_at = row.completed_at.isoformat() if row.completed_at else None
+        intelligence = ProjectIntelligence.from_summary(
+            row.summary or {}, root_path=canonical_root, inspected_at=completed_at,
+            inspection_run_id=inspection_run_id,
+        )
+        self._hydrate_normalized_facts(intelligence, inspection_run_id)
+        return intelligence
 
     def _hydrate_normalized_facts(self, intelligence: ProjectIntelligence, run_id: str) -> None:
         """Rebuild the factual collections from the persisted inspection run.

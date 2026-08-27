@@ -6,6 +6,11 @@ from .decision import DockerDecision, DockerDecisionEngine, DockerDecisionError
 from .evidence_gap import DockerEvidenceGapAdapter
 from .validation import DockerValidationError, validate_docker_result
 from .platform_policy import APPROVED_PLATFORM_POLICY, applicable_platform_policies
+from .compose_context import ComposeContext, ComposeContextBuilder, ComposeContextError, ComposeRelationship
+from .infrastructure_policy import (
+    DETECTED, DETECTION_ONLY, ELIGIBLE, NEEDS_EVIDENCE, UNSUPPORTED,
+    INFRASTRUCTURE_EVIDENCE_POLICY_V1, evaluate_infrastructure_candidate,
+)
 
 __all__ = [
     "DockerContext",
@@ -20,4 +25,15 @@ __all__ = [
     "validate_docker_result",
     "APPROVED_PLATFORM_POLICY",
     "applicable_platform_policies",
+    "ComposeContext",
+    "ComposeContextBuilder",
+    "ComposeContextError",
+    "ComposeRelationship",
+    "DETECTED",
+    "DETECTION_ONLY",
+    "ELIGIBLE",
+    "NEEDS_EVIDENCE",
+    "UNSUPPORTED",
+    "INFRASTRUCTURE_EVIDENCE_POLICY_V1",
+    "evaluate_infrastructure_candidate",
 ]

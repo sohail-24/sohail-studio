@@ -6,8 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, update
 
-from core.evidence import AcquisitionResult
 from core.cli_bridge import CliBridge
+from core.evidence import AcquisitionResult
 from core.storage.database import Storage, StorageConfig
 from core.storage.project_intelligence import (
     ProjectIntelligenceRepository,
@@ -36,6 +36,13 @@ def node_backend(root: Path, port: int = 5001) -> None:
     write(root / "backend/package-lock.json", "{}")
     write(root / "backend/src/server.js", f"app.listen({port});\n")
     write(root / "backend/.env", f"PORT={port}\nMONGO_URI=mongodb://secret\n")
+
+
+def node_backend_without_port(root: Path) -> None:
+    write(root / ".nvmrc", "20\n")
+    write(root / "backend/package.json", '{"scripts":{"start":"node src/server.js"}}')
+    write(root / "backend/package-lock.json", "{}")
+    write(root / "backend/src/server.js", "const PORT = process.env.PORT; server.listen(PORT);\n")
 
 
 def repository_for(root: Path) -> ProjectIntelligenceRepository:
@@ -369,6 +376,103 @@ async def test_docker_decision_contract_accepts_ready_with_strict_json_validatio
     ]
     assert provider.call_history[0].options["num_ctx"] == 16384
     assert provider.call_history[0].options["num_predict"] == 2048
+    repository.storage.close()
+
+
+def test_explicit_node_source_port_is_persisted(tmp_path: Path):
+    node_backend(tmp_path, 5001)
+    repository = repository_for(tmp_path)
+    intelligence = repository.load_latest(str(tmp_path))
+    assert intelligence is not None
+    assert any(
+        item["component"] == "backend"
+        and item["port_type"] == "application"
+        and item["port"] == 5001
+        for item in intelligence.ports
+    )
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    assert context.components[0]["ports"][0]["port"] == 5001
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_application_port_is_omitted_and_repair_removes_model_port(tmp_path: Path):
+    node_backend_without_port(tmp_path)
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    assert not any(item.get("port_type") == "application" for item in context.components[0]["ports"])
+
+    first = json.loads(decision_response())
+    first["components"][0]["port"] = 3001
+    first["compose"]["services"][0]["port"] = 3001
+    first["compose"]["services"][0]["target_port"] = 3001
+    repaired = json.loads(decision_response())
+    repaired["components"][0].pop("port")
+    repaired["compose"]["services"][0].pop("port")
+    repaired["compose"]["services"][0].pop("target_port")
+
+    class SequencedProvider(MockProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.responses_for_calls = [json.dumps(first), json.dumps(repaired)]
+
+        async def generate(self, request):
+            self.call_history.append(request)
+            return GenerationResult(
+                text=self.responses_for_calls.pop(0), model=request.model or "mock"
+            )
+
+    provider = SequencedProvider()
+    decision = await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
+
+    assert decision.status == "ready"
+    assert "port" not in decision.components[0]
+    assert "port" not in decision.compose["services"][0]
+    assert "target_port" not in decision.compose["services"][0]
+    assert len(provider.call_history) == 2
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_bounded_repair_cannot_introduce_port_without_evidence(tmp_path: Path):
+    node_backend_without_port(tmp_path)
+    repository = repository_for(tmp_path)
+    response = json.loads(decision_response(3001))
+    provider = MockProvider(responses={"project": json.dumps(response)})
+
+    decision = await DockerDecisionEngine(
+        provider, "devops-qwen:latest",
+    ).decide(DockerContextBuilder(repository).build(tmp_path, ["backend"]))
+
+    assert decision.status == "ready"
+    assert "port" not in decision.components[0]
+    assert "port" not in decision.compose["services"][0]
+    assert "target_port" not in decision.compose["services"][0]
+    assert decision.repair_attempted is True
+    assert len(provider.call_history) == 2
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_application_port_does_not_render_expose_or_compose_mapping(tmp_path: Path):
+    node_backend_without_port(tmp_path)
+    repository = repository_for(tmp_path)
+    response = json.loads(decision_response())
+    response["components"][0].pop("port")
+    response["compose"]["services"][0].pop("port")
+    response["compose"]["services"][0].pop("target_port")
+    result = await DockerAgent(
+        dry_run=True,
+        repository=repository,
+        provider=MockProvider(responses={"project": json.dumps(response)}),
+        model="devops-qwen:latest",
+    ).execute(tmp_path, components=["backend"], compose=True, compose_action="generate")
+
+    assert result.success, result.message
+    artifacts = {item["path"]: item["content"] for item in result.data["rendered_artifacts"]}
+    assert "EXPOSE" not in artifacts[str(tmp_path / "backend/Dockerfile")]
+    assert "ports:" not in artifacts[str(tmp_path / "docker-compose.yml")]
+    assert result.data["files_written"] == 0
     repository.storage.close()
 
 
@@ -958,7 +1062,8 @@ async def test_dockerize_dry_run_does_not_write_and_uses_devops_model(tmp_path: 
     assert not (tmp_path / "docker-compose.yml").exists()
     assert (tmp_path / "backend/.dockerignore").read_text(encoding="utf-8") == "preserve-me\n"
     assert result.data["dry_run"] is True
-    assert {item["action"] for item in result.data["planned_actions"]} >= {"generate", "keep"}
+    assert {item["action"] for item in result.data["planned_actions"]} == {"generate"}
+    assert all(".dockerignore" not in item["path"] for item in result.data["planned_actions"])
     assert any(item["path"].endswith("backend/Dockerfile") for item in result.data["planned_actions"])
     assert provider.call_history[0].model == "devops-qwen:latest"
     assert "mongodb://secret" not in provider.call_history[0].prompt

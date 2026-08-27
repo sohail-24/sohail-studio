@@ -127,7 +127,11 @@ class VerifiedEngineeringPatternRecognizer:
             item for item in (component.get("runtimes") or _value(intelligence, "runtimes", []) or [])
             if self._EXACT_VERSION.fullmatch(str(_value(item, "version", "")).strip())
         ]
-        if len(runtimes) != 1:
+        nginx_config = any(
+            str(_value(item, "relative_path", "")).rsplit("/", 1)[-1].lower() == "nginx.conf"
+            for item in local_files
+        )
+        if len(runtimes) > 1 or (not runtimes and not nginx_config):
             return None
 
         ports = [
@@ -163,11 +167,12 @@ class VerifiedEngineeringPatternRecognizer:
             if classification in {"dependency_manifest", "lockfile"}:
                 add(_reference(str(_value(item, "relative_path")), "file", classification, "high"))
         add(_reference(entry_file, "entrypoint", "static_html_entry", "high"))
-        runtime = runtimes[0]
-        add(_reference(
-            str(_value(runtime, "source_file")), "runtime", str(_value(runtime, "runtime")),
-            str(_value(runtime, "confidence", "high")),
-        ))
+        runtime = runtimes[0] if runtimes else None
+        if runtime is not None:
+            add(_reference(
+                str(_value(runtime, "source_file")), "runtime", str(_value(runtime, "runtime")),
+                str(_value(runtime, "confidence", "high")),
+            ))
         port = ports[0]
         port_source = _value(port, "source_file") or next(
             (
@@ -190,7 +195,6 @@ class VerifiedEngineeringPatternRecognizer:
             policy={
                 "requirements": [
                     "frontend component classification",
-                    "exact runtime evidence",
                     "locked dependency manifest",
                     "high-confidence build command",
                     "explicit static HTML entry document",
@@ -202,9 +206,10 @@ class VerifiedEngineeringPatternRecognizer:
                 "allowed_start_command_families": ["nginx", "caddy", "serve", "npx serve"],
             },
             rationale=(
-                "The component is classified as a frontend and has an exact runtime, "
-                "locked dependencies, an explicit build command, a static HTML entry, "
-                "and one non-conflicting application port."
+                "The component is classified as a frontend with locked dependencies, "
+                "an explicit build command, a static HTML entry, and one non-conflicting "
+                "application port; supporting Nginx configuration is accepted when no "
+                "repository runtime marker is present."
             ),
             evidence_references=tuple(references),
         )

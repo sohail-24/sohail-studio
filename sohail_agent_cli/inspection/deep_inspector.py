@@ -288,16 +288,33 @@ class DeepInspector:
             elif name == "pom.xml":
                 manifest_paths.append(relative)
                 self._java_manifest(intelligence, relative, content, component)
+            elif name in {"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"}:
+                manifest_paths.append(relative)
+                self._gradle_manifest(intelligence, relative, content, component)
+            elif name == "go.mod":
+                manifest_paths.append(relative)
+                self._go_manifest(intelligence, relative, content, component)
+            elif name == "Cargo.toml":
+                manifest_paths.append(relative)
+                self._cargo_manifest(intelligence, relative, content, component)
+            elif name == "rust-toolchain.toml" or name == "rust-toolchain":
+                self._rust_toolchain(intelligence, relative, content)
             elif name in {"Dockerfile"} or name.startswith("Dockerfile."):
                 self._dockerfile(intelligence, relative, content, component)
             elif name.lower() in {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}:
                 self._compose(intelligence, relative, content)
             elif name == ".nvmrc":
                 self._runtime(intelligence, relative, "Node.js", content.strip(), "high", "nvmrc")
+            elif name == ".python-version":
+                version = content.strip()
+                if re.fullmatch(r"""\d+(?:\.\d+){0,2}""", version):
+                    self._runtime(intelligence, relative, "Python", version, "high", "python-version")
             elif name == "Makefile":
                 self._makefile(intelligence, relative, content)
             elif name in {"README.md", "README.rst", "README"}:
                 self._readme(intelligence, relative, content)
+            elif name == "nginx.conf" or name.endswith(".nginx.conf"):
+                self._nginx_config(intelligence, relative, content, component)
             elif name == ".env.example" or name == ".env.sample" or name == ".env.template":
                 self._env_example(intelligence, relative, content)
             elif _is_secret(path):
@@ -310,6 +327,10 @@ class DeepInspector:
                 )
             elif path.suffix.lower() == ".java":
                 self._java_source(intelligence, relative, content)
+            elif path.suffix.lower() == ".go":
+                self._go_source(intelligence, relative, content)
+            elif path.suffix.lower() == ".rs":
+                self._rust_source(intelligence, relative, content)
 
             self._source_ports(intelligence, relative, content, component)
             self._kubernetes(intelligence, relative, content)
@@ -568,15 +589,56 @@ class DeepInspector:
         python_files = {relative for relative in files if Path(relative).suffix.lower() == ".py"}
         python_manifest = any(Path(item).name in {"pyproject.toml", "requirements.txt", "Pipfile", "poetry.lock"} for item in manifest_paths)
         python_framework = next((name for name in ("Django", "FastAPI", "Flask") if name in intelligence.frameworks), None)
-        if (has_manage_py or (python_manifest and python_files and python_framework)) and "backend" not in seen:
+        if (has_manage_py or (python_manifest and python_files)) and "backend" not in seen:
             evidence = [item for item in manifest_paths if Path(item).suffix.lower() in {".toml", ".txt", ".lock"}]
             if has_manage_py:
                 evidence.append("manage.py")
-            add("backend", ".", "backend", "backend/application", python_framework, next((m for m in intelligence.package_managers if m in {"pip", "poetry", "pipenv"}), None), evidence)
+            add(
+                "backend", ".", "backend", "backend/application", python_framework,
+                next((m for m in intelligence.package_managers if m in {"pip", "poetry", "pipenv"}), None),
+                evidence,
+            )
 
-        java_manifest = next((item for item in manifest_paths if Path(item).name in {"pom.xml", "build.gradle", "build.gradle.kts"}), None)
-        if java_manifest and any(Path(item).as_posix().startswith("src/main/") for item in files):
-            add("application", ".", "backend", "backend/application", "Spring Boot" if "Spring Boot" in intelligence.frameworks else None, next((m for m in intelligence.package_managers if m in {"maven", "gradle"}), None), [java_manifest])
+        java_manifests = [
+            item for item in manifest_paths
+            if Path(item).name in {"pom.xml", "build.gradle", "build.gradle.kts"}
+        ]
+        java_manifest = next(iter(java_manifests), None)
+        if (
+            java_manifest
+            and any(Path(item).as_posix().startswith("src/main/") for item in files)
+            and "application" not in seen
+        ):
+            manager = "gradle" if Path(java_manifest).name.startswith("build.gradle") else "maven"
+            add(
+                "application", ".", "backend", "backend/application",
+                "Spring Boot" if "Spring Boot" in intelligence.frameworks else None,
+                manager, [java_manifest],
+            )
+
+        go_manifest = next((item for item in manifest_paths if Path(item).name == "go.mod"), None)
+        if go_manifest and any(Path(item).suffix.lower() == ".go" for item in files) and "application" not in seen:
+            add("application", ".", "backend", "backend/application", None, "go", [go_manifest])
+
+        cargo_manifest = next((item for item in manifest_paths if Path(item).name == "Cargo.toml"), None)
+        if cargo_manifest and any(Path(item).suffix.lower() == ".rs" for item in files) and "application" not in seen:
+            add("application", ".", "backend", "backend/application", None, "cargo", [cargo_manifest])
+
+        nginx_files = [
+            item for item in files
+            if Path(item).name == "nginx.conf" or Path(item).name.endswith(".nginx.conf")
+        ]
+        # A configuration file can support another component's static-serving
+        # strategy.  An independent Nginx component requires explicit service
+        # evidence in the persisted repository facts; nginx.conf alone is not
+        # deployability evidence.
+        explicit_nginx_service = any(
+            str(item.get("name") or "").lower() == "nginx"
+            or str(item.get("component") or "").lower() == "nginx"
+            for item in intelligence.services
+        )
+        if nginx_files and explicit_nginx_service and "nginx" not in seen:
+            add("nginx", ".", "server", "server/nginx", "Nginx", None, nginx_files)
         return components
 
     def _python_manifest(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> None:
@@ -612,6 +674,118 @@ class DeepInspector:
             manager = "poetry" if path.name == "poetry.lock" else "pipenv"
             intelligence.package_managers.append(manager)
             self._add(intelligence, source_file=source, evidence_type="package_manager", key="package_manager", value=manager, confidence="high")
+
+    def _gradle_manifest(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> None:
+        """Extract only declarative Gradle facts; build output is derived later."""
+        name = Path(source).name
+        if name.startswith("settings.gradle"):
+            includes = re.findall(r"""(?:include|includeProjects)\s*\(?\s*['"]([^'"]+)['"]""", content)
+            root_name = re.search(r"""rootProject\.name\s*=\s*['"]([^'"]+)['"]""", content)
+            intelligence.build_metadata.append({
+                "source_file": source,
+                "build_system": "gradle",
+                "settings": True,
+                "root_project_name": root_name.group(1).strip() if root_name else None,
+                "modules": includes,
+            })
+            self._add(intelligence, source_file=source, evidence_type="build_configuration", key="gradle.settings", value={"modules": includes}, confidence="high")
+            return
+        intelligence.package_managers.append("gradle")
+        plugin_ids = re.findall(r"""(?:id\s*\(?\s*['"]([^'"]+)['"]|apply\s+plugin:\s*['"]([^'"]+)['"])""", content)
+        plugins = [next((value for value in match if value), "") for match in plugin_ids]
+        dependencies = re.findall(r"""['"]([^'"]*spring[^'"]*)['"]""", content, re.IGNORECASE)
+        java_version = re.search(r"""(?:JavaLanguageVersion\.of|sourceCompatibility\s*=|targetCompatibility\s*=)\s*['"]?(?:JavaVersion\.VERSION_)?(\d{1,2})['"]?""", content)
+        group = re.search(r"""(?:^|\n)\s*group\s*=\s*['"]([^'"]+)['"]""", content)
+        version = re.search(r"""(?:^|\n)\s*version\s*=\s*['"]([^'"]+)['"]""", content)
+        archive = re.search(r"""archiveFileName\s*=\s*['"]([^'"]+)['"]""", content)
+        archive_base = re.search(r"""archiveBaseName\s*=\s*['"]([^'"]+)['"]""", content)
+        classifier = re.search(r"""archiveClassifier\s*=\s*['"]([^'"]*)['"]""", content)
+        main_class = re.search(r"""(?:mainClass\.set|mainClass\s*=)\s*['"]([^'"]+)['"]""", content)
+        metadata = {
+            "source_file": source,
+            "build_system": "gradle",
+            "group_id": group.group(1).strip() if group else None,
+            "version": version.group(1).strip() if version else None,
+            "plugins": [{"id": item} for item in plugins if item],
+            "spring_boot_plugin": "org.springframework.boot" in plugins,
+            "spring_dependencies": dependencies,
+            "java_version": java_version.group(1) if java_version else None,
+            "archive_file_name": archive.group(1).strip() if archive else None,
+            "archive_base_name": archive_base.group(1).strip() if archive_base else None,
+            "archive_classifier": classifier.group(1).strip() if classifier else None,
+            "main_class": main_class.group(1).strip() if main_class else None,
+        }
+        intelligence.build_metadata.append(metadata)
+        self._add(intelligence, source_file=source, evidence_type="build_configuration", key="gradle", value=metadata, confidence="high")
+        if java_version:
+            self._runtime(intelligence, source, "Java", java_version.group(1), "high", "Gradle Java version")
+        if "org.springframework.boot" in plugins or dependencies:
+            intelligence.frameworks.append("Spring Boot")
+
+    def _go_manifest(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> None:
+        intelligence.package_managers.append("go")
+        module = re.search(r"""^module\s+([^\s]+)""", content, re.MULTILINE)
+        version = re.search(r"""^go\s+(\d+(?:\.\d+)?)""", content, re.MULTILINE)
+        metadata = {
+            "source_file": source,
+            "build_system": "go",
+            "module": module.group(1).strip() if module else None,
+            "go_version": version.group(1) if version else None,
+        }
+        intelligence.build_metadata.append(metadata)
+        self._add(intelligence, source_file=source, evidence_type="build_configuration", key="go.mod", value=metadata, confidence="high")
+        if version:
+            self._runtime(intelligence, source, "Go", version.group(1), "high", "go.mod go directive")
+
+    def _cargo_manifest(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> None:
+        intelligence.package_managers.append("cargo")
+        package_name = re.search(r"""(?ms)^\[package\].*?^name\s*=\s*['"]([^'"]+)['"]""", content)
+        version = re.search(r"""(?ms)^\[package\].*?^version\s*=\s*['"]([^'"]+)['"]""", content)
+        bins = re.findall(r"""(?ms)^\[\[bin\]\].*?^name\s*=\s*['"]([^'"]+)['"]""", content)
+        metadata = {
+            "source_file": source,
+            "build_system": "cargo",
+            "package_name": package_name.group(1).strip() if package_name else None,
+            "version": version.group(1).strip() if version else None,
+            "binaries": bins,
+            "workspace": bool(re.search(r"""(?m)^\[workspace\]""", content)),
+        }
+        intelligence.build_metadata.append(metadata)
+        self._add(intelligence, source_file=source, evidence_type="build_configuration", key="Cargo.toml", value=metadata, confidence="high")
+
+    def _rust_toolchain(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
+        channel = re.search(r"""(?:^|\n)\s*(?:channel|toolchain)\s*=\s*['"]([^'"]+)['"]""", content)
+        if channel and re.fullmatch(r"""\d+\.\d+(?:\.\d+)?""", channel.group(1).strip()):
+            self._runtime(intelligence, source, "Rust", channel.group(1).strip(), "high", "rust-toolchain channel")
+            self._add(intelligence, source_file=source, evidence_type="runtime", key="Rust", value=channel.group(1).strip(), confidence="high")
+
+    def _go_source(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
+        if re.search(r"""(?m)^\s*package\s+main\b""", content) and re.search(r"""\bfunc\s+main\s*\(""", content):
+            self._add(
+                intelligence, source_file=source, evidence_type="entrypoint",
+                key="go_main_package", value=source, confidence="high",
+            )
+            intelligence.entrypoints.append({
+                "kind": "go_main_package", "source_file": source, "confidence": "high",
+            })
+
+    def _rust_source(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
+        if re.search(r"""\bfn\s+main\s*\(""", content):
+            self._add(
+                intelligence, source_file=source, evidence_type="entrypoint",
+                key="rust_main_function", value=source, confidence="high",
+            )
+            intelligence.entrypoints.append({
+                "kind": "rust_main_function", "source_file": source, "confidence": "high",
+            })
+
+    def _nginx_config(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> None:
+        intelligence.frameworks.append("Nginx")
+        self._add(intelligence, source_file=source, evidence_type="server_configuration", key="nginx.conf", value=True, confidence="high")
+        for line_number, match in enumerate(re.finditer(r"""\blisten\s+(\d{1,5})\b""", content), start=1):
+            port = int(match.group(1))
+            if 1 <= port <= 65535:
+                self._port(intelligence, source, "nginx_listen", port, "high", "nginx listen directive", line_number, component=component, port_type="application")
 
     def _java_manifest(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> None:
         manager = "maven"
@@ -786,12 +960,18 @@ class DeepInspector:
 
     def _dockerfile(self, intelligence: ProjectIntelligence, source: str, content: str, component: str) -> None:
         intelligence.docker.setdefault("dockerfiles", []).append(source)
-        base = re.search(r"^FROM\s+(\S+)", content, re.MULTILINE | re.IGNORECASE)
-        if base:
+        bases = list(re.finditer(r"^FROM\s+(\S+)(?:\s+AS\s+(\S+))?", content, re.MULTILINE | re.IGNORECASE))
+        for index, base in enumerate(bases):
+            # In a multi-stage Dockerfile, only the final FROM is the runtime
+            # image.  Preserve every explicit image, but make that role
+            # deterministic so build images cannot create a false runtime
+            # conflict in Dockerize.
             intelligence.docker.setdefault("base_images", []).append({
                 "image": base.group(1),
                 "source_file": source,
                 "component": component,
+                "stage": base.group(2),
+                "role": "runtime" if index == len(bases) - 1 else "build",
                 "source_type": "EXPLICIT_EVIDENCE",
                 "confidence": "high",
                 "model_inference": False,
@@ -813,6 +993,26 @@ class DeepInspector:
         match = re.search(r"^EXPOSE\s+(\d{2,5})", content, re.MULTILINE | re.IGNORECASE)
         if match:
             self._port(intelligence, source, "container_port", int(match.group(1)), "high", "Dockerfile EXPOSE", component=component, port_type="container")
+        command = re.search(r"""^CMD\s+(.+?)\s*$""", content, re.MULTILINE | re.IGNORECASE)
+        if command:
+            raw = command.group(1).strip()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list) and parsed and all(isinstance(item, str) for item in parsed):
+                raw = " ".join(parsed)
+            elif isinstance(parsed, str):
+                raw = parsed
+            if raw:
+                self._add(
+                    intelligence, source_file=source, evidence_type="command",
+                    key=f"{component}.start_command", value=raw, confidence="high",
+                )
+                intelligence.commands.append({
+                    "name": "start", "command": raw, "source_file": source,
+                    "confidence": "high", "component": component,
+                })
         self._add(intelligence, source_file=source, evidence_type="docker_configuration", key="dockerfile", value=True, confidence="high")
 
     def _compose(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
@@ -824,6 +1024,30 @@ class DeepInspector:
             return
         for service, config in (data.get("services") or {}).items():
             item = {"name": str(service), "source_file": source}
+            if isinstance(config, dict):
+                if str(config.get("image") or "").strip():
+                    item.update({
+                        "image": str(config["image"]),
+                        "image_source_file": source,
+                        "image_source_type": "EXPLICIT_EVIDENCE",
+                        "model_inference": False,
+                    })
+                depends_on = config.get("depends_on") or []
+                if isinstance(depends_on, dict):
+                    depends_on = list(depends_on)
+                if isinstance(depends_on, list):
+                    item["depends_on"] = [str(value) for value in depends_on]
+                    for dependency in item["depends_on"]:
+                        intelligence.relationships.append({
+                            "source": str(service),
+                            "target": dependency,
+                            "relationship_type": "compose_dependency",
+                            "source_file": source,
+                            "evidence": f"services.{service}.depends_on",
+                            "source_type": "EXPLICIT_EVIDENCE",
+                            "model_inference": False,
+                            "validation": "persisted_repository_evidence",
+                        })
             intelligence.services.append(item)
             self._add(intelligence, source_file=source, evidence_type="service", key=str(service), value="docker compose service", confidence="high")
             service_lower = str(service).lower()
@@ -848,7 +1072,11 @@ class DeepInspector:
         if classify_file(Path(source), content) not in {"source", "configuration", "environment_example"}:
             return
         for line_number, line in enumerate(content.splitlines(), start=1):
-            match = PORT_RE.search(line) or LISTEN_RE.search(line)
+            match = (
+                PORT_RE.search(line)
+                or LISTEN_RE.search(line)
+                or re.search(r"""\bListenAndServe\s*\(\s*["'][^"']*:(\d+)""", line)
+            )
             if match:
                 port = int(match.group(1))
                 if 1 <= port <= 65535:
@@ -877,6 +1105,14 @@ class DeepInspector:
             command = f"make {name}"
             intelligence.commands.append({"name": name, "command": command, "source_file": source, "confidence": "high"})
             self._add(intelligence, source_file=source, evidence_type="command", key=f"make.{name}_command", value=command, confidence="high", line_number=line_number)
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            command = line.strip()
+            if not command or line == command:
+                continue
+            if re.search(r"""\b(?:go\s+build|cargo\s+build|uvicorn|gunicorn|flask\s+run|python\s+manage\.py)\b""", command):
+                name = "build" if re.search(r"""\b(?:go\s+build|cargo\s+build)\b""", command) else "start"
+                intelligence.commands.append({"name": name, "command": command, "source_file": source, "confidence": "high"})
+                self._add(intelligence, source_file=source, evidence_type="command", key=f"make.{name}_recipe", value=command, confidence="high", line_number=line_number)
 
     def _env_example(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
         for line_number, line in enumerate(content.splitlines(), start=1):
@@ -930,6 +1166,33 @@ class DeepInspector:
                 if runtime.group("qualifier"):
                     version += runtime.group("qualifier")
                 self._runtime(intelligence, source, "Node.js", version, "medium", "README runtime mention")
+            command_line = line.strip()
+            if command_line[:1] in {"$", ">"}:
+                command_line = command_line[1:].strip()
+            command_match = re.fullmatch(
+                r"""((?:uvicorn[ ]+[^#]+|gunicorn[ ]+[^#]+|flask[ ]+run[^#]*|python[ ]+manage[.]py[^#]*|go[ ]+build[ ]+[^#]+|cargo[ ]+build[ ]+[^#]+|[.]/[A-Za-z0-9_./-]+))[ ]*""",
+                command_line,
+                re.IGNORECASE,
+            )
+            if command_match:
+                command = command_match.group(1).strip()
+                name = "build" if re.match(r"""(?:go\s+build|cargo\s+build)\b""", command) else "start"
+                intelligence.commands.append({
+                    "name": name, "command": command, "source_file": source,
+                    "confidence": "high",
+                })
+                port_argument = re.search(r"""(?:--port|port[=:])[ ]*(\d{2,5})\b""", command, re.IGNORECASE)
+                if port_argument:
+                    self._port(
+                        intelligence, source, "command_port", int(port_argument.group(1)),
+                        "high", "explicit production command port", line_number,
+                        component="root", port_type="application",
+                    )
+                self._add(
+                    intelligence, source_file=source, evidence_type="command",
+                    key=f"readme.{name}_command", value=command,
+                    confidence="high", line_number=line_number,
+                )
 
     def _kubernetes(self, intelligence: ProjectIntelligence, source: str, content: str) -> None:
         if classify_file(Path(source), content) != "kubernetes":

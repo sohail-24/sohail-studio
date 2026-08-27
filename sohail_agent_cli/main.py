@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import re
 import sys
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from rich.console import Console
 from rich.panel import Panel
@@ -469,6 +471,103 @@ def _display_value(value: Any) -> str:
     return str(value)
 
 
+def _artifact_previews(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return selected artifact previews with their planned action."""
+    previews = list(data.get("artifact_previews") or [])
+    if previews:
+        return previews
+    actions = {
+        str(item.get("path")): str(item.get("action") or "keep")
+        for item in data.get("planned_actions", []) or []
+    }
+    return [
+        {**artifact, "action": actions.get(str(artifact.get("path")), "keep")}
+        for artifact in data.get("rendered_artifacts", []) or []
+    ]
+
+
+def _safe_command_name(value: Any) -> str:
+    name = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return name or "sohail-app"
+
+
+def _recommended_docker_commands(data: dict[str, Any]) -> list[str]:
+    """Build terminal guidance from the selected, validated artifacts only."""
+    context = data.get("context") or {}
+    project = context.get("project") or {}
+    root = str(project.get("root_path") or "")
+    if not root:
+        return []
+    actions = [item for item in data.get("planned_actions", []) or [] if item.get("action") != "skip"]
+    compose_paths = [
+        str(item.get("path")) for item in actions
+        if Path(str(item.get("path"))).name in {"docker-compose.yml", "compose.yml"}
+    ]
+    lines = ["Recommended Docker commands", f"Run from: {root}", ""]
+    if compose_paths:
+        lines.extend([
+            "1. Build and start",
+            "   docker compose up --build",
+            "2. Run in background",
+            "   docker compose up -d --build",
+            "3. View status",
+            "   docker compose ps",
+            "4. View logs",
+            "   docker compose logs -f",
+            "5. Stop services",
+            "   docker compose down",
+        ])
+        return lines
+
+    components = {
+        str(item.get("name")): item for item in context.get("components", []) or []
+    }
+    dockerfiles = [
+        item for item in actions
+        if Path(str(item.get("path"))).name.lower().startswith("dockerfile")
+    ]
+    if not dockerfiles:
+        return []
+    lines.append("Dockerfile-only project guidance:")
+    for index, item in enumerate(dockerfiles, start=1):
+        dockerfile = Path(str(item["path"]))
+        relative_dockerfile = os.path.relpath(dockerfile, root)
+        component = next(
+            (
+                source for source in components.values()
+                if relative_dockerfile in {
+                    *(str(path) for path in source.get("dockerfiles", []) or []),
+                    f"{str(source.get('path') or '.').strip('./')}/Dockerfile".strip("/"),
+                    "Dockerfile" if str(source.get("path") or ".") == "." else "",
+                }
+            ),
+            {},
+        )
+        name = _safe_command_name(component.get("name") or dockerfile.parent.name or project.get("name"))
+        component_path = str(component.get("path") or ".")
+        build_context = "." if component_path in {"", "."} else f"./{component_path.strip('./')}"
+        port = next(
+            (
+                item.get("port") for item in component.get("ports", []) or []
+                if item.get("port_type") == "application" and not item.get("conflict")
+            ),
+            None,
+        )
+        lines.extend([
+            f"{index}. Build {relative_dockerfile}",
+            f"   docker build -t {name}:local -f {relative_dockerfile} {build_context}",
+            f"{index + 1}. Run {name}:local",
+            f"   docker run --rm --name {name}"
+            + (f" -p {int(port)}:{int(port)}" if port is not None else "")
+            + f" {name}:local",
+            f"{index + 2}. View logs",
+            f"   docker logs -f {name}",
+            f"{index + 3}. Stop the container",
+            f"   docker stop {name}",
+        ])
+    return lines
+
+
 def _append_context_evidence(lines: list[str], context: dict[str, Any]) -> None:
     for component in context.get("components", []) or []:
         name = component.get("name", "component")
@@ -560,22 +659,35 @@ def _print_docker_result(result: Any, *, dry_run: bool = False) -> None:
             "",
             "In-memory artifacts:",
         ])
-        rendered = data.get("rendered_artifacts", []) or []
+        rendered = _artifact_previews(data)
         if rendered:
             for artifact in rendered:
                 lines.append(f"  [READY] {artifact.get('path', '')}")
         else:
             lines.append("  None (workflow did not reach rendering)")
-        for artifact in rendered:
+        for index, artifact in enumerate(rendered, start=1):
+            action = str(artifact.get("action") or "keep").lower()
+            status = {
+                "generate": "WOULD CREATE",
+                "create": "WOULD CREATE",
+                "upgrade": "WOULD UPDATE",
+                "keep": "WOULD KEEP",
+                "skip": "WOULD SKIP",
+            }.get(action, f"WOULD {action.upper()}")
             lines.extend([
                 "",
-                "------------------------------------------------",
-                "WOULD CREATE / UPDATE",
-                "------------------------------------------------",
+                "================================================",
+                f"ARTIFACT {index} OF {len(rendered)} — {Path(str(artifact.get('path', ''))).name}",
+                f"Status: {status}",
+                "Authority: validated in-memory rendering",
+                "================================================",
                 f"Path: {artifact.get('path', '')}",
                 "Preview:",
                 str(artifact.get("content", "")),
             ])
+        command_lines = _recommended_docker_commands(data)
+        if command_lines:
+            lines.extend(["", "================================================", *command_lines, "================================================"])
         lines.extend([
             "",
             "Files written: NO (count: 0)",
@@ -594,7 +706,20 @@ def _print_docker_result(result: Any, *, dry_run: bool = False) -> None:
             lines.append(f"{action}: {item.get('path', '')}")
     else:
         lines.append("No artifact paths reported")
-    lines.extend(["", "Validation: PASSED", "Persisted intelligence: REUSED", "New inspection: NO"])
+    data = getattr(result, "data", {}) or {}
+    written = int(data.get("files_written", len(getattr(result, "files_created", []) or [])))
+    modified = list(data.get("files_modified", []) or [])
+    lines.extend([
+        "",
+        "Validation: PASSED",
+        f"Files written: {'YES' if written else 'NO'} (count: {written})",
+        f"Files modified: {'YES' if modified else 'NO'}" + (f" ({', '.join(modified)})" if modified else ""),
+        "Persisted intelligence: REUSED",
+        "New inspection: NO",
+    ])
+    command_lines = _recommended_docker_commands(data)
+    if command_lines:
+        lines.extend(["", "================================================", *command_lines, "================================================"])
     console.print(Panel("\n".join(lines), title="DOCKERIZE COMPLETED", border_style="green"))
 
 
