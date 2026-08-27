@@ -16,30 +16,11 @@ Sohail Studio is a self-contained local-first AI engineering workspace. The appl
 The Chat provides conversational AI access through Ollama via `/api/chat` using the model `devops-qwen`.
 It processes both standard knowledge queries and context-aware queries concerning the local workspace.
 
-For Normal knowledge questions:
-```text
-User → Chat → Ollama → Answer
-```
-
-For Local-environment questions (Phase 2):
-```text
-User → Chat → Control Plane → Read-only local information → Ollama → Answer
-```
-
 ## AI Control Plane
-The Control Plane is a critical security and capability layer introduced in Phase 2. It dictates whether local information is required, safely fetching it without allowing arbitrary shell access or destructive actions. It adds very minimal latency (~4.8 ms overhead).
+The Control Plane is a critical security and capability layer. It dictates whether local information is required, safely fetching it without allowing arbitrary shell access or destructive actions. It adds very minimal latency (~4.8 ms overhead).
 
 ## Read-Only Capabilities
-The AI Control Plane is explicitly restricted to these safe local tools:
-- Local time/date (`local_time`)
-- Filesystem/project inspection (`project_files`)
-- Present Working Directory (`pwd`)
-- Safe folder search (`ls` and `project_files`)
-- Docker read-only inspection (`docker_read`)
-- Git read-only inspection (`git_read`)
-- Kubernetes read-only inspection (`kubernetes_read`)
-
-Multi-part requests can route sequentially to multiple tools before the model provides a final answer.
+The AI Control Plane is explicitly restricted to safe local tools (e.g., `local_time`, `project_files`, `pwd`, `docker_read`, `git_read`, `kubernetes_read`). Multi-part requests can route sequentially to multiple tools before the model provides a final answer.
 
 ## Terminal Architecture
 The Terminal operates completely isolated from the Chat and Control Plane to prevent unintended operations and maintain a strict security boundary.
@@ -56,7 +37,7 @@ The storage boundary uses PostgreSQL hosted by Neon. It is configured only
 through the environment variable `DATABASE_URL`; credentials are never stored
 in source or returned by health checks.
 
-## Phase 4B: Deep Inspector and Project Intelligence
+## Deep Inspector and Project Intelligence
 The existing Sohail-Agent `inspect` operation recursively discovers the
 current repository, excludes generated/cache directories and secret-bearing
 files, classifies discovered files, and extracts deterministic engineering
@@ -73,7 +54,8 @@ being silently merged.
 The inspector never stores `.env` secrets, private keys, credentials, tokens,
 or raw source contents.
 
-Dockerize now retrieves the latest successful Project Intelligence snapshot
+## Dockerize Workflow
+Dockerize retrieves the latest successful Project Intelligence snapshot
 through the existing storage repository, scopes it to the selected components,
 and sends only that focused context to `devops-qwen`. Ollama
 returns a structured decision; Sohail-Agent applies deterministic validation of runtime, commands, paths, services, and
@@ -88,13 +70,14 @@ metadata must authorize the matching
 version, README assumptions, `latest`, and internal
 defaults are never runtime evidence. The LLM does not directly write files; it only proposes decisions which are verified by deterministic validation.
 
+## Dry-run Behavior and Write Protection
+The system ensures that a `dry_run` flag performs zero writes. In dry-run mode, the filesystem remains unmodified and Dockerize preflight failures or blocked generations result in zero artifact writes. The inspector never rescans the repository during the Dockerize phase; it strictly relies on the persisted Project Intelligence to protect against filesystem changes mid-operation.
+
 ## Safety Rules
 - Chat has **no unrestricted shell access**.
 - Chat **cannot** perform any state-mutating or destructive actions (e.g., `rm`, `mkdir`, `docker stop`, `git reset`, `kubectl apply`).
 - If asked to perform an action, Chat can only explain the necessary steps.
 - **No evidence = NEEDS_EVIDENCE**. Facts cannot be invented by the LLM.
 
-## Current Phase Status
-- **Phase 1 (Complete):** Local Ollama foundation, Chat interface, separated PTY Terminal.
-- **Phase 2 (Complete):** AI Control Plane with read-only tools, safe local context querying, mult-question routing.
-- **Phase 4B (Dockerize):** Implemented inspection, Project Intelligence, Neon persistence, and deterministic validation. Currently safely blocking artifact generation on unsupported frontend commands until prompt refinement is completed.
+## Current Limitations
+- The model can sometimes propose a development command (e.g., `vite`) instead of a supported production preview command (`vite preview`). The deterministic validation layer correctly blocks this, preventing generation but causing the workflow to pause safely. True production Dockerfile generation may be blocked until the prompt contract is improved.
