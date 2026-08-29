@@ -9,13 +9,13 @@ Sohail Studio is a local-first DevOps AI Control Plane and engineering workspace
 ### High-Level Architecture
 - **Browser UI**: Initiates workflows via HTTP REST and WebSockets.
 - **FastAPI**: Manages backend operations, serves the static dashboard (`dashboard/`), and streams execution outputs.
-- **AI Control Plane**: An explicit, read-only boundary for the AI Chat to observe local state safely.
-- **Sohail-Agent**: Operates as a separate, dedicated DevOps CLI (`sohail_agent_cli/`), NOT an LLM chat mode.
+- **AI Control Plane**: An explicit, read-only boundary for the AI Chat to observe local state safely (`core/control_plane.py`). It enforces `shell=False` to prevent destructive operations.
+- **Sohail-Agent**: Operates as a separate, dedicated DevOps CLI (`sohail_agent_cli/`), NOT an LLM chat mode. It executes directly via explicitly passed argument vectors.
 - **Terminal**: Uses an isolated PTY socket (`/ws/terminal`), providing a real local shell environment independent from the AI Chat.
-- **Project Inspection**: Deep Inspector extracts deterministic engineering evidence from the real filesystem.
-- **Project Intelligence**: Persisted source of truth in Neon PostgreSQL, accessed via API.
-- **Model Decision-Making**: `devops-qwen` proposes decisions based on focused evidence.
-- **Deterministic Validation**: The final safety and evidence boundary that enforces rules before any artifact generation.
+- **Project Inspection**: Deep Inspector (`sohail_agent_cli/inspection/`) extracts deterministic engineering evidence from the real filesystem.
+- **Project Intelligence**: Persisted source of truth using PostgreSQL (`core/storage/database.py`), managed via Alembic migrations.
+- **Model Decision-Making**: `devops-qwen` proposes decisions based on focused evidence, integrated via `OllamaProvider`.
+- **Deterministic Validation**: The final safety and evidence boundary (`sohail_agent_cli/dockerize/validation.py`) that enforces rules before any artifact generation.
 - **Artifact Generation**: Renders final Dockerfiles or Compose files only after successful validation.
 
 ### Dockerize Workflow Architecture
@@ -25,11 +25,11 @@ The current Dockerize flow follows a strict, evidence-bound path:
 2. ↓ **Deep Inspector**
 3. ↓ **Evidence**
 4. ↓ **Project Intelligence**
-5. ↓ **Neon PostgreSQL**
+5. ↓ **PostgreSQL Database** (`DATABASE_URL`)
 6. ↓ **Dockerize Context Builder**
 7. ↓ **Focused Evidence**
-8. ↓ **devops-qwen** (proposes Structured Docker Decision)
-9. ↓ **Deterministic Engineering Validation** (final authority)
+8. ↓ **devops-qwen via Ollama** (proposes Structured Docker Decision)
+9. ↓ **Deterministic Engineering Validation** (final authority, blocks unsupported proposals like missing commands or unverified ports)
 10. ↓ **Docker Artifact Generation**
 
 ### Security Boundaries & Separation
@@ -39,7 +39,7 @@ The current Dockerize flow follows a strict, evidence-bound path:
 - No fake Project Intelligence or Ollama inference for missing facts.
 
 ### Current Limitations
-- **Current Limitation (Safe Blocker):** The model can still choose an unsupported development command (e.g., proposing `vite` as a start command when the evidence only supports a production-style `vite preview` for frontend). The deterministic validator correctly and safely rejects this proposal. Artifact generation is safely blocked until the model decision contract/prompt is improved.
+- **Current Limitation (Safe Blocker):** The model can still choose an unsupported development command (e.g., proposing `vite` as a start command when the evidence only supports a production-style `vite preview` for frontend). The deterministic validator (`sohail_agent_cli/dockerize/validation.py`) correctly and safely rejects this proposal. Artifact generation is safely blocked until the model decision contract/prompt is improved.
 
 ## TARGET ARCHITECTURE / FUTURE PHASES
 

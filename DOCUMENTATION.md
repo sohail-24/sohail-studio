@@ -4,8 +4,11 @@
 Sohail Studio is a self-contained local-first AI engineering workspace. There is no separate CLI installation required. The project runs entirely on one Python environment (`.venv`), and seamlessly integrates a dashboard, a secure AI Chat module, an AI Control Plane, and a raw PTY Terminal.
 
 ## Running the Project
-- **Setup:** Run `python3 -m venv .venv` and then `.venv/bin/python -m pip install -e .` to setup the single environment. Use `.venv/bin/python -m pip install -e '.[dev]'` for test dependencies.
+- **Setup:** Run `python3 -m venv .venv` and then `.venv/bin/python -m pip install -e .` to setup the single environment. Use `.venv/bin/python -m pip install -e '.[dev]'` for test dependencies. Database migrations are applied using Alembic.
 - **Execution:** Start the server using `.venv/bin/uvicorn backend.main:app --reload`. Access the studio via `http://127.0.0.1:8000`. Ollama must be running locally to process AI generations.
+- **Environment Requirements:**
+  - `DATABASE_URL` must be set to point to the PostgreSQL storage backend.
+  - `OLLAMA_BASE_URL` (defaults to `http://localhost:11434`) must be accessible for model inference.
 
 ## Chat
 The Chat workspace serves two main behaviors using the stable local model `devops-qwen`:
@@ -22,7 +25,7 @@ The raw Terminal is architecturally isolated from the Chat. It operates via `/ws
 Ollama is the local inference engine driving all AI generation. The active local model is `devops-qwen` (Qwen3 4B Q4_K_M). There is no cloud LLM or AWS component.
 
 ## PostgreSQL storage foundation
-The storage boundary uses PostgreSQL hosted by Neon. It is configured only
+The storage boundary uses PostgreSQL (e.g., hosted by Neon). It is configured only
 through the environment variable `DATABASE_URL`; credentials are never stored
 in source or returned by health checks.
 
@@ -34,7 +37,7 @@ evidence with source-file provenance. It does not call Ollama and does not store
 source contents.
 
 Each successful inspection creates a new inspection run. The normalized
-Project Intelligence snapshot and evidence are persisted through the existing Neon PostgreSQL
+Project Intelligence snapshot and evidence are persisted through the existing PostgreSQL
 storage layer. The inspector never stores `.env` secrets, private keys, credentials, tokens,
 or raw source contents.
 
@@ -80,4 +83,4 @@ The AI Control Plane supports the following read-only CLI abstractions for Chat:
 Run tests locally using `pytest`. Current validations include tests for safe Control Plane routing, Multi-question routing, read-only verifications, terminal PTY availability, chat safety bounds, and Dockerize deterministic validation.
 
 ## Current Limitations
-- Implemented inspection, Project Intelligence, Neon persistence, and deterministic validation are fully functional. However, artifact generation is currently safely blocking on unsupported frontend commands until prompt refinement is completed.
+- Implemented inspection, Project Intelligence, persistence, and deterministic validation are fully functional. However, artifact generation is currently safely blocking on unsupported frontend commands until prompt refinement is completed.
