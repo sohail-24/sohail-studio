@@ -112,10 +112,12 @@ def test_single_root_component_receives_application_port_from_nested_configurati
     assert context.components[0]["ports"] == [{
         "name": "src_port",
         "port": 9090,
+        "host_port": None,
         "source_file": "src/main/resources/application.properties",
         "confidence": "high",
         "component": "application",
         "port_type": "application",
+        "protocol": None,
         "target_port": None,
         "service_name": None,
         "conflict": False,
@@ -353,6 +355,33 @@ def frontend_decision_response(start_command: str = "vite preview") -> str:
     })
 
 
+def feasibility_review_response() -> str:
+    return json.dumps({
+        "status": "INSUFFICIENT",
+        "reason": "The repository evidence does not authorize all Docker requirements.",
+        "repository_supported_decisions": [{
+            "decision": "application_port",
+            "value": "5001",
+            "basis": "The application listener is explicitly represented in repository evidence.",
+            "provenance": ["backend/src/server.js"],
+        }],
+        "deterministic_derivations": [],
+        "model_proposals": [{
+            "decision": "base_image",
+            "value": "node:20-alpine",
+            "status": "PROPOSED",
+            "requires_authorization": True,
+            "basis": "The runtime evidence suggests a compatible image family, but does not authorize an exact image.",
+        }],
+        "minimum_additional_evidence": [{
+            "requirement": "exact Docker base image",
+            "reason": "No exact repository or approved-policy base image is supplied.",
+            "sources_to_check": ["current repository configuration"],
+        }],
+        "requested_user_action": "Supply authoritative Docker requirements and re-run Dockerize.",
+    })
+
+
 @pytest.mark.asyncio
 async def test_docker_decision_contract_accepts_ready_with_strict_json_validation(tmp_path: Path):
     node_backend(tmp_path)
@@ -425,11 +454,9 @@ async def test_missing_application_port_is_omitted_and_repair_removes_model_port
     provider = SequencedProvider()
     decision = await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
 
-    assert decision.status == "ready"
-    assert "port" not in decision.components[0]
-    assert "port" not in decision.compose["services"][0]
-    assert "target_port" not in decision.compose["services"][0]
-    assert len(provider.call_history) == 2
+    assert decision.status == "NEEDS_EVIDENCE"
+    assert "PORT" in decision.raw["reason"]
+    assert provider.call_history == []
     repository.storage.close()
 
 
@@ -444,12 +471,10 @@ async def test_bounded_repair_cannot_introduce_port_without_evidence(tmp_path: P
         provider, "devops-qwen:latest",
     ).decide(DockerContextBuilder(repository).build(tmp_path, ["backend"]))
 
-    assert decision.status == "ready"
-    assert "port" not in decision.components[0]
-    assert "port" not in decision.compose["services"][0]
-    assert "target_port" not in decision.compose["services"][0]
-    assert decision.repair_attempted is True
-    assert len(provider.call_history) == 2
+    assert decision.status == "NEEDS_EVIDENCE"
+    assert "PORT" in decision.raw["reason"]
+    assert decision.repair_attempted is False
+    assert provider.call_history == []
     repository.storage.close()
 
 
@@ -468,11 +493,9 @@ async def test_missing_application_port_does_not_render_expose_or_compose_mappin
         model="devops-qwen:latest",
     ).execute(tmp_path, components=["backend"], compose=True, compose_action="generate")
 
-    assert result.success, result.message
-    artifacts = {item["path"]: item["content"] for item in result.data["rendered_artifacts"]}
-    assert "EXPOSE" not in artifacts[str(tmp_path / "backend/Dockerfile")]
-    assert "ports:" not in artifacts[str(tmp_path / "docker-compose.yml")]
-    assert result.data["files_written"] == 0
+    assert result.status == "NEEDS_EVIDENCE"
+    assert "PORT" in result.message
+    assert not (tmp_path / "backend/Dockerfile").exists()
     repository.storage.close()
 
 
@@ -550,7 +573,9 @@ async def test_known_runtime_gap_stops_docker_decision_and_artifacts_after_analy
     write(tmp_path / "frontend/package-lock.json", "{}")
     write(tmp_path / "frontend/src/main.js", "console.log('frontend');\n")
     repository = repository_for(tmp_path)
-    provider = MockProvider(responses={"project": frontend_decision_response()})
+    provider = MockProvider(responses={
+        "DOCKER_FEASIBILITY_REVIEW_INPUT": feasibility_review_response(),
+    })
 
     result = await DockerAgent(
         dry_run=True,
@@ -562,10 +587,52 @@ async def test_known_runtime_gap_stops_docker_decision_and_artifacts_after_analy
     assert not result.success
     assert result.status == "NEEDS_EVIDENCE"
     assert "frontend: exact production start command" in result.message
-    assert len(provider.call_history) == 0
+    assert len(provider.call_history) == 1
+    assert result.data["feasibility_model_called"] is True
+    assert result.data["model_called"] is False
+    assert result.data["feasibility_review"]["status"] == "INSUFFICIENT"
     assert not (tmp_path / "backend/Dockerfile").exists()
     assert not (tmp_path / "frontend/Dockerfile").exists()
     assert not (tmp_path / "docker-compose.yml").exists()
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_preflight_reviews_current_evidence_without_authorizing_model_proposals(tmp_path: Path, capsys):
+    node_backend_without_port(tmp_path)
+    write(tmp_path / "backend/.env", "PORT=\nMONGO_URI=mongodb://secret\n")
+    repository = repository_for(tmp_path)
+    provider = MockProvider(responses={
+        "DOCKER_FEASIBILITY_REVIEW_INPUT": feasibility_review_response(),
+    })
+
+    result = await DockerAgent(
+        dry_run=True,
+        repository=repository,
+        provider=provider,
+        model="devops-qwen:latest",
+    ).execute(tmp_path, components=["backend"], compose=True, compose_action="generate")
+
+    assert result.status == "NEEDS_EVIDENCE"
+    assert result.data["model_called"] is False
+    assert result.data["feasibility_model_called"] is True
+    assert result.data["feasibility_review"]["status"] == "INSUFFICIENT"
+    assert result.data["feasibility_review"]["model_output_is_repository_truth"] is False
+    assert result.data["decision"]["missing_requirements"]
+    assert len(provider.call_history) == 1
+    prompt = provider.call_history[0].prompt
+    assert "DOCKER_FEASIBILITY_REVIEW_INPUT" in prompt
+    assert "mongodb://secret" not in prompt
+    assert not (tmp_path / "backend/Dockerfile").exists()
+    assert not (tmp_path / "docker-compose.yml").exists()
+    from sohail_agent_cli.main import _print_docker_blocked
+
+    _print_docker_blocked(result, dry_run=True, stage="Evidence-bound decision validation")
+    output = capsys.readouterr().out
+    assert "Docker Evidence Review:" in output
+    assert "Model proposals — NOT REPOSITORY TRUTH:" in output
+    assert "Ollama feasibility review was called: YES" in output
+    assert "mongodb://secret" not in output
     repository.storage.close()
 
 
@@ -599,8 +666,12 @@ async def test_malformed_evidence_target_does_not_claim_acquisition_started(tmp_
 
     output = capsys.readouterr().out
     assert result.status == "NEEDS_EVIDENCE"
-    assert "Deterministic evidence preflight blocked before Ollama" in output
-    assert "Dockerize evidence acquisition not started" in output
+    assert "Ollama feasibility review completed" in output
+    assert "Deterministic evidence preflight remains authoritative" in output
+    acquisition = result.data["evidence_acquisition"]
+    assert len(acquisition) == 1
+    assert acquisition[0]["scope"] == "docker"
+    assert "malformed target proposal" not in acquisition[0]["inspected_targets"]
     assert "Acquisition started" not in output
     assert "Deterministic evidence inspection completed" not in output
     repository.storage.close()
@@ -885,6 +956,40 @@ async def test_context_builder_retrieves_latest_snapshot_without_secret_values(t
     prompt = context.prompt()
     assert "MONGO_URI" in prompt
     assert "mongodb://secret" not in prompt
+    assert all("value" not in item for item in context.components[0]["environment"])
+    repository.storage.close()
+
+
+@pytest.mark.asyncio
+async def test_dockerize_setup_blocker_stops_before_ollama(tmp_path: Path):
+    node_backend(tmp_path)
+    repository = repository_for(tmp_path)
+    context = DockerContextBuilder(repository).build(tmp_path, ["backend"])
+    context = replace(
+        context,
+        infrastructure={
+            **context.infrastructure,
+            "project_setup": {
+                "status": "NEEDS_EVIDENCE",
+                "requirements": [{
+                    "name": "PORT",
+                    "component": "backend",
+                    "status": "NEEDS_EVIDENCE",
+                    "blocks": ["dockerfile"],
+                    "message": "backend application port cannot be selected without verified evidence",
+                    "value": None,
+                }],
+            },
+        },
+    )
+    provider = MockProvider(responses={})
+
+    decision = await DockerDecisionEngine(provider, "devops-qwen:latest").decide(context)
+
+    assert decision.status == "NEEDS_EVIDENCE"
+    assert decision.model_called is False
+    assert "application port cannot be selected" in decision.raw["reason"]
+    assert provider.call_history == []
     repository.storage.close()
 
 

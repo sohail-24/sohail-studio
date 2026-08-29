@@ -1,15 +1,17 @@
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 import backend.main as api
 from core.cli_bridge import CliBridge
 from sohail_agent_cli.agents.cicd_agent import CicdAgent
 from sohail_agent_cli.agents.k8s_agent import K8sAgent
-from sohail_agent_cli.inspection import ProjectIntelligence
-from sohail_agent_cli.inspection import DeepInspector
-from sohail_agent_cli.inspection import repo_analysis_from_intelligence
-import pytest
+from sohail_agent_cli.inspection import (
+    DeepInspector,
+    ProjectIntelligence,
+    repo_analysis_from_intelligence,
+)
 
 
 def test_terminal_project_selection_validates_without_running_inspection(tmp_path: Path):
@@ -83,6 +85,7 @@ def test_dashboard_treats_completed_runs_as_terminal_and_removes_inspect_from_ne
     assert 'if (state.agentRunStarting) return;' in source
     assert 'state.agentInspectionReady ? ["dockerize", "kubernetes", "cicd"]' in source
     assert 'data-agent-reinspect' in source
+    assert '["Re-inspect", inspectionStatus === "COMPLETE" ? "CURRENT" : "WAITING", "project-setup"]' in source
     assert 'state.agentInspectionReady = true' in source
     assert 'const operationWorkspace = inspectionRunMode ? ""' in source
     assert 'inspection_run_id: operation === "inspect" ? "" : state.agentInspectionRunId' in source
@@ -99,6 +102,8 @@ def test_dashboard_opens_a_persisted_intelligence_docker_planner_without_auto_ru
     assert 'docker_plan: dockerPlan || {}' in source
     assert 'operation?.id === "dockerize" ? "Continue"' in source
     assert 'state.selectedAgentOperation === "inspect" && state.agentCategory === "inspect"' in source
+    assert 'state.selectedAgentOperation === "inspect" && state.agentInspectionReady && state.agentContext' in source
+    assert 'nextSecondary + \'<button type="button" class="secondary-button" data-agent-reinspect>Re-inspect</button>\'' not in source
     assert "Preview without writing files" in source
 
 
@@ -107,13 +112,30 @@ def test_dashboard_intelligence_summary_uses_persisted_evidence_sections():
 
     for label in (
         "Project path",
-        "Persistence",
-        "Architecture / components",
+        "Persisted inspection snapshot",
+        "Project architecture",
         "Technology stack",
-        "Database",
-        "Deployment intelligence",
-        "Network / ports",
-        "Inspection quality",
+        "Data services",
+        "Configuration",
+        "Project setup / evidence resolution",
+        "project_setup",
+        "Re-inspect after configuration",
+        "Project Command Center",
+        "Next recommended action",
+        "Evidence health",
+        "View inspection details",
+        "data-copy-value",
+        "data-agent-start-setup",
+        "aggregateCommandCenterServices",
+        "immediate_requirements",
+        "additional_requirements",
+        "Additional configuration (",
+        "Location needs evidence",
+        "Copy immediate setup commands",
+        "Deployment status",
+        "Existing infrastructure",
+        "Evidence gaps and contradictions",
+        "Application, proxy, service, container, and documented ports remain distinct",
         "files.length",
         "evidence.length",
         "context.evidence_counts",
@@ -170,11 +192,14 @@ def test_dashboard_uses_folder_first_categories_and_persisted_intelligence():
     source = Path("dashboard/app.js").read_text(encoding="utf-8")
 
     assert "Select Project Folder" in source
-    assert 'data-agent-category="inspect"' in source
-    assert 'data-agent-category="build"' in source
+    assert "Inspect project →" in source
+    assert "function inspectionLoadingView()" in source
+    assert 'if (state.selectedAgentOperation === "inspect" && state.agentInspectionReady && state.agentContext) return agentIntelligenceWorkspace();' in source
+    assert 'data-agent-category="inspect"' not in source
+    assert "Complete inspection is running in this Terminal." not in source
     assert "/api/agent/intelligence" in source
     assert "inspection_persisted" in source
-    assert 'void startAgentOperation("inspect")' in source
+    assert 'await startAgentOperation("inspect")' in source
     assert "agentInspectionActive" in source
-    assert 'const operationWorkspace = inspectionRunMode ? ""' in source
+    assert "agent-inspection-loading" in source
     assert 'data-agent-choice="component"' not in source

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -114,6 +115,54 @@ def test_inspection_target_accepts_existing_safe_relative_path(tmp_path: Path):
 
     assert inspection_target.validate(tmp_path) == target.resolve()
     assert inspection_target.to_dict()["relative_path"] == "config/application.yml"
+
+
+def test_docker_evidence_acquisition_is_bounded_and_never_calls_full_inspection(tmp_path: Path):
+    (tmp_path / "README.md").write_text("Run the service with the documented command.\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("Flask==3.0.0\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("app.run(host='0.0.0.0', port=5000)\n", encoding="utf-8")
+    baseline = DeepInspector().inspect(tmp_path)
+
+    class TargetOnlyInspector(DeepInspector):
+        def __init__(self):
+            super().__init__()
+            self.targets = []
+
+        def inspect(self, *_args, **_kwargs):
+            raise AssertionError("Docker-scoped acquisition reran full inspection")
+
+        def inspect_targets(self, root, targets):
+            self.targets = list(targets)
+            return super().inspect_targets(root, targets)
+
+    class RecordingRepository:
+        def __init__(self):
+            self.persisted = []
+
+        def persist(self, intelligence):
+            self.persisted.append(intelligence)
+
+    repository = RecordingRepository()
+    inspector = TargetOnlyInspector()
+    result = EvidenceAcquisitionService(repository, inspector=inspector).acquire_docker_evidence(
+        tmp_path,
+        baseline,
+        SimpleNamespace(components=baseline.components),
+        ["backend: exact production start command", "backend: exact Docker base image"],
+    )
+
+    assert result.scope == "docker"
+    assert result.verification_performed is True
+    assert {Path(path).name for path in result.inspected_targets} >= {
+        "README.md", "requirements.txt", "app.py",
+    }
+    assert result.requested_requirements == (
+        "backend: exact production start command",
+        "backend: exact Docker base image",
+    )
+    assert inspector.targets
+    assert result.candidate_targets == result.inspected_targets
+    assert repository.persisted == []
 
 
 @pytest.mark.parametrize(

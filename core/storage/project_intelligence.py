@@ -279,7 +279,19 @@ class ProjectIntelligenceRepository:
                 select(*port_select).where(project_ports.c.run_id == run_id)
             ).mappings().all()
             if port_rows and "component" in port_columns:
-                intelligence.ports = [dict(row) for row in port_rows]
+                summary_ports = list(intelligence.ports)
+                hydrated_ports = []
+                for row in port_rows:
+                    row_data = dict(row)
+                    matches = [
+                        item for item in summary_ports
+                        if item.get("component") == row_data.get("component")
+                        and item.get("port_type") == row_data.get("port_type")
+                        and item.get("service_name") == row_data.get("service_name")
+                        and item.get("port") == row_data.get("port")
+                    ]
+                    hydrated_ports.append({**row_data, **(matches[0] if matches else {})})
+                intelligence.ports = hydrated_ports
 
             evidence_rows = connection.execute(
                 select(project_evidence).where(project_evidence.c.run_id == run_id)
@@ -296,19 +308,20 @@ class ProjectIntelligenceRepository:
                     )
                     for row in evidence_rows
                 ]
-                environment = []
+                environment = list(intelligence.environment_variables)
                 for evidence in intelligence.evidence:
                     if evidence.evidence_type in {"environment_variable", "secret"}:
-                        environment.append({
+                        item = {
                             "name": evidence.key,
                             "key": evidence.key,
                             "value": evidence.value,
                             "sensitive": evidence.evidence_type == "secret",
                             "source_file": evidence.source_file,
                             "confidence": evidence.confidence,
-                        })
-                if environment:
-                    intelligence.environment_variables = environment
+                        }
+                        if not any(existing.get("name") == item["name"] and existing.get("source_file") == item["source_file"] for existing in environment):
+                            environment.append(item)
+                intelligence.environment_variables = environment
 
     def _persist(self, intelligence: ProjectIntelligence) -> PersistedInspection:
         now = datetime.now(timezone.utc)

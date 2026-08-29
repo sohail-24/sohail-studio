@@ -12,7 +12,6 @@ from typing import Any, Iterable
 
 from .models import Evidence, EvidenceSourceType, ProjectIntelligence
 
-
 MAVEN_ARTIFACT_RULE = "maven.executable-artifact.spring-boot.v1"
 MAVEN_PACKAGING_RULE = "maven.default-packaging.jar.v1"
 MAVEN_FINAL_NAME_RULE = "maven.default-final-name.v1"

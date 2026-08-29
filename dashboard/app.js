@@ -299,6 +299,12 @@ function runView() {
 
 function terminalView() {
   if (!state.terminalEngine) return terminalEngineChooser();
+  if (state.terminalEngine === "agent" && state.agentProjectValidated && state.agentCategory === "inspect") {
+    if (state.agentInspectionActive || ["Starting", "Running", "Loading stored intelligence"].includes(state.agentStatus)) {
+      return inspectionLoadingView();
+    }
+      if (state.selectedAgentOperation === "inspect" && state.agentInspectionReady && state.agentContext) return agentIntelligenceWorkspace();
+  }
   const engineTabs = `<div class="terminal-engine-tabs" role="tablist" aria-label="Terminal engine"><button class="terminal-engine-tab ${state.terminalEngine === "pty" ? "active" : ""}" data-terminal-engine="pty">Raw PTY</button><button class="terminal-engine-tab ${state.terminalEngine === "agent" ? "active" : ""}" data-terminal-engine="agent">Sohail-Agent</button></div>`;
   const body = state.terminalEngine === "agent" ? agentTerminalView() : rawTerminalView();
   const intro = state.terminalEngine === "agent" && !state.agentProjectValidated
@@ -316,51 +322,15 @@ function rawTerminalView() {
 }
 
 function agentProjectChooser() {
-  return `<section class="agent-project-start panel"><div class="agent-project-start-icon">⌂</div><div><span class="panel-kicker">Local project</span><h2>Select Project Folder</h2><p>Use an absolute local path. Sohail Studio will inspect it only when you choose Inspect.</p></div><form id="agent-project-form" class="agent-project-form"><label class="field-label" for="agent-project-input">Project path</label><div class="agent-project-input-row"><input class="field-input" id="agent-project-input" value="${escapeHtml(state.agentInputs.target)}" placeholder="/Users/sohal/Projects/my-app" autocomplete="off" required /><button class="primary-button" type="submit">Continue →</button></div></form>${state.agentOutput ? `<p class="agent-project-error">${escapeHtml(state.agentOutput)}</p>` : ""}</section>`;
+  return `<section class="agent-project-start panel"><div class="agent-project-start-icon">⌂</div><div><span class="panel-kicker">Local project</span><h2>Select Project Folder</h2><p>Choose a local path. Inspect runs the real repository inspection and opens Project Intelligence when the persisted snapshot is ready.</p></div><form id="agent-project-form" class="agent-project-form"><label class="field-label" for="agent-project-input">Project path</label><div class="agent-project-input-row"><input class="field-input" id="agent-project-input" value="${escapeHtml(state.agentInputs.target)}" placeholder="/Users/sohal/Projects/my-app" autocomplete="off" required /><button class="primary-button" type="submit">Inspect project →</button></div></form>${state.agentOutput ? `<p class="agent-project-error">${escapeHtml(state.agentOutput)}</p>` : ""}</section>`;
 }
 
-function agentCategoryChooser() {
-  return `<section class="agent-category-shell"><div class="agent-project-context"><span class="panel-kicker">Selected project</span><strong>${escapeHtml(state.agentInputs.target)}</strong><button type="button" class="quiet-button" data-agent-change-project>Change folder</button></div><div class="page-intro agent-category-intro"><div class="eyebrow">Engineering workflow</div><h1>What would you like to do?</h1><p>Start with a complete inspection, then create supported engineering files from the stored result.</p></div><div class="agent-category-grid"><button type="button" class="agent-category-card inspect" data-agent-category="inspect"><span class="agent-category-icon">⌘</span><strong>Inspect</strong><span>Complete repository inspection and unlock Dockerize, Kubernetes, and CI/CD.</span><span class="agent-category-arrow">→</span></button><button type="button" class="agent-category-card build" data-agent-category="build"><span class="agent-category-icon">✦</span><strong>Build</strong><span>Create a Plan or Blueprint for future implementation work.</span><span class="agent-category-arrow">→</span></button></div></section>`;
+function inspectionLoadingView() {
+  const output = state.agentOutput || "Waiting for the real inspection process…";
+  return `<section class="agent-inspection-loading panel"><div class="empty-orbit">⌘</div><span class="panel-kicker">Live inspection</span><h2>Inspecting project</h2><p>Reading repository evidence and persisting the verified Project Intelligence snapshot.</p><div class="agent-inspection-loading-status"><span class="status-dot"></span><strong>${escapeHtml(state.agentStatus)}</strong></div><pre class="agent-output">${escapeHtml(output)}</pre><div class="button-row"><button type="button" class="secondary-button" data-terminal-engine="pty">Open Raw PTY</button></div></section>`;
 }
 
-function agentInspectionSummary() {
-  const context = state.agentContext;
-  if (!context) return "";
-  const components = Array.isArray(context.components) ? context.components : [];
-  const ports = Array.isArray(context.ports) ? context.ports : [];
-  const files = Array.isArray(context.files) ? context.files : [];
-  const evidence = Array.isArray(context.evidence) ? context.evidence : [];
-  const runtimes = (context.runtimes || []).map((item) => [item.runtime, item.version].filter(Boolean).join(" ")).filter(Boolean);
-  const frameworks = Array.isArray(context.frameworks) ? context.frameworks : [];
-  const patterns = (context.verified_patterns || []).map((item) => item.category || item.pattern_id).filter(Boolean);
-  const counts = context.evidence_counts || {};
-  const portGroups = new Map();
-  ports.forEach((item) => {
-    const group = item.component || "repository";
-    if (!portGroups.has(group)) portGroups.set(group, []);
-    const kind = item.port_type || item.evidence_type || "observed";
-    const value = item.port ?? item.value;
-    if (value !== undefined && value !== null) portGroups.get(group).push(`${kind}: ${value}`);
-  });
-  const portRows = [...portGroups.entries()].map(([group, values]) => `<div class="agent-intelligence-row"><strong>${escapeHtml(group)}</strong><span>${escapeHtml([...new Set(values)].join(" · "))}</span></div>`).join("") || `<p class="agent-intelligence-empty">No port evidence detected.</p>`;
-  const componentCards = components.map((component) => {
-    const name = component.name || component.path || "Component";
-    const componentPorts = ports.filter((item) => item.component === name || item.component === component.path);
-    const details = [component.framework, component.package_manager, ...(component.runtimes || []).map((item) => [item.runtime, item.version].filter(Boolean).join(" "))].filter(Boolean);
-    const componentEvidence = Array.isArray(component.evidence) ? component.evidence.slice(0, 4) : [];
-    return `<article class="agent-component-card"><div><span class="panel-kicker">${escapeHtml(component.kind || "component")}</span><h4>${escapeHtml(name)}</h4></div>${details.length ? `<p>${escapeHtml(details.join(" · "))}</p>` : ""}${componentPorts.length ? `<p>Ports: ${escapeHtml(componentPorts.map((item) => `${item.port_type || "observed"} ${item.port ?? item.value}`).join(" · "))}</p>` : ""}${componentEvidence.length ? `<small>Evidence: ${escapeHtml(componentEvidence.join(", "))}</small>` : ""}</article>`;
-  }).join("") || `<p class="agent-intelligence-empty">No components detected.</p>`;
-  const deployment = [
-    ["Docker", context.has_docker ? "Detected" : "Not detected", context.docker?.dockerfiles || []],
-    ["Kubernetes", context.has_kubernetes ? "Detected" : "Not detected", context.kubernetes?.files || []],
-    ["CI/CD", context.has_ci_cd ? (context.ci_cd?.platforms || []).join(", ") || "Detected" : "Not detected", context.ci_cd_files || []],
-  ].map(([label, status, filesForStatus]) => `<div class="agent-intelligence-status"><span>${label}</span><strong>${escapeHtml(status)}</strong>${filesForStatus.length ? `<small>${escapeHtml(filesForStatus.join(", "))}</small>` : ""}</div>`).join("");
-  const stack = [...new Set([...runtimes, ...frameworks, ...(context.package_managers || []), ...(context.languages || [])])];
-  return `<section class="agent-inspection-summary"><div class="agent-intelligence-heading"><div><span class="panel-kicker">Verified intelligence</span><h3>Project inspected successfully</h3><p>${escapeHtml(context.name || context.project || "Project intelligence is ready")}</p></div><button type="button" class="quiet-button" data-agent-reinspect>Re-inspect project</button></div><div class="agent-summary-grid"><div><span>Project path</span><strong>${escapeHtml(context.root_path || context.path || state.agentInputs.target)}</strong></div><div><span>Inspection run</span><strong>${escapeHtml(state.agentInspectionRunId || "Stored inspection")}</strong></div><div><span>Inspected at</span><strong>${escapeHtml(context.inspected_at || "Recorded")}</strong></div><div><span>Persistence</span><strong>PostgreSQL · verified</strong></div></div><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Architecture / components</h4><span>${components.length} detected</span></div><div class="agent-component-grid">${componentCards}</div></div><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Technology stack</h4><span>Repository evidence</span></div><div class="agent-chip-list">${stack.length ? stack.map((item) => `<span>${escapeHtml(item)}</span>`).join("") : `<span>None detected</span>`}</div></div><div class="agent-intelligence-columns"><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Database</h4><span>${(context.databases || []).length ? "Detected" : "Not detected"}</span></div><p class="agent-intelligence-value">${escapeHtml((context.databases || []).join(", ") || "Not detected")}</p></div><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Deployment intelligence</h4><span>Verified state</span></div><div class="agent-deployment-grid">${deployment}</div></div></div><div class="agent-intelligence-columns"><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Network / ports</h4><span>Evidence types preserved</span></div><div class="agent-intelligence-list">${portRows}</div></div><div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Inspection quality</h4><span>${files.length} files · ${evidence.length} evidence</span></div><div class="agent-quality-grid"><div><span>Files inspected</span><strong>${files.length}</strong></div><div><span>Evidence collected</span><strong>${evidence.length}</strong></div><div><span>High confidence</span><strong>${counts.high ?? 0}</strong></div><div><span>Medium confidence</span><strong>${counts.medium ?? 0}</strong></div><div><span>Low confidence</span><strong>${counts.low ?? 0}</strong></div></div></div></div>${patterns.length ? `<div class="agent-intelligence-section"><div class="agent-intelligence-section-header"><h4>Verified engineering patterns</h4><span>Deterministic</span></div><div class="agent-chip-list">${patterns.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div></div>` : ""}</section>`;
-}
-
-function agentIntelligenceWorkspace() {
-  const context = state.agentContext;
+function agentAdvancedInspectionDetails(context) {
   if (!context) return "";
   const components = Array.isArray(context.components) ? context.components : [];
   const ports = Array.isArray(context.ports) ? context.ports : [];
@@ -377,9 +347,10 @@ function agentIntelligenceWorkspace() {
     const sourceFiles = Array.isArray(component.evidence) ? component.evidence.slice(0, 3) : [];
     return `<div class="agent-architecture-row"><div><span class="panel-kicker">${escapeHtml(component.role || component.kind || "component")}</span><h4>${escapeHtml(name)}</h4></div><div class="agent-architecture-facts"><strong>${escapeHtml(facts.join(" · ") || "Evidence recorded")}</strong>${componentPorts ? `<span>Ports: ${escapeHtml(componentPorts)}</span>` : ""}${sourceFiles.length ? `<small>Sources: ${escapeHtml(sourceFiles.join(", "))}</small>` : ""}</div></div>`;
   });
-  for (const database of context.databases || []) {
-    const databasePorts = portText(database);
-    architecture.push(`<div class="agent-architecture-row"><div><span class="panel-kicker">data service</span><h4>${escapeHtml(database)}</h4></div><div class="agent-architecture-facts"><strong>Detected database</strong>${databasePorts ? `<span>Ports: ${escapeHtml(databasePorts)}</span>` : ""}</div></div>`);
+  for (const service of context.data_services || []) {
+    const serviceName = service.service_type || "data service";
+    const servicePorts = portText(service.component || serviceName);
+    architecture.push(`<div class="agent-architecture-row"><div><span class="panel-kicker">data service</span><h4>${escapeHtml(serviceName)}</h4></div><div class="agent-architecture-facts"><strong>${escapeHtml(service.status || service.role || "Evidence candidate")}</strong>${service.role ? `<span>Role: ${escapeHtml(service.role)}</span>` : ""}${service.client_or_library ? `<span>Client: ${escapeHtml(service.client_or_library)}</span>` : ""}${servicePorts ? `<span>Ports: ${escapeHtml(servicePorts)}</span>` : ""}<small>Evidence: ${escapeHtml(service.source_file || "persisted source")}</small></div></div>`);
   }
   const technologyGroups = [
     ["Languages", context.languages || []],
@@ -401,7 +372,162 @@ function agentIntelligenceWorkspace() {
   });
   const portRows = [...groupedPorts.entries()].map(([name, values]) => `<span><strong>${escapeHtml(name)}</strong> ${escapeHtml([...new Set(values)].join(" · "))}</span>`).join("") || `<span>No port evidence detected.</span>`;
   const sourceFiles = [...new Set(evidence.map((item) => item.source_file).filter(Boolean))].slice(0, 16);
-  return `<section class="agent-intelligence-workspace"><header class="agent-intelligence-hero"><div><span class="panel-kicker">Project Intelligence</span><h3>${escapeHtml(context.name || context.project || "Project")}</h3><p>${escapeHtml(context.root_path || context.path || state.agentInputs.target)}</p></div><div class="agent-intelligence-hero-actions"><span class="agent-inspection-status">● Inspected successfully</span><button type="button" class="quiet-button" data-agent-reinspect>Re-inspect</button></div><div class="agent-intelligence-meta"><span>Inspected ${escapeHtml(context.inspected_at || "time recorded")}</span><span>PostgreSQL snapshot</span><details><summary>Inspection details</summary><p>Run ${escapeHtml(state.agentInspectionRunId || context.inspection_run_id || "stored snapshot")}</p><p>Verified patterns: ${escapeHtml(patterns.join(", ") || "none detected")}</p><p>Evidence sources: ${escapeHtml(sourceFiles.join(", ") || "recorded in snapshot")}</p></details></div></header><section class="agent-intelligence-block agent-architecture-block"><div class="agent-block-heading"><h4>Project architecture</h4><span>${architecture.length} verified areas</span></div><div class="agent-architecture-list">${architecture.join("") || `<p class="agent-intelligence-empty">No components detected.</p>`}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Technology stack</h4><span>Persisted repository evidence</span></div><div class="agent-technology-groups">${technologyGroups}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Deployment status</h4><span>Detected configuration</span></div><div class="agent-deployment-strip">${deployment}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Network</h4><span>Port evidence types preserved</span></div><div class="agent-port-lines">${portRows}</div></section><footer class="agent-intelligence-quality"><span><strong>${files.length}</strong> files inspected</span><span><strong>${evidence.length}</strong> evidence signals</span><span><strong>${counts.high ?? 0}</strong> high confidence</span><span><strong>${counts.medium ?? 0}</strong> medium confidence</span><span><strong>${counts.low ?? 0}</strong> low confidence</span></footer></section>`;
+  const dataServices = (context.data_services || []).map((service) => `<div class="agent-fact-card"><strong>${escapeHtml(service.service_type || "Data service")}</strong><span>${escapeHtml(service.status || "unknown status")} · ${escapeHtml(service.role || "role not classified")} · ${escapeHtml(service.client_or_library || "client not identified")}</span><small>${escapeHtml(service.component || "repository")} · ${escapeHtml((service.configuration_variables || []).join(", ") || "no configuration variable verified")}</small><small>Confidence: ${escapeHtml(service.confidence || "unknown")} · Basis: ${escapeHtml((service.evidence_basis || []).join(", ") || "not recorded")}</small></div>`).join("") || `<p class="agent-intelligence-empty">No data service verified.</p>`;
+  const configuration = (context.environment_variables || []).map((item) => {
+    const status = item.value_status || (item.sensitive && item.value === "REDACTED" ? "AVAILABLE_REDACTED" : item.value ? "AVAILABLE" : "NEEDS_EVIDENCE");
+    return `<div class="agent-fact-card"><strong>${escapeHtml(item.name || item.key || "Configuration variable")}</strong><span>${escapeHtml(status)} · ${escapeHtml(item.role || "role unknown")}</span><small>${escapeHtml((item.source_files || [item.source_file]).filter(Boolean).join(", "))} · ${item.required ? "Required when evidenced" : "Optional or defaulted when evidenced"}</small></div>`;
+  }).join("") || `<p class="agent-intelligence-empty">No configuration variables verified.</p>`;
+  const projectSetup = context.project_setup || {};
+  const setupRequirements = (projectSetup.requirements || []).map((item) => `<div class="agent-finding-card"><strong>${escapeHtml(item.name || "Configuration requirement")} · ${escapeHtml(item.value_status || "NEEDS_EVIDENCE")}</strong><span>${escapeHtml(item.message || "Configuration evidence is required.")}</span><small>${escapeHtml(item.component || "repository")} · ${escapeHtml((item.sources || []).map((source) => source.source_file).filter(Boolean).join(", ") || "source not recorded")} · ${item.sensitive ? "Sensitive value is never displayed" : "Value is not invented"}</small><small>${item.blocks?.length ? `Blocks: ${escapeHtml(item.blocks.join(", "))}` : "Downstream workflow impact is not yet blocked"} · Re-inspect after configuration</small></div>`).join("");
+  const setupTemplates = (projectSetup.templates || []).map((template) => `<div class="agent-fact-card"><strong>Safe ${escapeHtml(template.file || ".env")} template · ${escapeHtml(template.component || "repository")}</strong><span>${escapeHtml(template.directory || ".")}</span><pre>${escapeHtml(template.content || "")}</pre><small>${escapeHtml((template.guidance || []).join(" · "))}</small></div>`).join("");
+  const setup = setupRequirements || setupTemplates ? `${setupRequirements}${setupTemplates}` : `<p class="agent-intelligence-empty">No actionable setup requirements recorded. Re-inspection remains the source of truth after configuration changes.</p>`;
+  const infrastructure = (context.infrastructure || []).map((item) => `<div class="agent-fact-card"><strong>${escapeHtml(item.type || "Infrastructure")}</strong><span>${escapeHtml(item.status || "unknown")}</span><small>${escapeHtml(item.path || "source not recorded")}</small></div>`).join("") || `<p class="agent-intelligence-empty">No infrastructure configuration detected.</p>`;
+  const findings = [...(context.evidence_gaps || []), ...(context.contradictions || [])].map((item) => `<div class="agent-finding-card"><strong>${escapeHtml(item.status || (item.kind === "network_port" || item.kind === "command" ? "CONTRADICTORY" : "NEEDS_EVIDENCE"))}</strong><span>${escapeHtml(item.message || item.missing_evidence || item.name || item.kind || "Evidence finding")}</span><small>${escapeHtml(item.source_file || item.component || "Repository-wide")} · ${escapeHtml(item.decision || item.resolution || "review evidence")}</small></div>`).join("") || `<p class="agent-intelligence-empty">No evidence gaps or contradictions recorded.</p>`;
+  return `<section class="agent-intelligence-workspace"><header class="agent-intelligence-hero"><div><span class="panel-kicker">Project Intelligence</span><h3>${escapeHtml(context.name || context.project || "Project")}</h3><p>${escapeHtml(context.root_path || context.path || state.agentInputs.target)}</p></div><div class="agent-intelligence-hero-actions"><span class="agent-inspection-status">● ${escapeHtml(context.intelligence_status || "VERIFIED")}</span><button type="button" class="quiet-button" data-agent-reinspect>Re-inspect</button><button type="button" class="quiet-button" data-agent-open-terminal>Agent terminal</button><button type="button" class="quiet-button" data-terminal-engine="pty">Raw PTY</button></div><div class="agent-intelligence-meta"><span>Inspected ${escapeHtml(context.inspected_at || "time recorded")}</span><span>Persisted inspection snapshot</span><details><summary>Inspection details</summary><p>Run ${escapeHtml(state.agentInspectionRunId || context.inspection_run_id || "stored snapshot")}</p><p>Verified patterns: ${escapeHtml(patterns.join(", ") || "none detected")}</p><p>Evidence sources: ${escapeHtml(sourceFiles.join(", ") || "recorded in snapshot")}</p></details></div></header><section class="agent-intelligence-block agent-architecture-block"><div class="agent-block-heading"><h4>Project architecture</h4><span>${architecture.length} verified areas</span></div><div class="agent-architecture-list">${architecture.join("") || `<p class="agent-intelligence-empty">No components detected.</p>`}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Technology stack</h4><span>Owned by verified components</span></div><div class="agent-technology-groups">${technologyGroups}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Data services</h4><span>Generic service evidence</span></div><div class="agent-fact-grid">${dataServices}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Configuration</h4><span>Values are never invented</span></div><div class="agent-fact-grid">${configuration}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Project setup / evidence resolution</h4><span>${escapeHtml(projectSetup.status || "READY")} · Re-inspection verifies every change</span></div><div class="agent-fact-grid">${setup}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Deployment status</h4><span>Detected configuration</span></div><div class="agent-deployment-strip">${deployment}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Network</h4><span>Application, proxy, service, container, and documented ports remain distinct</span></div><div class="agent-port-lines">${portRows}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Existing infrastructure</h4><span>File presence is not treated as active production</span></div><div class="agent-fact-grid">${infrastructure}</div></section><section class="agent-intelligence-block"><div class="agent-block-heading"><h4>Evidence gaps and contradictions</h4><span>${(context.evidence_gaps || []).length + (context.contradictions || []).length} finding(s)</span></div><div class="agent-fact-grid">${findings}</div></section><footer class="agent-intelligence-quality"><span><strong>${files.length}</strong> files inspected</span><span><strong>${evidence.length}</strong> evidence signals</span><span><strong>${counts.high ?? 0}</strong> high confidence</span><span><strong>${counts.medium ?? 0}</strong> medium confidence</span><span><strong>${counts.low ?? 0}</strong> low confidence</span></footer></section>`;
+}
+
+function commandCenterStatusLabel(status) {
+  const labels = {
+    COMPLETE: "Complete",
+    ACTION_REQUIRED: "Action required",
+    BLOCKED: "Blocked",
+    NOT_STARTED: "Not started",
+    READY: "Ready",
+    WAITING: "Waiting",
+    CURRENT: "Current",
+    NEEDS_EVIDENCE: "Action required",
+    CONTRADICTORY: "Review conflict",
+    AMBIGUOUS: "Review required",
+    VERIFIED: "Complete",
+    PARTIALLY_VERIFIED: "Partially verified",
+  };
+  return labels[status] || String(status || "Unknown").replaceAll("_", " ");
+}
+
+function commandCenterStatusClass(status) {
+  return String(status || "unknown").toLowerCase().replaceAll("_", "-");
+}
+
+function aggregateCommandCenterServices(context) {
+  const groups = new Map();
+  for (const service of context.data_services || []) {
+    const key = String(service.service_type || "data-service");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(service);
+  }
+  return [...groups.values()].map((records) => {
+    const first = records[0];
+    const statuses = new Set(records.map((record) => String(record.status || "").toUpperCase()));
+    const status = statuses.has("CONTRADICTORY")
+      ? "CONTRADICTORY"
+      : statuses.has("VERIFIED") && (statuses.has("NEEDS_EVIDENCE") || statuses.has("AMBIGUOUS"))
+        ? "PARTIALLY_VERIFIED"
+        : statuses.has("VERIFIED")
+          ? "VERIFIED"
+          : statuses.has("AMBIGUOUS")
+            ? "AMBIGUOUS"
+            : "NEEDS_EVIDENCE";
+    return {
+      service_type: first.service_type || "Data service",
+      components: [...new Set(records.map((record) => record.component).filter(Boolean))],
+      status,
+      clients: [...new Set(records.map((record) => record.client_or_library).filter(Boolean))],
+      configuration: [...new Set(records.flatMap((record) => record.configuration_variables || []))],
+      sources: [...new Set(records.flatMap((record) => record.source_files || [record.source_file]).filter(Boolean))],
+      records,
+    };
+  });
+}
+
+function safeAdvancedValue(value, key = "") {
+  if (key === "value" || /(?:uri|secret|token|password|credential)/i.test(key)) return "REDACTED";
+  if (Array.isArray(value)) return value.map((item) => safeAdvancedValue(item, key));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [childKey, safeAdvancedValue(childValue, childKey)]));
+  }
+  return value;
+}
+
+function renderAdvancedEvidence(context) {
+  const evidence = (context.evidence || []).map((item) => {
+    const safeValue = item.evidence_type === "secret" ? "REDACTED" : safeAdvancedValue(item.value, "value");
+    return '<div class="agent-advanced-record"><strong>' + escapeHtml(item.key || item.evidence_type || "Evidence") + '</strong><span>' + escapeHtml(item.evidence_type || "finding") + ' · ' + escapeHtml(item.confidence || "unknown") + '</span><small>' + escapeHtml(item.source_file || "source not recorded") + (item.line_number ? ':' + escapeHtml(item.line_number) : "") + ' · ' + escapeHtml(item.extraction_method || "deterministic parser") + '</small><code>' + escapeHtml(typeof safeValue === "string" ? safeValue : JSON.stringify(safeValue)) + '</code></div>';
+  }).join("") || '<p class="agent-intelligence-empty">No evidence records persisted.</p>';
+  const relationships = (context.relationships || []).map((item) => '<div class="agent-advanced-record"><strong>' + escapeHtml(item.source || "source") + ' → ' + escapeHtml(item.target || "target") + '</strong><span>' + escapeHtml(item.relationship_type || "relationship") + ' · ' + escapeHtml(item.confidence || "unknown") + '</span><small>' + escapeHtml(item.source_file || "source not recorded") + ' · ' + escapeHtml(item.evidence || "Evidence recorded") + '</small></div>').join("") || '<p class="agent-intelligence-empty">No component relationships persisted.</p>';
+  return '<div class="agent-advanced-records"><details><summary>All evidence records (' + (context.evidence || []).length + ')</summary><div class="agent-advanced-record-grid">' + evidence + '</div></details><details><summary>Component relationships (' + (context.relationships || []).length + ')</summary><div class="agent-advanced-record-grid">' + relationships + '</div></details></div>';
+}
+
+function agentIntelligenceWorkspace() {
+  const context = state.agentContext;
+  if (!context) return "";
+  const projectSetup = context.project_setup || {};
+  const allRequirements = projectSetup.requirements || [];
+  const requirements = projectSetup.immediate_requirements || allRequirements;
+  const additionalRequirements = projectSetup.additional_requirements || [];
+  const templates = projectSetup.immediate_templates || projectSetup.templates || [];
+  const contradictions = context.contradictions || [];
+  const setupBlockers = requirements.filter((item) => (item.blocks || []).includes("dockerfile"));
+  const services = aggregateCommandCenterServices(context);
+  const primaryServices = services.filter((service) => service.clients.length || ["VERIFIED", "PARTIALLY_VERIFIED", "CONTRADICTORY"].includes(service.status));
+  const setupGroups = new Map();
+  requirements.forEach((item) => {
+    const key = item.component || "repository";
+    if (!setupGroups.has(key)) setupGroups.set(key, []);
+    setupGroups.get(key).push(item);
+  });
+  const templatesByComponent = new Map(templates.map((item) => [item.component || "repository", item]));
+  const setupGroupMarkup = [...setupGroups.entries()].map(([component, items]) => {
+    const sensitiveCount = items.filter((item) => item.sensitive).length;
+    const template = templatesByComponent.get(component);
+    const commands = template?.commands || [];
+    const commandMarkup = commands.length
+      ? '<div class="agent-code-action"><pre>' + escapeHtml(commands.join("\n")) + '</pre><button type="button" class="secondary-button" data-copy-value="' + escapeHtml(commands.join("\n")) + '">Copy commands</button></div>'
+      : '<p class="agent-setup-note">No safe copy command was generated because the configuration location is not sufficiently verified.</p>';
+    const templateMarkup = template
+      ? '<div class="agent-safe-template"><div><strong>Safe .env template</strong><button type="button" class="secondary-button" data-copy-value="' + escapeHtml(template.content || "") + '">Copy template</button></div><pre>' + escapeHtml(template.content || "") + '</pre></div>'
+      : "";
+    const itemMarkup = items.map((item) => '<div class="agent-setup-requirement"><div><strong>' + escapeHtml(item.name || "Configuration") + '</strong><span>' + escapeHtml(item.sensitive ? "Sensitive" : "Configuration") + '</span></div><em>' + escapeHtml(item.value_status === "TEMPLATE_ONLY" ? "Template only" : "Configuration required") + '</em><small>' + escapeHtml(item.message || "Provide the value and re-inspect.") + '</small><small>Source: ' + escapeHtml((item.sources || []).map((source) => source.source_file).filter(Boolean).join(", ") || "not recorded") + '</small></div>').join("");
+    const location = template?.location?.status === "VERIFIED" ? template.location.path : "Location needs evidence";
+    return '<details class="agent-setup-group"><summary><span>' + escapeHtml(component) + ' environment</span><em>' + items.length + ' immediate requirement' + (items.length === 1 ? "" : "s") + (sensitiveCount ? ' · ' + sensitiveCount + ' sensitive' : "") + '</em></summary><div class="agent-setup-group-body"><p class="agent-setup-location"><strong>Location</strong> ' + escapeHtml(location) + '</p>' + itemMarkup + commandMarkup + templateMarkup + '</div></details>';
+  }).join("") || '<p class="agent-intelligence-empty">No configuration setup action is currently required.</p>';
+  const additionalMarkup = additionalRequirements.length
+    ? '<details class="agent-additional-configuration"><summary>Additional configuration (' + additionalRequirements.length + ')</summary><div class="agent-additional-list">' + additionalRequirements.map((item) => '<div><strong>' + escapeHtml(item.name || "Configuration") + '</strong><span>' + escapeHtml(item.component || "repository") + '</span><small>' + escapeHtml(item.sensitive ? "Sensitive value required; value is never displayed." : "Evidence recorded, but not needed for the immediate setup action.") + '</small></div>').join("") + '</div></details>'
+    : '';
+  const architectureRows = (context.components || []).map((component) => {
+    const name = component.name || component.path || "Component";
+    const componentRequirements = requirements.filter((item) => item.component === name);
+    const technology = [component.framework, component.language, component.package_manager].filter(Boolean).join(" · ") || "Technology evidence recorded";
+    const status = componentRequirements.length ? "ACTION_REQUIRED" : "COMPLETE";
+    return '<div class="agent-command-architecture-row"><div><span class="panel-kicker">' + escapeHtml(component.role || component.kind || "component") + '</span><h3>' + escapeHtml(name) + '</h3><p>' + escapeHtml(technology) + '</p></div><strong class="agent-status-pill ' + commandCenterStatusClass(status) + '">' + escapeHtml(commandCenterStatusLabel(status)) + '</strong></div>';
+  }).join("") || '<p class="agent-intelligence-empty">No verified components detected.</p>';
+  const serviceRows = primaryServices.map((service) => '<div class="agent-command-architecture-row"><div><span class="panel-kicker">data service</span><h3>' + escapeHtml(service.service_type) + '</h3><p>' + escapeHtml(service.clients.join(" · ") || "Client not identified") + '</p></div><div><strong class="agent-status-pill ' + commandCenterStatusClass(service.status) + '">' + escapeHtml(service.status === "PARTIALLY_VERIFIED" ? "Partially verified" : commandCenterStatusLabel(service.status)) + '</strong><small>' + escapeHtml(service.configuration.length ? "Configuration: " + service.configuration.join(", ") : "Connection configuration not verified") + (service.components.length ? ' · Components: ' + escapeHtml(service.components.join(", ")) : "") + '</small></div></div>').join("");
+  const architectureSummary = [...(context.components || []).map((item) => [item.name, item.framework || item.language]).filter((item) => item[0]), ...primaryServices.map((item) => [item.service_type, commandCenterStatusLabel(item.status)]), ...(services.length > primaryServices.length ? [["Additional candidates", String(services.length - primaryServices.length) + " in details"]] : [])].map(([name, value]) => '<span>' + escapeHtml(name) + (value ? ': ' + escapeHtml(value) : "") + '</span>').join("") || '<span>No high-level architecture evidence</span>';
+  const health = context.evidence_counts || {};
+  const evidenceHealth = '<div class="agent-health-summary"><strong>' + escapeHtml(health.high ?? 0) + '</strong><span>high confidence</span><strong>' + escapeHtml(health.medium ?? 0) + '</strong><span>medium confidence</span><strong>' + escapeHtml(health.low ?? 0) + '</strong><span>low confidence</span><strong>' + escapeHtml(allRequirements.length) + '</strong><span>setup requirements</span><strong>' + escapeHtml(contradictions.length) + '</strong><span>contradictions</span></div>';
+  const inspectionStatus = context.inspection_run_id || context.inspected_at ? "COMPLETE" : "NOT_STARTED";
+  const setupStatus = requirements.length ? "ACTION_REQUIRED" : "COMPLETE";
+  const dockerStatus = setupBlockers.length || contradictions.length ? "BLOCKED" : "READY";
+  const nextAction = requirements.length
+    ? { title: "Configure required project environment", copy: "Some repository references cannot be safely resolved from inspection alone. Add the requested values, then re-inspect so the snapshot becomes the source of truth.", primary: "Start Project Setup", primaryAction: "data-agent-start-setup", secondary: "Copy setup commands", secondaryAction: "data-copy-setup" }
+    : contradictions.length
+      ? { title: "Review conflicting evidence", copy: "A deterministic conflict must be resolved before downstream generation can choose safely.", primary: "View conflicting evidence", primaryAction: 'data-agent-jump="inspection-details"', secondary: "Re-inspect", secondaryAction: "data-agent-reinspect" }
+      : { title: "Run the next evidence-bound workflow", copy: "No setup blocker is persisted. Dockerize will still run its own deterministic preflight before any model call.", primary: "Open Dockerize", primaryAction: 'data-agent-operation="dockerize"', secondary: "Re-inspect", secondaryAction: "data-agent-reinspect" };
+  const commandText = templates.flatMap((item) => item.commands || []).join("\n");
+  const nextSecondary = nextAction.secondaryAction === "data-copy-setup" && commandText
+    ? '<button type="button" class="secondary-button" data-copy-value="' + escapeHtml(commandText) + '">' + escapeHtml(nextAction.secondary) + '</button>'
+    : '<button type="button" class="secondary-button" ' + nextAction.secondaryAction + '>' + escapeHtml(nextAction.secondary) + '</button>';
+  const stepper = [
+    ["Inspect", inspectionStatus, "inspection-details"],
+    ["Resolve Setup", setupStatus, "project-setup"],
+    ["Re-inspect", inspectionStatus === "COMPLETE" ? "CURRENT" : "WAITING", "project-setup"],
+    ["Dockerize", dockerStatus, "dockerize"],
+    ["Validate", "NOT_STARTED", "inspection-details"],
+  ].map(([label, status, target]) => {
+    const action = target === "dockerize" ? 'data-agent-operation="dockerize"' : 'data-agent-jump="' + target + '"';
+    return '<button type="button" class="agent-step ' + commandCenterStatusClass(status) + '" ' + action + '><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(commandCenterStatusLabel(status)) + '</strong></button>';
+  }).join("");
+  const advanced = agentAdvancedInspectionDetails(context) + renderAdvancedEvidence(context);
+  return '<section class="agent-command-center"><header class="agent-command-hero"><div><span class="panel-kicker">Project Command Center</span><h1>' + escapeHtml(context.name || context.project || "Project") + '</h1><p>' + escapeHtml(context.root_path || context.path || state.agentInputs.target) + '</p><div class="agent-architecture-summary">' + architectureSummary + '</div></div><div class="agent-command-hero-actions"><span class="agent-inspection-status">' + escapeHtml(commandCenterStatusLabel(context.intelligence_status || "COMPLETE")) + '</span><button type="button" class="quiet-button" data-agent-reinspect>Re-inspect</button><button type="button" class="quiet-button" data-agent-open-terminal>Agent terminal</button></div><small>Last inspected: ' + escapeHtml(context.inspected_at || "time recorded") + '</small></header><section class="agent-status-grid"><div class="agent-status-card complete"><span>Inspection</span><strong>' + escapeHtml(commandCenterStatusLabel(inspectionStatus)) + '</strong><small>Persisted repository snapshot</small></div><div class="agent-status-card ' + commandCenterStatusClass(setupStatus) + '"><span>Project Setup</span><strong>' + escapeHtml(commandCenterStatusLabel(setupStatus)) + '</strong><small>' + escapeHtml(requirements.length ? requirements.length + " immediate requirement(s)" : additionalRequirements.length ? "No immediate action; additional configuration available" : "No setup action required") + '</small></div><div class="agent-status-card ' + commandCenterStatusClass(dockerStatus) + '"><span>Dockerize</span><strong>' + escapeHtml(commandCenterStatusLabel(dockerStatus)) + '</strong><small>' + escapeHtml(dockerStatus === "BLOCKED" ? "Evidence or conflict blocks preflight" : "Ready to run deterministic preflight") + '</small></div><div class="agent-status-card not-started"><span>Validation</span><strong>Not started</strong><small>Runs after an artifact exists</small></div></section><section class="agent-next-action"><div><span class="panel-kicker">Next recommended action</span><h2>' + escapeHtml(nextAction.title) + '</h2><p>' + escapeHtml(nextAction.copy) + '</p></div><div class="agent-next-action-buttons"><button type="button" class="primary-button" ' + nextAction.primaryAction + '>' + escapeHtml(nextAction.primary) + '</button>' + nextSecondary + '</div></section><section class="agent-workflow-stepper"><div class="agent-block-heading"><h2>Workflow</h2><span>Evidence-bound progress</span></div><div class="agent-stepper">' + stepper + '</div></section><section class="agent-command-section agent-architecture-section"><div class="agent-block-heading"><h2>Architecture summary</h2><span>Logical components and correlated services</span></div><div class="agent-command-architecture-list">' + architectureRows + serviceRows + '</div></section><section class="agent-command-section" id="project-setup"><div class="agent-block-heading"><h2>Project setup</h2><span>' + escapeHtml(requirements.length ? "Action required" : "Ready for the next step") + '</span></div><p class="agent-section-intro">Only evidence-backed immediate configuration is shown here. Additional references stay available below; values are never shown or invented.</p><div class="agent-setup-actions">' + (commandText ? '<button type="button" class="secondary-button" data-copy-value="' + escapeHtml(commandText) + '">Copy immediate setup commands</button>' : "") + '<button type="button" class="secondary-button" data-agent-reinspect>Re-inspect after configuration</button></div><div class="agent-setup-groups">' + setupGroupMarkup + '</div>' + additionalMarkup + '</section><section class="agent-command-section"><div class="agent-block-heading"><h2>Evidence health</h2><span>Detailed records are available below</span></div>' + evidenceHealth + (contradictions.length ? '<div class="agent-issue-summary"><strong>⚠ ' + escapeHtml(contradictions.length) + ' issue' + (contradictions.length === 1 ? "" : "s") + ' require review</strong><p>' + escapeHtml(contradictions[0].message || contradictions[0].missing_evidence || "Conflicting evidence was detected.") + '</p><button type="button" class="secondary-button" data-agent-jump="inspection-details">View conflicting evidence</button></div>' : "") + '</section><details class="agent-advanced-disclosure" id="inspection-details"><summary>View inspection details</summary><div class="agent-advanced-disclosure-body">' + advanced + '</div></details></section>';
 }
 
 function dockerizeArtifactPath(component, context) {
@@ -459,7 +585,7 @@ function dockerizePlanningWorkspace() {
 
 function agentTerminalView() {
   if (!state.agentProjectValidated) return agentProjectChooser();
-  if (!state.agentCategory) return agentCategoryChooser();
+  if (!state.agentCategory) return inspectionLoadingView();
   const categoryOperations = state.agentCategory === "inspect"
     ? (state.agentInspectionReady ? ["dockerize", "kubernetes", "cicd"] : ["inspect", "dockerize", "kubernetes", "cicd"])
     : ["plan", "blueprint"];
@@ -493,7 +619,7 @@ function agentTerminalView() {
   const inspectionRunMode = state.agentCategory === "inspect" && state.selectedAgentOperation === "inspect" && state.agentInspectionActive;
   const operationWorkspace = inspectionRunMode ? "" : `<form class="agent-form" id="agent-form"><div class="agent-workspace-heading"><div><span class="panel-kicker">Operation workspace</span><h3>${escapeHtml(operation?.label || "Choose an operation")}</h3></div><span>Guided workflow</span></div><div class="agent-fields">${fields}</div>${guidedQuestions}<div class="agent-options"><label title="Preview the real validated workflow without writing files"><input type="checkbox" id="agent-dry-run" ${state.agentDryRun ? "checked" : ""} /> Dry run <small>Preview without writing files</small></label>${operation?.id === "dockerize" ? "" : `<label><input type="checkbox" id="agent-overwrite" ${state.agentOverwrite ? "checked" : ""} /> Allow overwrite</label>`}<button class="primary-button" id="agent-run-button" type="submit" ${consoleBusy ? "disabled" : ""}>${operation?.id === "dockerize" ? "Continue" : `Run ${escapeHtml(operation?.label || "operation")}`} →</button></div></form>`;
   const terminalOutput = state.agentOutput || (inspectionRunMode ? "Waiting for backend inspection events…" : "Select an operation, provide its required inputs, and run the existing Sohail-Agent capability.");
-  return `<section class="agent-shell"><div class="agent-project-context"><span class="panel-kicker">Selected project</span><strong>${escapeHtml(state.agentInputs.target)}</strong><button type="button" class="quiet-button" data-agent-change-project>Change folder</button></div>${agentIntelligenceWorkspace()}<div class="agent-shell-header"><div><span class="panel-kicker">${state.agentCategory === "inspect" ? "Inspect" : "Build"} workflow</span><h2>Sohail-Agent</h2><p class="agent-prompt">${inspectionRunMode ? "Complete inspection is running in this Terminal." : "Use stored project intelligence to continue."}</p></div><span class="agent-status" id="agent-status">${escapeHtml(state.agentStatus)}</span></div><div class="agent-operation-grid">${cards}</div>${operationWorkspace}${clarificationPanel}${nextActions}<section class="agent-live-terminal"><div class="agent-live-terminal-header"><div><span class="panel-kicker">Live execution</span><h3>Sohail-Agent Terminal</h3></div><div class="agent-live-terminal-meta"><span id="agent-command">${escapeHtml(state.agentCommand || "Waiting for a run")}</span><span id="agent-live-status">${escapeHtml(state.agentStatus)}</span></div></div><pre class="agent-output" id="agent-output">${escapeHtml(terminalOutput)}</pre><form class="agent-console-form" id="agent-console-form"><span class="agent-console-prompt">$</span><input id="agent-console-input" value="${escapeHtml(state.agentConsoleInput)}" placeholder="sohail-agent --help" autocomplete="off" ${consoleBusy ? "disabled" : ""} /><button class="quiet-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run CLI</button></form><p class="agent-console-note">Only the existing <code>sohail-agent</code> CLI is accepted here; use Raw PTY for shell commands.</p></section></section>`;
+  return `<section class="agent-shell"><div class="agent-project-context"><span class="panel-kicker">Selected project</span><strong>${escapeHtml(state.agentInputs.target)}</strong><button type="button" class="quiet-button" data-agent-change-project>Change folder</button></div>${agentIntelligenceWorkspace()}<div class="agent-shell-header"><div><span class="panel-kicker">${state.agentCategory === "inspect" ? "Inspect" : "Build"} workflow</span><h2>Sohail-Agent</h2><p class="agent-prompt">Use stored project intelligence to continue.</p></div><span class="agent-status" id="agent-status">${escapeHtml(state.agentStatus)}</span></div><div class="agent-operation-grid">${cards}</div>${operationWorkspace}${clarificationPanel}${nextActions}<section class="agent-live-terminal"><div class="agent-live-terminal-header"><div><span class="panel-kicker">Live execution</span><h3>Sohail-Agent Terminal</h3></div><div class="agent-live-terminal-meta"><span id="agent-command">${escapeHtml(state.agentCommand || "Waiting for a run")}</span><span id="agent-live-status">${escapeHtml(state.agentStatus)}</span></div></div><pre class="agent-output" id="agent-output">${escapeHtml(terminalOutput)}</pre><form class="agent-console-form" id="agent-console-form"><span class="agent-console-prompt">$</span><input id="agent-console-input" value="${escapeHtml(state.agentConsoleInput)}" placeholder="sohail-agent --help" autocomplete="off" ${consoleBusy ? "disabled" : ""} /><button class="quiet-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run CLI</button></form><p class="agent-console-note">Only the existing <code>sohail-agent</code> CLI is accepted here; use Raw PTY for shell commands.</p></section></section>`;
 }
 
 function sessionRows(sessions) {
@@ -1100,18 +1226,6 @@ function bindView() {
     }
     render();
   }));
-  document.querySelectorAll("[data-agent-category]").forEach((item) => item.addEventListener("click", () => {
-    state.agentCategory = item.dataset.agentCategory;
-    state.selectedAgentOperation = state.agentCategory === "inspect" ? "inspect" : "plan";
-    if (state.agentContext?.components?.length) {
-      state.agentChoices.components = state.agentContext.components.map((component) => component.name);
-    }
-    if (state.agentCategory === "inspect") {
-      void startAgentOperation("inspect");
-      return;
-    }
-    render();
-  }));
   document.querySelectorAll("[data-agent-change-project]").forEach((item) => item.addEventListener("click", () => {
     state.agentProjectValidated = false;
     state.agentCategory = null;
@@ -1132,6 +1246,48 @@ function bindView() {
   }));
   document.querySelectorAll("[data-agent-reinspect]").forEach((item) => item.addEventListener("click", () => {
     void startAgentOperation("inspect");
+  }));
+  document.querySelectorAll("[data-agent-start-setup]").forEach((item) => item.addEventListener("click", () => {
+    const section = document.getElementById("project-setup");
+    if (!section) return;
+    section.scrollIntoView({ behavior: "smooth", block: "start" });
+    const firstGroup = section.querySelector("details");
+    if (firstGroup) firstGroup.open = true;
+  }));
+  document.querySelectorAll("[data-agent-jump]").forEach((item) => item.addEventListener("click", () => {
+    const target = document.getElementById(item.dataset.agentJump);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (target.tagName === "DETAILS") target.open = true;
+    }
+  }));
+  document.querySelectorAll("[data-copy-value]").forEach((item) => item.addEventListener("click", async () => {
+    const value = item.dataset.copyValue || "";
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
+      else {
+        const input = document.createElement("textarea");
+        input.value = value;
+        input.setAttribute("readonly", "");
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand("copy");
+        input.remove();
+      }
+      const original = item.textContent;
+      item.textContent = "Copied";
+      window.setTimeout(() => { item.textContent = original; }, 1400);
+    } catch (_error) {
+      item.textContent = "Copy unavailable";
+    }
+  }));
+  document.querySelectorAll("[data-agent-open-terminal]").forEach((item) => item.addEventListener("click", () => {
+    state.agentCategory = "build";
+    state.agentInspectionActive = false;
+    state.selectedAgentOperation = "plan";
+    render();
   }));
   document.querySelectorAll("[data-agent-operation]").forEach((item) => item.addEventListener("click", () => {
     state.selectedAgentOperation = item.dataset.agentOperation;
@@ -1225,8 +1381,8 @@ async function selectAgentProject(event) {
     const result = await api(`/api/agent/project?target=${encodeURIComponent(target)}`);
     state.agentInputs.target = result.target;
     state.agentProjectValidated = true;
-    state.agentCategory = null;
-    state.agentInspectionActive = false;
+    state.agentCategory = "inspect";
+    state.agentInspectionActive = true;
     state.agentInspectionReady = false;
     state.agentContext = null;
     state.agentDockerPlan = null;
@@ -1239,7 +1395,7 @@ async function selectAgentProject(event) {
     state.agentRunSocketRunId = null;
     state.agentStatus = "Ready";
     state.selectedAgentOperation = "inspect";
-    render();
+    await startAgentOperation("inspect");
   } catch (error) {
     state.agentStatus = "Idle";
     state.agentOutput = error.message;
@@ -1422,8 +1578,8 @@ function handleAgentRunEvent(event) {
     if (state.selectedAgentOperation === "inspect" && state.agentStatus === "Completed") {
       state.agentStatus = "Loading stored intelligence";
       loadStoredIntelligence()
-        .then(() => { state.agentInspectionReady = true; state.agentStatus = "Completed"; render(); })
-        .catch((error) => { state.agentOutput += `\n[Error] Stored intelligence unavailable: ${error.message}\n`; state.agentStatus = "Completed"; render(); });
+        .then(() => { state.agentInspectionReady = true; state.agentInspectionActive = false; state.agentStatus = "Completed"; render(); })
+        .catch((error) => { state.agentInspectionActive = false; state.agentOutput += `\n[Error] Stored intelligence unavailable: ${error.message}\n`; state.agentStatus = "Error"; render(); });
       return;
     }
     render();

@@ -12,9 +12,11 @@ from sohail_agent_cli.providers import GenerationRequest, OllamaProvider
 
 from .context_builder import DockerContext
 from .platform_policy import policy_for_component, policy_value
+from .port_evidence import authoritative_component_ports
 from .strategies import STATIC_ARTIFACT_SERVER, strategy_for_component
 
 DOCKER_DECISION_OUTPUT_TOKENS = 2048
+DOCKER_FEASIBILITY_OUTPUT_TOKENS = 1536
 DOCKER_DECISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -75,9 +77,98 @@ DOCKER_DECISION_SCHEMA: dict[str, Any] = {
     },
 }
 
+DOCKER_FEASIBILITY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "status", "reason", "repository_supported_decisions",
+        "deterministic_derivations", "model_proposals",
+        "minimum_additional_evidence", "requested_user_action",
+    ],
+    "properties": {
+        "status": {"type": "string", "enum": ["SUFFICIENT", "PARTIAL", "INSUFFICIENT"]},
+        "reason": {"type": "string", "minLength": 1},
+        "repository_supported_decisions": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/decision"},
+        },
+        "deterministic_derivations": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/decision"},
+        },
+        "model_proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["decision", "value", "status", "requires_authorization", "basis"],
+                "properties": {
+                    "decision": {"type": "string", "minLength": 1},
+                    "value": {"type": "string"},
+                    "status": {"type": "string", "enum": ["PROPOSED"]},
+                    "requires_authorization": {"type": "boolean", "const": True},
+                    "basis": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+        "minimum_additional_evidence": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["requirement", "reason"],
+                "properties": {
+                    "requirement": {"type": "string", "minLength": 1},
+                    "reason": {"type": "string", "minLength": 1},
+                    "sources_to_check": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "requested_user_action": {"type": "string", "minLength": 1},
+    },
+    "$defs": {
+        "decision": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["decision", "basis", "provenance"],
+            "properties": {
+                "decision": {"type": "string", "minLength": 1},
+                "value": {"type": "string"},
+                "basis": {"type": "string", "minLength": 1},
+                "provenance": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    },
+}
+
 
 class DockerDecisionError(ValueError):
     """Raised when Ollama does not return a safe structured decision."""
+
+
+@dataclass(frozen=True)
+class DockerFeasibilityReview:
+    """A model review of evidence, never an authorization to invent facts."""
+
+    status: str
+    reason: str
+    repository_supported_decisions: list[dict[str, Any]]
+    deterministic_derivations: list[dict[str, Any]]
+    model_proposals: list[dict[str, Any]]
+    minimum_additional_evidence: list[dict[str, Any]]
+    requested_user_action: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "repository_supported_decisions": self.repository_supported_decisions,
+            "deterministic_derivations": self.deterministic_derivations,
+            "model_proposals": self.model_proposals,
+            "minimum_additional_evidence": self.minimum_additional_evidence,
+            "requested_user_action": self.requested_user_action,
+            "model_output_is_repository_truth": False,
+        }
 
 
 @dataclass(frozen=True)
@@ -292,6 +383,277 @@ class DockerDecisionEngine:
             )
         return decision
 
+    async def review_feasibility(
+        self,
+        context: DockerContext,
+        missing_requirements: list[str],
+        acquisition_details: list[dict[str, Any]] | None = None,
+    ) -> DockerFeasibilityReview:
+        """Ask Ollama to classify the current Docker evidence without authorizing it.
+
+        This is deliberately separate from ``decide``.  The deterministic
+        preflight has already established that an authoritative requirement is
+        missing.  The review can explain whether the supplied evidence is
+        useful and identify model proposals, but it cannot make the preflight
+        pass or authorize rendering/writes.
+        """
+        package = self._feasibility_package(
+            context,
+            missing_requirements,
+            acquisition_details or [],
+        )
+        result = await self.provider.generate(
+            GenerationRequest(
+                prompt=(
+                    "DOCKER_FEASIBILITY_REVIEW_INPUT:\n"
+                    + json.dumps(package, sort_keys=True, separators=(",", ":"))
+                ),
+                system=(
+                    "You are Sohail Studio's Docker evidence feasibility reviewer. "
+                    "Evaluate only the bounded current-repository evidence in the "
+                    "user message. Do not inspect anything else. Do not claim that "
+                    "missing evidence exists, invent provenance, or turn a model "
+                    "convention into repository truth. Classify decisions as either "
+                    "repository_supported_decisions, deterministic_derivations, or "
+                    "model_proposals. Every model proposal must have status PROPOSED "
+                    "and requires_authorization true. If a mandatory Docker fact is "
+                    "not supplied, identify the minimum additional evidence and do "
+                    "not call the evidence sufficient merely because a convention "
+                    "could be proposed. Do not output secrets or raw environment "
+                    "values. Do not output hidden reasoning. Return JSON only using "
+                    "the supplied structured contract."
+                ),
+                model=self.model,
+                temperature=0,
+                options={
+                    "format": DOCKER_FEASIBILITY_SCHEMA,
+                    "num_ctx": 8192,
+                    "num_predict": DOCKER_FEASIBILITY_OUTPUT_TOKENS,
+                },
+                think=False,
+            )
+        )
+        if result.error:
+            raise DockerDecisionError(f"Docker feasibility review failed: {result.error}")
+        try:
+            payload = self._parse_feasibility_json(result.text)
+        except (TypeError, ValueError) as exc:
+            raise DockerDecisionError(
+                f"Ollama returned an invalid Docker feasibility review: {exc}"
+            ) from exc
+        return DockerFeasibilityReview(
+            status=payload["status"],
+            reason=payload["reason"],
+            repository_supported_decisions=self._redact_feasibility_items(
+                payload["repository_supported_decisions"]
+            ),
+            deterministic_derivations=self._redact_feasibility_items(
+                payload["deterministic_derivations"]
+            ),
+            model_proposals=self._redact_feasibility_items(payload["model_proposals"]),
+            minimum_additional_evidence=payload["minimum_additional_evidence"],
+            requested_user_action=payload["requested_user_action"],
+        )
+
+    @classmethod
+    def _feasibility_package(
+        cls,
+        context: DockerContext,
+        missing_requirements: list[str],
+        acquisition_details: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Create the small, secret-safe package used by the feasibility review."""
+        component_fields = (
+            "name", "path", "kind", "role", "framework", "language",
+            "package_manager", "technology_profile", "runtimes", "entrypoints",
+            "build_metadata", "commands", "ports", "base_images",
+            "working_directories", "dockerfiles", "files", "file_count",
+        )
+        components: list[dict[str, Any]] = []
+        for component in context.components:
+            selected = {
+                key: component.get(key)
+                for key in component_fields
+                if key in component
+            }
+            selected["environment"] = [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "name", "key", "sensitive", "required", "value_status",
+                        "role", "source_file", "source_files", "confidence",
+                    )
+                    if key in item
+                }
+                for item in component.get("environment", [])
+                if isinstance(item, dict)
+            ]
+            components.append(selected)
+
+        safe_evidence = []
+        for item in context.evidence:
+            if not isinstance(item, dict):
+                continue
+            # Generic evidence can contain a value field.  Docker feasibility
+            # does not need raw values; commands/ports/env shape are already
+            # represented in their typed context sections above.
+            safe_evidence.append({
+                key: item.get(key)
+                for key in (
+                    "source_file", "evidence_type", "key", "confidence",
+                    "line_number", "extraction_method", "source_type",
+                    "derived_from", "rule_id", "model_inference",
+                )
+                if key in item
+            })
+
+        infrastructure = context.infrastructure or {}
+        safe_setup = infrastructure.get("project_setup") or {}
+        preflight = cls._preflight(context)
+        return {
+            "repository": {
+                "name": context.project.get("name"),
+                "root_path": context.project.get("root_path"),
+                "inspection_run_id": context.project.get("inspection_run_id"),
+                "selected_components": context.project.get("selected_components", []),
+            },
+            "repository_evidence": {
+                "components": components,
+                "evidence": safe_evidence,
+                "infrastructure": {
+                    key: infrastructure.get(key)
+                    for key in (
+                        "dockerfiles", "docker_detected", "compose_files",
+                        "compose_detected", "kubernetes", "ci_cd", "data_services",
+                        "services", "relationships", "documentation",
+                    )
+                    if key in infrastructure
+                },
+                "project_setup": {
+                    "status": safe_setup.get("status"),
+                    "requirements": [
+                        {
+                            key: item.get(key)
+                            for key in (
+                                "name", "component", "status", "blocks", "message",
+                                "value_status", "location", "sources", "confidence",
+                            )
+                            if key in item
+                        }
+                        for item in safe_setup.get("requirements", [])
+                        if isinstance(item, dict)
+                    ],
+                },
+            },
+            "deterministic_preflight": {
+                "missing_requirements": list(missing_requirements),
+                "evidence_boundary": preflight.raw.get("evidence_boundary", [])
+                if preflight is not None else [],
+            },
+            "targeted_current_repository_scan": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "scope", "requested_requirements", "candidate_targets",
+                        "validated_target_count", "inspected_targets",
+                        "added_evidence_count", "evidence_found",
+                    )
+                    if key in item
+                }
+                for item in acquisition_details
+                if isinstance(item, dict)
+            ],
+            "authority_boundary": {
+                "model_output_is_not_repository_truth": True,
+                "model_proposals_require_explicit_authorization": True,
+                "generation_and_writes_require_existing_authorized_decision": True,
+            },
+        }
+
+    @staticmethod
+    def _redact_feasibility_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Redact values for model decisions that are explicitly sensitive."""
+        sensitive_tokens = ("password", "secret", "token", "api_key", "apikey", "credential")
+        redacted: list[dict[str, Any]] = []
+        for item in items:
+            copy = dict(item)
+            decision = str(copy.get("decision") or "").lower()
+            if any(token in decision for token in sensitive_tokens) and "value" in copy:
+                copy["value"] = "REDACTED"
+            redacted.append(copy)
+        return redacted
+
+    @staticmethod
+    def _parse_feasibility_json(text: str) -> dict[str, Any]:
+        value = text.strip()
+        if value.startswith("```"):
+            value = re.sub(r"^```(?:json)?\s*|\s*```$", "", value, flags=re.IGNORECASE | re.DOTALL).strip()
+        try:
+            data = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"response is not valid JSON: {exc.msg}") from exc
+        if not isinstance(data, dict):
+            raise ValueError("feasibility review must be a JSON object")
+        required = {
+            "status", "reason", "repository_supported_decisions",
+            "deterministic_derivations", "model_proposals",
+            "minimum_additional_evidence", "requested_user_action",
+        }
+        missing = sorted(required - data.keys())
+        unexpected = sorted(set(data) - required)
+        if missing:
+            raise ValueError(f"missing required field(s): {', '.join(missing)}")
+        if unexpected:
+            raise ValueError(f"unexpected field(s): {', '.join(unexpected)}")
+        if data["status"] not in {"SUFFICIENT", "PARTIAL", "INSUFFICIENT"}:
+            raise ValueError("status must be SUFFICIENT, PARTIAL, or INSUFFICIENT")
+        if not isinstance(data["reason"], str) or not data["reason"].strip():
+            raise ValueError("reason must be a non-empty string")
+        if not isinstance(data["requested_user_action"], str) or not data["requested_user_action"].strip():
+            raise ValueError("requested_user_action must be a non-empty string")
+        for field in (
+            "repository_supported_decisions", "deterministic_derivations",
+            "model_proposals", "minimum_additional_evidence",
+        ):
+            if not isinstance(data[field], list) or any(not isinstance(item, dict) for item in data[field]):
+                raise ValueError(f"{field} must be a list of objects")
+        decision_required = {"decision", "basis", "provenance"}
+        for field in ("repository_supported_decisions", "deterministic_derivations"):
+            for item in data[field]:
+                if not decision_required <= item.keys():
+                    raise ValueError(f"{field} items require decision, basis, and provenance")
+                if set(item) - (decision_required | {"value"}):
+                    raise ValueError(f"unexpected field in {field}")
+                if not all(isinstance(item[key], str) and item[key].strip() for key in ("decision", "basis")):
+                    raise ValueError(f"{field} decision and basis must be non-empty strings")
+                if not isinstance(item["provenance"], list) or any(not isinstance(value, str) for value in item["provenance"]):
+                    raise ValueError(f"{field} provenance must be a list of strings")
+        for item in data["model_proposals"]:
+            expected = {"decision", "value", "status", "requires_authorization", "basis"}
+            if set(item) != expected:
+                raise ValueError("model proposal fields are incomplete or unsupported")
+            if (
+                not isinstance(item["decision"], str) or not item["decision"].strip()
+                or not isinstance(item["value"], str)
+                or item["status"] != "PROPOSED"
+                or item["requires_authorization"] is not True
+                or not isinstance(item["basis"], str) or not item["basis"].strip()
+            ):
+                raise ValueError("model proposals must be explicitly authorized proposals")
+        for item in data["minimum_additional_evidence"]:
+            if not {"requirement", "reason"} <= item.keys():
+                raise ValueError("minimum additional evidence requires requirement and reason")
+            if set(item) - {"requirement", "reason", "sources_to_check"}:
+                raise ValueError("unsupported minimum additional evidence field")
+            if not all(isinstance(item[key], str) and item[key].strip() for key in ("requirement", "reason")):
+                raise ValueError("minimum additional evidence fields must be non-empty strings")
+            if "sources_to_check" in item and (
+                not isinstance(item["sources_to_check"], list)
+                or any(not isinstance(value, str) for value in item["sources_to_check"])
+            ):
+                raise ValueError("sources_to_check must be a list of strings")
+        return data
+
     async def _repair_payload(
         self,
         response: str,
@@ -418,12 +780,17 @@ class DockerDecisionEngine:
         if repair_optional_ports:
             application_ports: dict[str, int | None] = {}
             for item in context.components:
+                pattern = next(
+                    (
+                        candidate for candidate in context.verified_patterns
+                        if str(candidate.get("component")) == str(item.get("name"))
+                        and candidate.get("origin") == "VERIFIED_INFERENCE"
+                    ),
+                    None,
+                )
                 values = {
                     int(port["port"])
-                    for port in item.get("ports", [])
-                    if port.get("port_type") == "application"
-                    and port.get("port") is not None
-                    and not port.get("conflict")
+                    for port in authoritative_component_ports(item.get("ports", []), pattern)
                 }
                 application_ports[str(item.get("name"))] = (
                     next(iter(values)) if len(values) == 1 else None
@@ -624,6 +991,15 @@ class DockerDecisionEngine:
         }
         boundaries: list[dict[str, Any]] = []
         missing: list[str] = []
+        project_setup = context.infrastructure.get("project_setup") or {}
+        selected_names = {str(item.get("name")) for item in context.components}
+        for requirement in project_setup.get("requirements") or []:
+            component = str(requirement.get("component") or "root")
+            blocks = {str(item).lower() for item in requirement.get("blocks") or []}
+            if component in selected_names and "dockerfile" in blocks:
+                missing.append(
+                    f"{component}: {requirement.get('message') or requirement.get('name') or 'project setup requirement'}"
+                )
 
         for component in context.components:
             name = str(component.get("name"))
@@ -861,12 +1237,17 @@ class DockerDecisionEngine:
             policy_install = policy_value(policy, "install_command")
             if policy_install is not None and str(component.get("install_command") or "") != str(policy_install.get("value")):
                 raise DockerDecisionError(f"Docker decision changed the authorized install command for {name}")
+            authoritative_ports = authoritative_component_ports(source.get("ports", []), pattern)
             if any(
-                item.get("conflict") and item.get("port_type") == "application"
+                item.get("conflict")
+                and (
+                    item.get("port_type") == "application"
+                    or (pattern and pattern.get("category") == "static_frontend" and item.get("port_type") == "proxy")
+                )
                 for item in source.get("ports", [])
             ):
                 raise DockerDecisionError(f"Port evidence conflicts for {name}; Docker decision requires confirmation")
-            ports = [item for item in source.get("ports", []) if item.get("port_type") == "application" and not item.get("conflict")]
+            ports = authoritative_ports
             requested_port = component.get("port")
             if ports and requested_port is None:
                 raise DockerDecisionError(f"Docker decision omitted the detected application port for {name}")
@@ -927,10 +1308,17 @@ class DockerDecisionEngine:
             expected_context = "." if expected_path == "." else f"./{expected_path}"
             if service.get("build_context") not in {None, expected_context}:
                 raise DockerDecisionError("Docker decision changed the evidence-backed Compose build context")
-            component_ports = [
-                item for item in expected[component_name].get("ports", [])
-                if item.get("port_type") == "application" and not item.get("conflict")
-            ]
+            service_pattern = next(
+                (
+                    candidate for candidate in context.verified_patterns
+                    if str(candidate.get("component")) == str(component_name)
+                    and candidate.get("origin") == "VERIFIED_INFERENCE"
+                ),
+                None,
+            )
+            component_ports = authoritative_component_ports(
+                expected[component_name].get("ports", []), service_pattern
+            )
             service_port = service.get("port")
             target_port = service.get("target_port", service_port)
             expected_port_pairs = {
@@ -1009,12 +1397,7 @@ class DockerDecisionEngine:
         expected_port = policy.get("port")
         if component.get("port") != expected_port:
             raise DockerDecisionError(f"Docker decision changed the verified application port for {name}")
-        if not any(
-            item.get("port") == expected_port
-            and item.get("port_type") == "application"
-            and not item.get("conflict")
-            for item in source.get("ports", [])
-        ):
+        if not any(item.get("port") == expected_port for item in authoritative_component_ports(source.get("ports", []), pattern)):
             raise DockerDecisionError(f"Verified pattern port evidence is no longer available for {name}")
 
     @staticmethod

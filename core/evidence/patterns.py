@@ -137,7 +137,10 @@ class VerifiedEngineeringPatternRecognizer:
         ports = [
             item for item in (_value(intelligence, "ports", []) or [])
             if str(_value(item, "component", "")) == name
-            and _value(item, "port_type") == "application"
+            and (
+                _value(item, "port_type") == "application"
+                or (nginx_config and _value(item, "port_type") == "proxy")
+            )
             and _value(item, "port") is not None
             and not _value(item, "conflict", False)
         ]

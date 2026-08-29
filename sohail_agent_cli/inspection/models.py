@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 Confidence = str
+CURRENT_INTELLIGENCE_SCHEMA_VERSION = 4
 
 
 class EvidenceSourceType:
@@ -62,6 +63,7 @@ class ProjectIntelligence:
 
     name: str
     root_path: str
+    intelligence_schema_version: int = CURRENT_INTELLIGENCE_SCHEMA_VERSION
     inspection_run_id: str | None = None
     inspected_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     files: list[DiscoveredFile] = field(default_factory=list)
@@ -74,6 +76,7 @@ class ProjectIntelligence:
     commands: list[dict[str, Any]] = field(default_factory=list)
     ports: list[dict[str, Any]] = field(default_factory=list)
     services: list[dict[str, Any]] = field(default_factory=list)
+    data_services: list[dict[str, Any]] = field(default_factory=list)
     relationships: list[dict[str, Any]] = field(default_factory=list)
     databases: list[str] = field(default_factory=list)
     environment_variables: list[dict[str, Any]] = field(default_factory=list)
@@ -84,6 +87,10 @@ class ProjectIntelligence:
     ci_cd: dict[str, Any] = field(default_factory=dict)
     documentation: dict[str, Any] = field(default_factory=dict)
     verified_patterns: list[dict[str, Any]] = field(default_factory=list)
+    infrastructure: list[dict[str, Any]] = field(default_factory=list)
+    contradictions: list[dict[str, Any]] = field(default_factory=list)
+    evidence_gaps: list[dict[str, Any]] = field(default_factory=list)
+    project_setup: dict[str, Any] = field(default_factory=dict)
     evidence: list[Evidence] = field(default_factory=list)
     user_evidence: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -101,13 +108,15 @@ class ProjectIntelligence:
         known = {
             "name": summary.get("project") or summary.get("name") or Path(root_path).name,
             "root_path": root_path,
+            "intelligence_schema_version": int(summary.get("intelligence_schema_version") or 1),
             "inspection_run_id": inspection_run_id or summary.get("inspection_run_id"),
             "inspected_at": inspected_at or summary.get("inspected_at") or datetime.now(timezone.utc).isoformat(),
         }
         for field_name in (
             "files", "components", "languages", "frameworks", "runtimes", "package_managers",
-            "dependencies", "commands", "ports", "services", "relationships", "databases", "environment_variables",
-            "build_metadata", "entrypoints", "verified_patterns", "evidence", "user_evidence", "warnings",
+            "dependencies", "commands", "ports", "services", "data_services", "relationships", "databases", "environment_variables",
+            "build_metadata", "entrypoints", "verified_patterns", "infrastructure", "contradictions", "evidence_gaps",
+            "evidence", "user_evidence", "warnings", "project_setup",
         ):
             if field_name in summary:
                 known[field_name] = summary[field_name]
@@ -119,6 +128,19 @@ class ProjectIntelligence:
             item if isinstance(item, Evidence) else Evidence(**item)
             for item in known.get("evidence", [])
         ]
+        if known["intelligence_schema_version"] < CURRENT_INTELLIGENCE_SCHEMA_VERSION:
+            known.setdefault("evidence_gaps", []).append({
+                "kind": "snapshot_schema",
+                "status": "NEEDS_EVIDENCE",
+                "decision": "reuse_project_intelligence",
+                "missing_evidence": "A snapshot written by an older schema does not contain the current normalized evidence contract.",
+                "search_scope": "persisted inspection snapshot",
+                "repository_search_complete": False,
+                "external_input_required": False,
+                "resolution": "reinspect_repository",
+                "message": "This persisted snapshot predates the current Project Intelligence categories; re-inspect to populate them.",
+                "confidence": "high",
+            })
         for field_name in ("docker", "kubernetes", "ci_cd", "documentation"):
             known[field_name] = summary.get(field_name) or {}
         return cls(**known)
@@ -146,6 +168,7 @@ class ProjectIntelligence:
         return {
             "project": self.name,
             "root_path": self.root_path,
+            "intelligence_schema_version": self.intelligence_schema_version,
             "inspected_at": self.inspected_at,
             "files": [item.to_dict() for item in self.files],
             "components": self.components,
@@ -157,6 +180,7 @@ class ProjectIntelligence:
             "commands": self.commands,
             "ports": self.ports,
             "services": self.services,
+            "data_services": self.data_services,
             "relationships": self.relationships,
             "databases": self.databases,
             "environment_variables": self.environment_variables,
@@ -167,6 +191,10 @@ class ProjectIntelligence:
             "ci_cd": self.ci_cd,
             "documentation": self.documentation,
             "verified_patterns": self.verified_patterns,
+            "infrastructure": self.infrastructure,
+            "contradictions": self.contradictions,
+            "evidence_gaps": self.evidence_gaps,
+            "project_setup": self.project_setup,
             "evidence": [item.to_dict() for item in self.evidence],
             "user_evidence": [dict(item) for item in self.user_evidence],
             "evidence_counts": self.evidence_counts,
@@ -179,6 +207,7 @@ class ProjectIntelligence:
             {
                 "name": self.name,
                 "inspection_run_id": self.inspection_run_id,
+                "intelligence_schema_version": self.intelligence_schema_version,
                 "path": self.root_path,
                 "root_path": self.root_path,
                 "inspected_at": self.inspected_at,
@@ -190,6 +219,16 @@ class ProjectIntelligence:
                 "has_ci_cd": bool(self.ci_cd_files),
                 "has_kubernetes": bool(self.kubernetes.get("files")),
                 "ci_cd_files": self.ci_cd_files,
+                "data_services": self.data_services,
+                "infrastructure": self.infrastructure,
+                "contradictions": self.contradictions,
+                "evidence_gaps": self.evidence_gaps,
+                "project_setup": self.project_setup,
+                "intelligence_status": (
+                    "CONTRADICTORY" if self.contradictions
+                    else "NEEDS_EVIDENCE" if self.evidence_gaps
+                    else "VERIFIED"
+                ),
             }
         )
         return data

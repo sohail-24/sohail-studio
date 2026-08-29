@@ -277,7 +277,7 @@ class DockerContextBuilder:
                 )
             ]
             ports = [
-                fields(item, ("name", "port", "source_file", "confidence", "component", "port_type", "target_port", "service_name", "conflict"))
+                fields(item, ("name", "port", "host_port", "source_file", "confidence", "component", "port_type", "protocol", "target_port", "service_name", "conflict"))
                 for item in intelligence.ports
                 if item.get("component") == name
             ]
@@ -292,7 +292,7 @@ class DockerContextBuilder:
                 or belongs(str(item.get("source_file", "")), component)
             ]
             environment = [
-                fields(item, ("name", "key", "value", "sensitive", "source_file", "confidence"))
+                fields(item, ("name", "key", "sensitive", "required", "value_status", "role", "source_file", "source_files", "confidence"))
                 for item in intelligence.environment_variables
                 if belongs(str(item.get("source_file", "")), component)
                 or "/" not in str(item.get("source_file", ""))
@@ -407,11 +407,23 @@ class DockerContextBuilder:
                 "files": list(intelligence.ci_cd.get("files", [])),
             },
             "databases": intelligence.databases,
+            "data_services": [dict(item) for item in intelligence.data_services],
             "services": [
                 fields(item, ("name", "component", "type", "port", "target_port", "depends_on", "source_file", "image", "image_source_file", "image_source_type", "model_inference"))
                 for item in intelligence.services
             ],
             "relationships": [dict(item) for item in intelligence.relationships],
+            "project_setup": {
+                "status": intelligence.project_setup.get("status", "READY"),
+                "requirements": [
+                    {
+                        key: value for key, value in item.items()
+                        if key != "value"
+                    }
+                    for item in intelligence.project_setup.get("requirements", [])
+                    if item.get("component") in set(names) or item.get("component") in {None, "root"}
+                ],
+            },
             "documentation": {
                 "detected": bool(intelligence.documentation.get("files")),
                 "files": list(intelligence.documentation.get("files", [])),

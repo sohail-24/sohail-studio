@@ -424,13 +424,17 @@ async def cmd_inspect(args: argparse.Namespace) -> int:
         f"{'conflict' if item.get('conflict') else item.get('port')}"
         for item in intelligence.ports
     ) or "none detected"
+    data_service_summary = ", ".join(
+        f"{item.get('service_type', 'unknown')} ({item.get('role', 'unknown role')})"
+        for item in intelligence.data_services
+    ) or "none verified"
     console.print(f"\n[bold cyan]Inspection complete:[/bold cyan] {intelligence.name}")
     console.print(f"[bold]Files:[/bold] {len(intelligence.files)} · [bold]Evidence:[/bold] {len(intelligence.evidence)}")
     console.print(f"[bold]Components:[/bold] {', '.join(item['name'] for item in intelligence.components) or 'none detected'}")
     console.print(f"[bold]Languages:[/bold] {', '.join(intelligence.languages) or 'none detected'}")
     console.print(f"[bold]Runtimes:[/bold] {runtime_summary}")
     console.print(f"[bold]Package managers:[/bold] {', '.join(intelligence.package_managers) or 'none detected'}")
-    console.print(f"[bold]Databases:[/bold] {', '.join(intelligence.databases) or 'none detected'}")
+    console.print(f"[bold]Data services:[/bold] {data_service_summary}")
     console.print(f"[bold]Ports:[/bold] {port_summary}")
     console.print(f"[bold]Docker:[/bold] {'detected' if intelligence.has_docker or intelligence.has_docker_compose else 'not detected'}")
     console.print(f"[bold]Kubernetes:[/bold] {'detected' if intelligence.kubernetes.get('files') else 'not detected'}")
@@ -628,11 +632,21 @@ def _print_docker_result(result: Any, *, dry_run: bool = False) -> None:
         context = data.get("context") or {}
         decision = data.get("decision") or {}
         validation = data.get("validation") or {}
+        acquisitions = data.get("evidence_acquisition") or []
+        targeted_count = sum(
+            len(item.get("inspected_targets") or [])
+            for item in acquisitions
+            if isinstance(item, dict)
+        )
+        scan_summary = (
+            f"{targeted_count} targeted current-repository target(s) inspected"
+            if acquisitions else "0 (persisted snapshot reused)"
+        )
         lines = [
             "Inspection:",
             f"  Project: {context.get('project', {}).get('name', 'unknown')}",
             f"  Inspection run: {data.get('inspection_run_id') or context.get('project', {}).get('inspection_run_id', 'unknown')}",
-            "  Repository scan during Dockerize: 0 (persisted snapshot reused)",
+            f"  Repository scan during Dockerize: {scan_summary}",
             "",
             "Evidence used:",
         ]
@@ -692,7 +706,7 @@ def _print_docker_result(result: Any, *, dry_run: bool = False) -> None:
             "",
             "Files written: NO (count: 0)",
             "Files modified: NO (count: 0)",
-            "Repository scan: 0 during Dockerize",
+            f"Repository scan: {scan_summary} during Dockerize",
             f"Inspection run reused: {data.get('inspection_run_id') or context.get('project', {}).get('inspection_run_id', 'unknown')}",
         ])
         console.print(Panel("\n".join(lines), title="DRY RUN COMPLETED", border_style="yellow"))
@@ -738,6 +752,80 @@ def _print_docker_blocked(result: Any, *, dry_run: bool, stage: str) -> None:
             "",
             "Evidence diagnostic:",
         ])
+        acquisitions = diagnostic.get("targeted_evidence_acquisition") or []
+        if acquisitions:
+            lines.extend(["  Targeted current-repository evidence:"])
+            for acquisition in acquisitions:
+                lines.append(
+                    "    scope: " + str(acquisition.get("scope") or "docker")
+                    + "; targets inspected: "
+                    + str(acquisition.get("validated_target_count") or 0)
+                    + "; new facts accepted: "
+                    + str(acquisition.get("added_evidence_count") or 0)
+                )
+                lines.append(
+                    "    files: "
+                    + _display_value(acquisition.get("inspected_targets") or "none")
+                )
+            lines.append("")
+        feasibility = diagnostic.get("feasibility_review") or data.get("feasibility_review")
+        if feasibility:
+            lines.extend([
+                "Docker Evidence Review:",
+                f"  Model: {data.get('model', 'configured local model')}",
+                f"  Generation feasibility: {feasibility.get('status', 'UNAVAILABLE')}",
+                f"  Review reason: {feasibility.get('reason', 'not available')}",
+                "  Repository-supported decisions:",
+            ])
+            supported = feasibility.get("repository_supported_decisions") or []
+            if supported:
+                for item in supported:
+                    lines.append(
+                        "    " + str(item.get("decision", "decision"))
+                        + ": " + _display_value(item.get("value", "not stated"))
+                        + " (repository evidence: "
+                        + _display_value(item.get("provenance") or "not stated") + ")"
+                    )
+            else:
+                lines.append("    none reported")
+            lines.append("  Deterministically derived decisions:")
+            derived = feasibility.get("deterministic_derivations") or []
+            if derived:
+                for item in derived:
+                    lines.append(
+                        "    " + str(item.get("decision", "decision"))
+                        + ": " + _display_value(item.get("value", "not stated"))
+                        + " (derived from: "
+                        + _display_value(item.get("provenance") or "not stated") + ")"
+                    )
+            else:
+                lines.append("    none reported")
+            lines.append("  Model proposals — NOT REPOSITORY TRUTH:")
+            proposals = feasibility.get("model_proposals") or []
+            if proposals:
+                for item in proposals:
+                    lines.append(
+                        "    " + str(item.get("decision", "decision"))
+                        + ": " + _display_value(item.get("value", "not stated"))
+                        + " [PROPOSED; explicit authorization required]"
+                    )
+            else:
+                lines.append("    none reported")
+            lines.append("  Minimum additional evidence:")
+            minimum = feasibility.get("minimum_additional_evidence") or []
+            if minimum:
+                for item in minimum:
+                    lines.append(
+                        "    " + str(item.get("requirement", "requirement"))
+                        + ": " + str(item.get("reason", "evidence required"))
+                    )
+            else:
+                lines.append("    none reported")
+            lines.extend([
+                "  Requested user action: "
+                + str(feasibility.get("requested_user_action", "Resolve missing evidence.")),
+                "",
+            ])
         for item in diagnostic.get("requirements", []) or []:
             lines.extend([
                 f"  {item.get('component')}: {item.get('requirement')}",
@@ -757,8 +845,13 @@ def _print_docker_blocked(result: Any, *, dry_run: bool, stage: str) -> None:
                 lines.append(f"    rejected: {item['rejection']}")
         lines.extend([
             f"  Model called: {'YES' if data.get('model_called') else 'NO'}",
+            f"  Feasibility review called: {'YES' if data.get('feasibility_model_called') else 'NO'}",
             f"  Repair attempted: {'YES' if data.get('repair_attempts') else 'NO'}",
-            "  Ollama was not called: YES" if not data.get("model_called") else "  Ollama was not called: NO",
+            "  Ollama was not called: YES"
+            if not data.get("model_called") and not data.get("feasibility_model_called")
+            else "  Ollama feasibility review was called: YES"
+            if data.get("feasibility_model_called")
+            else "  Ollama generation decision was called: YES",
             "",
             "Evidence rejected: " + _display_value(diagnostic.get("evidence_rejected") or "none"),
             "Model proposed (not repository truth): " + _display_value(diagnostic.get("model_proposed") or "none"),

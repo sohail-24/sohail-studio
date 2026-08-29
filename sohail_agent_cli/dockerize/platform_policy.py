@@ -102,8 +102,11 @@ def _exact_runtime_version(component: dict[str, Any], runtime: str) -> str | Non
 
 
 def _has_application_port(component: dict[str, Any]) -> bool:
+    allowed_types = {"application"}
+    if component.get("framework") == "Nginx":
+        allowed_types.add("proxy")
     return any(
-        item.get("port_type") == "application"
+        item.get("port_type") in allowed_types
         and item.get("port") is not None
         and not item.get("conflict")
         for item in component.get("ports", [])

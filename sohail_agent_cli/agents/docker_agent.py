@@ -35,8 +35,12 @@ from sohail_agent_cli.providers import BaseProvider, OllamaProvider, ProviderCon
 DOCKER_OLLAMA_TIMEOUT_SECONDS = 120.0
 
 
-def _evidence_diagnostic(context: Any, reason: str) -> dict[str, Any]:
-    """Describe the evidence boundary without acquiring new repository facts."""
+def _evidence_diagnostic(
+    context: Any,
+    reason: str,
+    acquisition_details: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Describe the evidence boundary, including any bounded current scan."""
 
     requirements: list[dict[str, Any]] = []
     for component in context.components:
@@ -189,7 +193,8 @@ def _evidence_diagnostic(context: Any, reason: str) -> dict[str, Any]:
         "stage": "Evidence-bound decision validation",
         "reason": reason,
         "inspection_run_id": context.project.get("inspection_run_id"),
-        "repository_scan_during_dockerize": "NO",
+        "repository_scan_during_dockerize": "YES (targeted)" if acquisition_details else "NO",
+        "targeted_evidence_acquisition": acquisition_details or [],
         "requirements": requirements,
         "platform_policies": context.platform_policies,
         "evidence_available": context.evidence,
@@ -263,7 +268,6 @@ class DockerAgent(BaseAgent):
                     "Model output format invalid; performing one bounded repair"
                 ),
             )
-            using_default_acquisition = self.acquisition_service is None
             acquisition_service = self.acquisition_service or EvidenceAcquisitionService(repository)
             if user_evidence:
                 try:
@@ -293,13 +297,16 @@ class DockerAgent(BaseAgent):
                         f"User-provided evidence was rejected: {exc}",
                     )
             acquisition_details: list[dict[str, Any]] = []
+            feasibility_review: dict[str, Any] | None = None
+            feasibility_model_called = False
             decision = None
             selected_components = components
             if docker_plan is not None and not selected_components:
                 selected_components = list((docker_plan.get("dockerfiles") or {}).keys())
-            # Dockerize is intentionally a single-snapshot workflow.  A model
-            # decision gap is reported; repository evidence can only change by
-            # running Inspect explicitly before Dockerize.
+            # Use the persisted snapshot as the baseline. If the deterministic
+            # preflight finds an unresolved Docker fact, one bounded current-
+            # repository acquisition may refresh that baseline before the same
+            # preflight is evaluated again.
             for attempt in range(1):
                 context = context_builder.build(
                     root,
@@ -404,14 +411,88 @@ class DockerAgent(BaseAgent):
                     compose_context=ComposeContextBuilder.build(context).to_dict(),
                 )
                 decision = await decision_engine.decide(context)
+                if decision.status != "ready" and not decision.model_called:
+                    acquire_docker_evidence = getattr(
+                        acquisition_service, "acquire_docker_evidence", None
+                    )
+                    if acquire_docker_evidence is not None:
+                        self.info(
+                            "Starting targeted Docker evidence acquisition for unresolved requirements"
+                        )
+                        baseline = repository.load_latest(str(root))
+                        if baseline is None:
+                            raise DockerContextError(
+                                "Project Intelligence disappeared before targeted Docker evidence acquisition"
+                            )
+                        acquired = acquire_docker_evidence(
+                            root,
+                            baseline,
+                            context,
+                            decision.raw.get("missing_requirements") or [],
+                        )
+                        acquisition_details.append(acquired.to_dict())
+                        self.info(
+                            "Targeted Docker evidence acquisition complete: "
+                            f"{acquired.validated_target_count} current target(s) inspected, "
+                            f"{acquired.added_evidence_count} new fact(s) accepted"
+                        )
+                        if acquired.refreshed is not None:
+                            context = context_builder.build(
+                                root,
+                                selected_components,
+                            )
+                            if artifact_plan is not None:
+                                context = replace(context, artifact_plan=artifact_plan)
+                            context = replace(
+                                context,
+                                compose_context=ComposeContextBuilder.build(context).to_dict(),
+                            )
+                            self.info("Re-running deterministic Docker requirement preflight")
+                            decision = await decision_engine.decide(context)
+                if decision.status != "ready" and not decision.model_called:
+                    self.info(
+                        f"Asking {self.model} to evaluate current Docker evidence feasibility"
+                    )
+                    feasibility_model_called = True
+                    try:
+                        feasibility = await decision_engine.review_feasibility(
+                            context,
+                            decision.raw.get("missing_requirements") or [],
+                            acquisition_details,
+                        )
+                        feasibility_review = feasibility.to_dict()
+                        self.info(
+                            "Docker evidence feasibility review received: "
+                            + str(feasibility.status)
+                        )
+                    except DockerDecisionError as exc:
+                        feasibility_review = {
+                            "status": "UNAVAILABLE",
+                            "reason": str(exc),
+                            "repository_supported_decisions": [],
+                            "deterministic_derivations": [],
+                            "model_proposals": [],
+                            "minimum_additional_evidence": [
+                                {
+                                    "requirement": "Docker feasibility review",
+                                    "reason": "The bounded model review could not be completed; authoritative preflight evidence remains unresolved.",
+                                }
+                            ],
+                            "requested_user_action": "Resolve the authoritative Docker requirements and retry Dockerize.",
+                            "model_output_is_repository_truth": False,
+                        }
+                        self.warning("Docker evidence feasibility review unavailable")
                 self.info(
-                    "Ollama decision received"
+                    "Ollama Docker decision received"
                     if decision.model_called
-                    else "Deterministic evidence preflight blocked before Ollama"
+                    else "Deterministic evidence preflight remains authoritative"
                 )
                 if not decision.model_called:
                     self.warning("Missing authoritative Docker requirements")
-                    self.info("Ollama was not called")
+                    if feasibility_model_called:
+                        self.info("Ollama feasibility review completed; generation decision was not authorized")
+                    else:
+                        self.info("Ollama was not called")
                 if decision.repair_attempted:
                     self.info("Revalidating bounded repaired Docker decision")
                 if decision.status == "ready":
@@ -427,15 +508,16 @@ class DockerAgent(BaseAgent):
                         ).to_dict(),
                     )
                     break
-                self.info(
-                    "Dockerize evidence acquisition not started: "
-                    "the workflow is bound to the persisted inspection snapshot"
-                )
+                if not acquisition_details:
+                    self.info(
+                        "Dockerize evidence acquisition not started: "
+                        "no deterministic preflight gap required it"
+                    )
                 break
             assert decision is not None
             if decision.status != "ready":
                 reason = decision.raw.get("reason") or "The DevOps model requires more repository evidence"
-                diagnostic = _evidence_diagnostic(context, reason)
+                diagnostic = _evidence_diagnostic(context, reason, acquisition_details)
                 if decision.raw.get("stage") == "deterministic Docker requirement preflight":
                     diagnostic["stage"] = decision.raw["stage"]
                     diagnostic["preflight"] = decision.raw.get("evidence_boundary", [])
@@ -449,6 +531,8 @@ class DockerAgent(BaseAgent):
                     if decision.model_called
                     else None
                 )
+                if feasibility_review is not None:
+                    diagnostic["feasibility_review"] = feasibility_review
                 return AgentResult.controlled(
                     "NEEDS_EVIDENCE",
                     f"Docker decision requires evidence: {reason}",
@@ -461,6 +545,8 @@ class DockerAgent(BaseAgent):
                         "diagnostic": diagnostic,
                         "repair_attempts": int(decision.repair_attempted),
                         "model_called": decision.model_called,
+                        "feasibility_model_called": feasibility_model_called,
+                        "feasibility_review": feasibility_review,
                         "dry_run": self.dry_run,
                     },
                 )
@@ -608,6 +694,7 @@ class DockerAgent(BaseAgent):
                     "planned_modifications": [str(path) for path in modified_candidates],
                     "files_preserved": [str(path) for path in files_skipped],
                     "docker_plan": artifact_plan,
+                    "evidence_acquisition": acquisition_details,
                     "planned_actions": planned_actions,
                     "dry_run": self.dry_run,
                 },

@@ -13,6 +13,7 @@ from .compose_context import ComposeContextBuilder, ComposeContextError
 from .context_builder import DockerContext
 from .decision import DockerDecision
 from .platform_policy import policy_for_component, policy_value
+from .port_evidence import authoritative_component_ports
 from .strategies import STATIC_ARTIFACT_SERVER
 
 
@@ -143,12 +144,17 @@ def validate_docker_result(
                     f"Docker Compose working directory is inconsistent for service {name}"
                 )
             target = service.get("target_port", service.get("port"))
-            authoritative_ports = [
-                item for item in (authoritative or {}).get("ports", [])
-                if item.get("port_type") == "application"
-                and not item.get("conflict")
-                and item.get("port") is not None
-            ]
+            pattern = next(
+                (
+                    candidate for candidate in context.verified_patterns
+                    if str(candidate.get("component")) == name
+                    and candidate.get("origin") == "VERIFIED_INFERENCE"
+                ),
+                None,
+            )
+            authoritative_ports = authoritative_component_ports(
+                (authoritative or {}).get("ports", []), pattern
+            )
             rendered_ports = [str(item) for item in config.get("ports", []) or []]
             rendered_pairs: set[tuple[int, int]] = set()
             for rendered in rendered_ports:

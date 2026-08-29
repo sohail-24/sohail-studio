@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sohail_agent_cli.inspection import DeepInspector, ProjectIntelligence
+from sohail_agent_cli.inspection.setup import ProjectSetupBuilder
 from sohail_agent_cli.providers import BaseProvider, GenerationRequest
 
 from .models import (
@@ -19,7 +20,28 @@ from .models import (
     EvidenceReference,
     EvidenceRelationship,
     InspectionTarget,
+    PROTECTED_DIRECTORIES,
 )
+
+
+DOCKER_EVIDENCE_FILENAMES = frozenset({
+    ".env", ".env.example", ".env.sample", ".env.template",
+    "Makefile", "Procfile", "pyproject.toml", "requirements.txt",
+    "Pipfile", "Pipfile.lock", "poetry.lock", "package.json",
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "go.mod", "Cargo.toml", "rust-toolchain", "rust-toolchain.toml",
+    "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
+    "settings.gradle.kts", ".nvmrc", ".python-version",
+})
+DOCKER_EVIDENCE_SUFFIXES = frozenset({".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".sh"})
+DOCKER_EVIDENCE_DIRECTORIES = frozenset({
+    "docker", "deploy", "deployment", "deployments", "infra", "infrastructure",
+    "k8s", "kubernetes", "manifests", "ops", "eks-manifests",
+})
+DOCKER_ENTRYPOINT_FILENAMES = frozenset({
+    "app.py", "main.py", "run.py", "server.py", "wsgi.py", "manage.py",
+    "index.js", "index.ts", "main.js", "main.ts", "server.js", "server.ts",
+})
 
 
 class EvidenceAnalysisError(ValueError):
@@ -307,6 +329,10 @@ class AcquisitionResult:
     validated_target_count: int = 0
     verification_performed: bool = False
     refreshed: ProjectIntelligence | None = None
+    scope: str = ""
+    requested_requirements: tuple[str, ...] = ()
+    candidate_targets: tuple[str, ...] = ()
+    evidence_found: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -316,16 +342,103 @@ class AcquisitionResult:
             "added_evidence_count": self.added_evidence_count,
             "validated_target_count": self.validated_target_count,
             "verification_performed": self.verification_performed,
+            "scope": self.scope,
+            "requested_requirements": list(self.requested_requirements),
+            "candidate_targets": list(self.candidate_targets),
+            "evidence_found": [dict(item) for item in self.evidence_found],
         }
 
 
 class EvidenceAcquisitionService:
     """Validate model proposals, inspect only safe existing targets, and persist facts."""
 
-    def __init__(self, repository: Any, inspector: DeepInspector | None = None, max_targets: int = 8) -> None:
+    def __init__(self, repository: Any, inspector: DeepInspector | None = None, max_targets: int = 16) -> None:
         self.repository = repository
         self.inspector = inspector or DeepInspector()
         self.max_targets = max_targets
+
+    def acquire_docker_evidence(
+        self,
+        root: Path,
+        intelligence: ProjectIntelligence,
+        context: Any,
+        missing_requirements: list[str] | tuple[str, ...],
+    ) -> AcquisitionResult:
+        """Inspect a bounded, deterministic set of current Docker evidence.
+
+        This path intentionally does not call an AI provider or the full
+        inspector.  It inventories only current files whose names, locations,
+        or persisted entrypoint records can answer unresolved Docker facts,
+        then reuses ``inspect_targets`` for safe extraction and provenance.
+        """
+
+        root = Path(root).expanduser().resolve()
+        requirements = tuple(str(item) for item in missing_requirements if str(item).strip())
+        targets = self._docker_targets(root, context)
+        if not targets:
+            return AcquisitionResult(
+                verification_performed=True,
+                scope="docker",
+                requested_requirements=requirements,
+            )
+
+        partial = self.inspector.inspect_targets(root, targets)
+        evidence_found = tuple(
+            {
+                key: value
+                for key, value in item.to_dict().items()
+                if key in {"source_file", "evidence_type", "key", "confidence", "line_number", "source_type", "rule_id"}
+            }
+            for item in partial.evidence
+        )
+        merged = self._merge(intelligence, partial)
+        merged.project_setup = ProjectSetupBuilder.build(merged)
+        before = {self._evidence_key(item) for item in intelligence.evidence}
+        after = {self._evidence_key(item) for item in merged.evidence}
+        added = len(after - before)
+        if added:
+            self.repository.persist(merged)
+        return AcquisitionResult(
+            inspected_targets=tuple(path.relative_to(root).as_posix() for path in targets),
+            accepted_evidence_added=bool(added),
+            added_evidence_count=added,
+            validated_target_count=len(targets),
+            verification_performed=True,
+            refreshed=merged if added else intelligence,
+            scope="docker",
+            requested_requirements=requirements,
+            candidate_targets=tuple(path.relative_to(root).as_posix() for path in targets),
+            evidence_found=evidence_found,
+        )
+
+    def _docker_targets(self, root: Path, context: Any) -> list[Path]:
+        """Select current files by deterministic Docker evidence relevance."""
+
+        entrypoints = {
+            str(item.get("source_file"))
+            for component in getattr(context, "components", []) or []
+            for item in component.get("entrypoints", []) or []
+            if item.get("source_file")
+        }
+        candidates: list[Path] = []
+        for path in root.rglob("*"):
+            if not path.is_file() or any(part in PROTECTED_DIRECTORIES for part in path.relative_to(root).parts):
+                continue
+            relative = path.relative_to(root).as_posix()
+            name = path.name
+            lower_name = name.lower()
+            parent_names = {part.lower() for part in path.relative_to(root).parts[:-1]}
+            relevant = (
+                relative in entrypoints
+                or name in DOCKER_EVIDENCE_FILENAMES
+                or name.startswith("Dockerfile.")
+                or lower_name.startswith("readme")
+                or (name in DOCKER_ENTRYPOINT_FILENAMES)
+                or (path.suffix.lower() in DOCKER_EVIDENCE_SUFFIXES and parent_names.intersection(DOCKER_EVIDENCE_DIRECTORIES))
+            )
+            if relevant:
+                candidates.append(path)
+        return sorted(candidates, key=lambda path: path.relative_to(root).as_posix())[: self.max_targets]
 
     def acquire(
         self,

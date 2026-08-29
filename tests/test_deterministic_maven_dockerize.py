@@ -290,8 +290,10 @@ def test_dry_run_preflight_failure_writes_zero_files_and_does_not_rescan(tmp_pat
     after = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     assert result.status == "NEEDS_EVIDENCE"
     assert before == after
-    assert provider.call_history == []
+    assert len(provider.call_history) == 1
     assert result.data["model_called"] is False
+    assert result.data["feasibility_model_called"] is True
+    assert result.data["feasibility_review"]["status"] == "UNAVAILABLE"
     assert result.data["repair_attempts"] == 0
     assert result.data["diagnostic"]["stage"] == "deterministic Docker requirement preflight"
     assert result.data["diagnostic"]["missing_requirements"]

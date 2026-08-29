@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from .infrastructure_policy import evaluate_infrastructure_candidate
+from .port_evidence import authoritative_component_ports
 
 
 class ComposeContextError(ValueError):
@@ -131,19 +132,33 @@ class ComposeContextBuilder:
             if isinstance(item, dict) and item.get("source") and item.get("target")
         )
 
-        data_services = tuple(
-            evaluate_infrastructure_candidate({
-                "service_type": str(database),
-                "evidence": [
-                    dict(item) for item in context.evidence
-                    if item.get("evidence_type") == "database"
-                    and str(item.get("value")) == str(database)
-                ],
-                "source_type": "EXPLICIT_EVIDENCE",
-                "renderable": False,
-            })
-            for database in dict.fromkeys(context.infrastructure.get("databases", []))
-        )
+        persisted_data_services = context.infrastructure.get("data_services", [])
+        if persisted_data_services:
+            data_services = tuple(
+                evaluate_infrastructure_candidate({
+                    **dict(service),
+                    "service_type": str(service.get("service_type") or "unknown"),
+                    "source_type": "EXPLICIT_EVIDENCE",
+                    "renderable": False,
+                })
+                for service in persisted_data_services if isinstance(service, dict)
+            )
+        else:
+            # Compatibility path for snapshots written before generic data
+            # services were added.
+            data_services = tuple(
+                evaluate_infrastructure_candidate({
+                    "service_type": str(database),
+                    "evidence": [
+                        dict(item) for item in context.evidence
+                        if item.get("evidence_type") == "database"
+                        and str(item.get("value")) == str(database)
+                    ],
+                    "source_type": "EXPLICIT_EVIDENCE",
+                    "renderable": False,
+                })
+                for database in dict.fromkeys(context.infrastructure.get("databases", []))
+            )
         service_evidence = tuple(
             evaluate_infrastructure_candidate({
                 **dict(item),
@@ -243,10 +258,16 @@ class ComposeContextBuilder:
                     )
             component_ports = [
                 item for item in authoritative.get("ports", [])
-                if item.get("port_type") == "application"
-                and not item.get("conflict")
-                and item.get("port") is not None
             ]
+            pattern = next(
+                (
+                    candidate for candidate in getattr(context, "verified_patterns", [])
+                    if str(candidate.get("component")) == component
+                    and candidate.get("origin") == "VERIFIED_INFERENCE"
+                ),
+                None,
+            )
+            component_ports = authoritative_component_ports(component_ports, pattern)
             service_port = service.get("port")
             target_port = service.get("target_port", service_port)
             expected_port_pairs = {
