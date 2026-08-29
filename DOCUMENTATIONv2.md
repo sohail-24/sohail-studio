@@ -10,30 +10,30 @@ Sohail Studio exists to provide an integrated, local workspace where developers 
 
 ## Running the Project
 
-- **Setup:** Run `python3 -m venv .venv` and then `.venv/bin/python -m pip install -e .` to setup the single environment. Use `.venv/bin/python -m pip install -e '.[dev]'` for test dependencies.
+- **Setup:** Run `python3 -m venv .venv` and then `.venv/bin/python -m pip install -e .` to setup the single environment. Use `.venv/bin/python -m pip install -e '.[dev]'` for test dependencies. Database migrations are applied using Alembic.
 - **Execution:** Start the server using `.venv/bin/uvicorn backend.main:app --reload`. Access the studio via `http://127.0.0.1:8000`.
-- The local Ollama endpoint must be running at `http://127.0.0.1:11434` with the `devops-qwen` model (based on Qwen3 4B Q4_K_M, using a 16384 context window).
+- The local Ollama endpoint must be running and available (default `http://127.0.0.1:11434`) with the configured `devops-qwen` model. Environment variable `DATABASE_URL` must point to the Neon PostgreSQL instance.
 
 ## Chat & AI Control Plane
 
 The Chat uses `devops-qwen` strictly via local Ollama inference.
 - Normal knowledge questions are answered natively without executing local commands.
-- When local environment context is required, the AI Control Plane safely aggregates data using explicitly allowed read-only capabilities (e.g., `pwd`, `ls`, Docker/Git/Kubernetes status). It strictly prevents execution of state-mutating commands.
+- When local environment context is required, the AI Control Plane safely aggregates data using explicitly allowed read-only capabilities (e.g., `pwd`, `ls`, Docker/Git/Kubernetes status). It strictly prevents execution of state-mutating commands by avoiding `shell=True`.
 
 ## Raw PTY Terminal
 
-The raw Terminal is a dedicated, real local PTY shell (e.g., `zsh` or `bash`). It operates completely separately from the AI Chat and Sohail-Agent workflows, providing unrestricted local execution capabilities.
+The raw Terminal is a dedicated, real local PTY shell (e.g., `zsh` or `bash`). It operates completely separately from the AI Chat and Sohail-Agent workflows, providing unrestricted local execution capabilities natively loaded with the `.venv` context.
 
 ## Sohail-Agent Workflows & Project Inspection
 
-Sohail-Agent acts as a separate DevOps CLI, distinct from the LLM chat mode. It runs guided workflows bridged natively by `core/cli_bridge.py`.
+Sohail-Agent acts as a separate DevOps CLI, distinct from the LLM chat mode. It runs guided workflows bridged natively by `core/cli_bridge.py` using strict explicit argument structures.
 
-- **Inspect**: Uses Deep Inspector to build project context, identify stacks, and extract deterministic evidence from the real filesystem.
-- **Dockerize**: A guided workflow to generate Docker configurations. It relies on the Dockerize Context Builder to supply the model with focused evidence, and a deterministic validator to verify the model's structured decision before artifact generation.
+- **Inspect**: Uses Deep Inspector (`sohail_agent_cli/inspection/`) to build project context, identify stacks, and extract deterministic evidence from the real filesystem.
+- **Dockerize**: A guided workflow to generate Docker configurations. It relies on the Dockerize Context Builder to supply the model with focused evidence, and a deterministic validator (`sohail_agent_cli/dockerize/validation.py`) to verify the model's structured decision before artifact generation.
 
 ## Project Intelligence & Persistence
 
-Project Intelligence is the normalized, persisted intelligence model of the project. Deep Inspector feeds into this model, which is persisted in Neon PostgreSQL (configured via `DATABASE_URL`). This serves as the single source of truth and is hydrated via the API for downstream workflows like Dockerize. Raw inspection summaries do not bypass this persistence layer.
+Project Intelligence is the normalized, persisted intelligence model of the project. Deep Inspector feeds into this model, which is persisted in PostgreSQL (configured via `DATABASE_URL` in `core/storage/database.py`). This serves as the single source of truth and is hydrated via the API for downstream workflows like Dockerize. Raw inspection summaries do not bypass this persistence layer.
 
 ## Evidence Model & Rules
 
@@ -49,7 +49,7 @@ The **Deterministic Validation** layer is the final safety and evidence boundary
 
 ## Real Test Project Context
 
-The system is currently tested against real project structures containing backend and frontend components. Sohail Studio dynamically inspects projects and is not hardcoded to a specific architecture.
+The system is currently tested against real project structures using `pytest` (`tests/sohail_agent_cli/` and `tests/`). Tests rigorously enforce deterministic validations and control plane capabilities.
 
 ## Current Limitations
 
