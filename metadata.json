@@ -1,0 +1,8 @@
+{
+  "name": "Sohail Studio",
+  "description": "Local-first AI engineering workspace",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
