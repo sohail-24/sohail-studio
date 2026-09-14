@@ -429,6 +429,9 @@ app.get("/api/runs/:run_id", (req, res) => {
 
 app.post("/api/agent/runs", (req, res) => {
   const body = req.body || {};
+  if (body.approved !== true) {
+    return res.status(400).json({ detail: "Approval required" });
+  }
   const operation = body.operation;
   const target = path.resolve(body.target || ROOT);
   const runId = Math.random().toString(36).substring(2, 14);
