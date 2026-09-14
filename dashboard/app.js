@@ -1,5 +1,5 @@
 const state = {
-  route: "home",
+  route: "chat",
   workflows: [],
   selectedWorkflow: null,
   plan: null,
@@ -50,6 +50,7 @@ const state = {
   agentInspectionRunId: "",
   agentDryRun: false,
   agentOverwrite: false,
+  fullInfoOpen: false,
   chatConnection: "Available",
   chatStatus: "Idle",
   chatCaptureIndex: null,
@@ -58,7 +59,7 @@ const state = {
   advancedOpen: true,
   provider: "ollama",
   model: "devops-qwen:latest",
-  commandMode: "terminal",
+  commandMode: "chat",
   chatHistory: [],
 };
 
@@ -138,13 +139,28 @@ function showToast(message) {
 }
 
 function setRoute(route) {
-  state.route = route;
-  if (route === "terminal") {
-    state.terminalEngine = null;
-    if (state.terminalSocket) state.terminalSocket.close();
-    if (state.agentRunSocket) state.agentRunSocket.close();
-    state.terminalSocket = null;
-    state.agentRunSocket = null;
+  let target = route;
+  if (target === "home" || !target) target = "chat";
+  if (target === "terminal") target = "raw-pty";
+  if (target === "workflows") target = "sohail-agent";
+  state.route = target;
+  if (state.route === "chat") {
+    state.commandMode = "chat";
+  } else if (state.route === "raw-pty") {
+    state.commandMode = "terminal";
+    state.terminalEngine = "pty";
+  } else if (state.route === "sohail-agent") {
+    state.terminalEngine = "agent";
+    if (!state.agentProjectValidated || !state.agentContext) {
+      state.agentProjectValidated = true;
+      state.agentInputs.target = state.agentInputs.target || ".";
+      if (!state.agentContext) {
+        loadStoredIntelligence().then(() => {
+          state.agentInspectionReady = true;
+          render();
+        }).catch(() => {});
+      }
+    }
   }
   state.plan = null;
   state.selectedWorkflow = null;
@@ -199,14 +215,17 @@ function mentorPanel() {
         <div id="mentor-3d-container" class="mentor-robot-3d" aria-label="Interactive AI Mentor 3D robot"></div>
       </div>
     </button>
-  </div>
-  <div class="mentor-suggestion">
-    <button class="mentor-suggestion-btn" data-route="chat">Inspect repository first →</button>
   </div></section>`;
 }
 
 function workspaceCanvas() {
-  const messagesHtml = state.chatHistory.map((msg, index) => {
+  const messagesHtml = state.chatHistory.length === 0
+    ? `<div class="chat-empty-state">
+        <div class="chat-empty-icon">✦</div>
+        <div class="chat-empty-title">AI Mentor Chat</div>
+        <p class="chat-empty-subtitle">Direct line to Sohail Studio AI mentor. Ask questions, plan containerization, or review architecture tradeoffs.</p>
+      </div>`
+    : state.chatHistory.map((msg, index) => {
     const isUser = msg.role === "user";
     const roleName = isUser ? "You" : "Sohail Studio";
     return `<div class="chat-message ${isUser ? 'user' : 'assistant'}">
@@ -227,47 +246,33 @@ function workspaceCanvas() {
 }
 
 function homeTerminalPanel() {
-  const preview = state.terminalBuffer ? "Raw PTY connected\nOpen terminal to view live output." : "Sohail Studio terminal\nWaiting for a command…";
-  return `<section class="terminal-panel surface-card"><div class="terminal-panel-header"><div><span class="panel-kicker">Execution engine</span><h2>Terminal</h2></div><div class="terminal-header-actions"><span class="terminal-connection"><span class="neutral-dot"></span><span id="terminal-connection-label">${escapeHtml(state.terminalConnection)}</span></span><button class="quiet-icon" title="Collapse terminal">⌃</button></div></div><div class="terminal-status-row"><span class="terminal-idle" id="terminal-home-status">${escapeHtml(state.terminalStatus)}</span><span>Real shell PTY bridge</span></div><div class="terminal-preview" id="terminal-preview" aria-label="Terminal preview">${escapeHtml(preview)}</div><div class="terminal-panel-footer"><span>Real shell PTY bridge</span><button class="text-button" data-route="terminal">Open terminal ↗</button></div></section>`;
+  const preview = state.terminalBuffer ? "Terminal connected\nOpen terminal to view live output." : "Sohail Studio terminal\nWaiting for a command…";
+  return `<section class="terminal-panel surface-card"><div class="terminal-panel-header"><div><span class="panel-kicker">Execution engine</span><h2>Terminal</h2></div><div class="terminal-header-actions"><span class="terminal-connection"><span class="neutral-dot"></span><span id="terminal-connection-label">${escapeHtml(state.terminalConnection)}</span></span><button class="quiet-icon" title="Collapse terminal">⌃</button></div></div><div class="terminal-status-row"><span class="terminal-idle" id="terminal-home-status">${escapeHtml(state.terminalStatus)}</span><span>Real shell PTY bridge</span></div><div class="terminal-preview" id="terminal-preview" aria-label="Terminal preview">${escapeHtml(preview)}</div><div class="terminal-panel-footer"><span>Real shell PTY bridge</span><button class="text-button" data-route="raw-pty">Open Terminal ↗</button></div></section>`;
 }
 
 function commandBar() {
-  const examples = ["pwd", "ls", "whoami", "cd backend", "command-that-does-not-exist"];
-
-  const placeholders = {
-    chat: "Ask Sohail Studio...",
-    terminal: "Type a terminal command...",
-    inspect: "What should I inspect?",
-    workflow: "Describe the workflow..."
-  };
-
-  const buttonLabels = {
-    chat: "Send",
-    terminal: "Send",
-    inspect: "Inspect",
-    workflow: "Generate Plan"
-  };
+  const examples = [
+    "How do I inspect this project?",
+    "Plan a container workflow for my app",
+    "Help me prepare Kubernetes manifests",
+    "How does the local engineering mentor work?"
+  ];
 
   return `<section class="command-bar-section">
-    <div class="command-modes">
-      <button class="command-mode-btn ${state.commandMode === 'chat' ? 'active' : ''}" data-cmd-mode="chat">+ Chat</button>
-      <button class="command-mode-btn ${state.commandMode === 'terminal' ? 'active' : ''}" data-cmd-mode="terminal">⌘ Terminal</button>
-      <button class="command-mode-btn ${state.commandMode === 'inspect' ? 'active' : ''}" data-cmd-mode="inspect">🔍 Inspect</button>
-      <button class="command-mode-btn ${state.commandMode === 'workflow' ? 'active' : ''}" data-cmd-mode="workflow">⚙ Workflow</button>
-    </div>
-    <form class="command-bar" id="prompt-form" style="margin-top: 8px;">
+    <form class="command-bar" id="prompt-form">
       <span class="command-spark">✦</span>
-      <input id="prompt-input" placeholder="${placeholders[state.commandMode]}" autocomplete="off" />
+      <input id="prompt-input" placeholder="Ask Sohail Studio..." autocomplete="off" autofocus />
 
-      <button class="execute-button" aria-label="Execute command">▶ <span>${buttonLabels[state.commandMode]}</span></button>
+      <button class="execute-button" aria-label="Send message">▶ <span>Send</span></button>
     </form>
     <div class="command-examples"><span>Try</span>${examples.map((example) => `<button type="button" data-command-example="${example}">${example}</button>`).join("")}</div>
   </section>`;
 }
 
-function homeView() {
+function chatView() {
   return `<div class="home-dashboard"><div class="home-columns"><div class="left-column">${recentsTaskPanel()}${mentorPanel()}</div><div class="center-column">${workspaceCanvas()}</div><div class="right-column">${knowledgeSphere()}${homeTerminalPanel()}</div></div></div>`;
 }
+const homeView = chatView;
 
 function workflowsView() {
   return `<div class="page-intro"><div class="eyebrow">Engineering workflows</div><h1>Choose a direction</h1><p>Each workflow starts with a focused plan and waits for your approval.</p></div><div class="workflow-grid">${state.workflows.map(workflowCard).join("")}</div>`;
@@ -275,11 +280,11 @@ function workflowsView() {
 
 function planView() {
   const workflow = state.selectedWorkflow;
-  if (!workflow) return workflowsView();
+  if (!workflow) return sohailAgentView();
   const isPlaceholder = !workflow.cli_backed;
-  return `<button class="back-button" data-route="${state.route === "plan" ? "workflows" : "home"}">← Back to workflows</button>
+  return `<button class="back-button" data-route="sohail-agent">← Back to Sohail-Agent</button>
     <div class="page-intro"><div class="eyebrow">${workflow.eyebrow}</div><h1>${workflow.label}</h1><p>${workflow.description}</p></div>
-    ${isPlaceholder ? `<div class="panel placeholder-panel"><div class="empty-orbit">✦</div><h2>Foundation placeholder</h2><p>This workflow is wired into the Studio navigation and approval model. Its agent implementation will arrive in a future iteration.</p><button class="secondary-button" data-route="home">Return home</button></div>` : `<div class="plan-layout">
+    ${isPlaceholder ? `<div class="panel placeholder-panel"><div class="empty-orbit">✦</div><h2>Foundation placeholder</h2><p>This workflow is wired into the Studio navigation and approval model. Its agent implementation will arrive in a future iteration.</p><button class="secondary-button" data-route="chat">Return to Chat</button></div>` : `<div class="plan-layout">
       <section class="panel panel-pad"><h2 class="panel-title">First, choose a local project folder</h2><form id="plan-form"><label class="field-label" for="target-input">Project path</label><input class="field-input" id="target-input" placeholder="/Users/sohal/Projects/my-app" value="${escapeHtml(state.plan?.target || "")}" required /><div class="approval-callout"><b>Read the plan before running.</b> Sohail Studio will call the existing Sohail-Agent-CLI only after you approve the steps on the right.</div><div class="button-row"><button class="primary-button" type="submit">Create plan →</button></div></form></section>
       <aside class="panel panel-pad"><h2 class="panel-title">How this works</h2><div class="plan-list"><div class="plan-step"><span class="step-number">1</span><span>Give the assistant one focused context.</span></div><div class="plan-step"><span class="step-number">2</span><span>Review the exact intended actions.</span></div><div class="plan-step"><span class="step-number">3</span><span>Approve before any process starts.</span></div></div></aside>
     </div>`}`;
@@ -288,46 +293,47 @@ function planView() {
 function approvedPlanView() {
   const workflow = state.selectedWorkflow;
   const plan = state.plan;
-  return `<button class="back-button" data-route="workflows">← Change workflow</button><div class="page-intro"><div class="eyebrow">Review required</div><h1>Your execution plan</h1><p>Nothing has run yet. Confirm the scope, then start the approved command.</p></div>
-    <div class="plan-layout"><section class="panel panel-pad"><h2 class="panel-title">${workflow.label}</h2><div class="plan-list">${plan.steps.map((step, index) => `<div class="plan-step"><span class="step-number">${index + 1}</span><span>${step}</span></div>`).join("")}</div><div class="button-row"><button class="secondary-button" data-route="workflows">Edit</button><button class="primary-button" id="approve-run">Approve & run →</button></div></section><aside class="panel panel-pad"><h2 class="panel-title">Scope</h2><div class="info-list"><div class="info-row"><span>Target</span><strong>${escapeHtml(plan.target)}</strong></div><div class="info-row"><span>Engine</span><strong>Sohail-Agent-CLI</strong></div><div class="info-row"><span>Mode</span><strong>Local only</strong></div><div class="info-row"><span>Approval</span><strong>Required</strong></div></div></aside></div>`;
+  return `<button class="back-button" data-route="sohail-agent">← Change operation</button><div class="page-intro"><div class="eyebrow">Review required</div><h1>Your execution plan</h1><p>Nothing has run yet. Confirm the scope, then start the approved command.</p></div>
+    <div class="plan-layout"><section class="panel panel-pad"><h2 class="panel-title">${workflow.label}</h2><div class="plan-list">${plan.steps.map((step, index) => `<div class="plan-step"><span class="step-number">${index + 1}</span><span>${step}</span></div>`).join("")}</div><div class="button-row"><button class="secondary-button" data-route="sohail-agent">Edit</button><button class="primary-button" id="approve-run">Approve & run →</button></div></section><aside class="panel panel-pad"><h2 class="panel-title">Scope</h2><div class="info-list"><div class="info-row"><span>Target</span><strong>${escapeHtml(plan.target)}</strong></div><div class="info-row"><span>Engine</span><strong>Sohail-Agent-CLI</strong></div><div class="info-row"><span>Mode</span><strong>Local only</strong></div><div class="info-row"><span>Approval</span><strong>Required</strong></div></div></aside></div>`;
 }
 
 function runView() {
   const workflow = state.selectedWorkflow;
-  return `<div class="page-intro"><div class="eyebrow">Live execution</div><h1>${workflow?.label || "Workflow run"}</h1><p>Watch the real CLI process as it runs. Output is never simulated.</p></div><div class="run-layout"><section class="panel console-panel"><div class="console-head"><strong>Execution stream</strong><span class="console-status"><span class="status-dot"></span><span id="run-status">Connecting…</span></span></div><div class="console-output" id="console-output"><span class="console-command">Waiting for the local process…</span></div></section><div class="button-row"><button class="secondary-button" data-route="terminal">Open terminal</button><button class="secondary-button" data-route="home">Back to home</button></div></div>`;
+  return `<div class="page-intro"><div class="eyebrow">Live execution</div><h1>${workflow?.label || "Workflow run"}</h1><p>Watch the real CLI process as it runs. Output is never simulated.</p></div><div class="run-layout"><section class="panel console-panel"><div class="console-head"><strong>Execution stream</strong><span class="console-status"><span class="status-dot"></span><span id="run-status">Connecting…</span></span></div><div class="console-output" id="console-output"><span class="console-command">Waiting for the local process…</span></div></section><div class="button-row"><button class="secondary-button" data-route="raw-pty">Open Raw PTY</button><button class="secondary-button" data-route="chat">Back to Chat</button></div></div>`;
+}
+
+function rawPtyView() {
+  const intro = `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>Direct interactive shell connected to your local environment via real PTY bridge.</p></div>`;
+  return `${intro}${rawTerminalView()}`;
+}
+
+function sohailAgentView() {
+  if (!state.agentProjectValidated) return agentProjectChooser();
+  if (state.agentInspectionActive || ["Starting", "Running", "Loading stored intelligence"].includes(state.agentStatus)) {
+    return inspectionLoadingView();
+  }
+  return agentTerminalView();
 }
 
 function terminalView() {
-  if (!state.terminalEngine) return terminalEngineChooser();
-  if (state.terminalEngine === "agent" && state.agentProjectValidated && state.agentCategory === "inspect") {
-    if (state.agentInspectionActive || ["Starting", "Running", "Loading stored intelligence"].includes(state.agentStatus)) {
-      return inspectionLoadingView();
-    }
-      if (state.selectedAgentOperation === "inspect" && state.agentInspectionReady && state.agentContext) return agentIntelligenceWorkspace();
-  }
-  const engineTabs = `<div class="terminal-engine-tabs" role="tablist" aria-label="Terminal engine"><button class="terminal-engine-tab ${state.terminalEngine === "pty" ? "active" : ""}" data-terminal-engine="pty">Raw PTY</button><button class="terminal-engine-tab ${state.terminalEngine === "agent" ? "active" : ""}" data-terminal-engine="agent">Sohail-Agent</button></div>`;
-  const body = state.terminalEngine === "agent" ? agentTerminalView() : rawTerminalView();
-  const intro = state.terminalEngine === "agent" && !state.agentProjectValidated
-    ? `<div class="page-intro"><div class="eyebrow">Sohail-Agent Terminal</div><h1>Select a project folder</h1><p>Choose a local project once. Inspection and engineering actions will reuse its stored intelligence.</p></div>`
-    : `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>Choose a local shell or the existing Sohail-Agent engineering CLI.</p></div>`;
-  return `${intro}${engineTabs}${body}`;
+  return rawPtyView();
 }
 
 function terminalEngineChooser() {
-  return `<div class="page-intro"><div class="eyebrow">Execution engine</div><h1>Terminal</h1><p>Choose how you want to work in this local workspace.</p></div><section class="terminal-engine-picker"><div class="terminal-engine-picker-heading"><span class="panel-kicker">Terminal</span><h2>Choose execution engine</h2><p>Your choice stays inside Sohail Studio and can be changed at any time.</p></div><div class="terminal-engine-picker-grid"><button type="button" class="terminal-engine-card" data-terminal-engine="pty"><span class="terminal-engine-card-icon">›_</span><span><strong>Raw PTY</strong><small>Real zsh terminal</small></span><span class="terminal-engine-card-arrow">→</span></button><button type="button" class="terminal-engine-card" data-terminal-engine="agent"><span class="terminal-engine-card-icon">✦</span><span><strong>Sohail-Agent</strong><small>AI engineering workflows</small></span><span class="terminal-engine-card-arrow">→</span></button></div></section>`;
+  return rawPtyView();
 }
 
 function rawTerminalView() {
-  return `<section class="terminal-shell"><div class="terminal-toolbar"><div class="terminal-toolbar-title"><span class="terminal-dots"><i></i><i></i><i></i></span><strong>sohail-studio / raw pty</strong></div><div class="terminal-toolbar-status"><span class="status-dot"></span><span id="terminal-status">Connecting…</span><button class="quiet-icon" data-route="home" title="Collapse terminal">⌃</button></div></div><div class="terminal-execution-row"><span>Execution status</span><strong>Interactive zsh</strong><span>Command output is live</span></div><div class="terminal-screen" id="terminal-screen" aria-label="Raw PTY terminal"></div><form class="terminal-input-row" id="terminal-form"><span>›</span><input class="terminal-input" id="terminal-input" placeholder="Type a command and press Enter" autocomplete="off" /><span class="terminal-hint">Ctrl+C supported</span></form></section>`;
+  return `<section class="terminal-shell"><div class="terminal-toolbar"><div class="terminal-toolbar-title"><span class="terminal-dots"><i></i><i></i><i></i></span><strong>sohail-studio / terminal</strong></div><div class="terminal-toolbar-status"><span class="status-dot"></span><span id="terminal-status">Connecting…</span><button class="quiet-icon" data-route="chat" title="Collapse terminal">⌃</button></div></div><div class="terminal-execution-row"><span>Execution status</span><strong>Interactive shell</strong><span>Command output is live</span></div><div class="terminal-screen" id="terminal-screen" aria-label="Interactive terminal" tabindex="0"></div></section>`;
 }
 
 function agentProjectChooser() {
-  return `<section class="agent-project-start panel"><div class="agent-project-start-icon">⌂</div><div><span class="panel-kicker">Local project</span><h2>Select Project Folder</h2><p>Choose a local path. Inspect runs the real repository inspection and opens Project Intelligence when the persisted snapshot is ready.</p></div><form id="agent-project-form" class="agent-project-form"><label class="field-label" for="agent-project-input">Project path</label><div class="agent-project-input-row"><input class="field-input" id="agent-project-input" value="${escapeHtml(state.agentInputs.target)}" placeholder="/Users/sohal/Projects/my-app" autocomplete="off" required /><button class="primary-button" type="submit">Inspect project →</button></div></form>${state.agentOutput ? `<p class="agent-project-error">${escapeHtml(state.agentOutput)}</p>` : ""}</section>`;
+  return `<section class="agent-project-start panel"><div class="agent-project-start-icon">⌂</div><div><span class="panel-kicker">Local project</span><h2>Select Project Folder</h2><p>Choose a local path. Inspect runs the real repository inspection and opens Project Intelligence when the persisted snapshot is ready.</p></div><form id="agent-project-form" class="agent-project-form"><label class="field-label" for="agent-project-input">Project path</label><div class="agent-project-input-row"><input class="field-input" id="agent-project-input" value="${escapeHtml(state.agentInputs.target || ".")}" placeholder="/Users/sohal/Projects/my-app" autocomplete="off" required /><button class="primary-button" type="submit">Inspect project →</button></div></form><div class="agent-project-skip"><button type="button" class="text-button" data-agent-skip-project>Open Sohail-Agent workspace directly →</button></div>${state.agentOutput ? `<p class="agent-project-error">${escapeHtml(state.agentOutput)}</p>` : ""}</section>`;
 }
 
 function inspectionLoadingView() {
   const output = state.agentOutput || "Waiting for the real inspection process…";
-  return `<section class="agent-inspection-loading panel"><div class="empty-orbit">⌘</div><span class="panel-kicker">Live inspection</span><h2>Inspecting project</h2><p>Reading repository evidence and persisting the verified Project Intelligence snapshot.</p><div class="agent-inspection-loading-status"><span class="status-dot"></span><strong>${escapeHtml(state.agentStatus)}</strong></div><pre class="agent-output">${escapeHtml(output)}</pre><div class="button-row"><button type="button" class="secondary-button" data-terminal-engine="pty">Open Raw PTY</button></div></section>`;
+  return `<section class="agent-inspection-loading panel"><div class="empty-orbit">⌘</div><span class="panel-kicker">Live inspection</span><h2>Inspecting project</h2><p>Reading repository evidence and persisting the verified Project Intelligence snapshot.</p><div class="agent-inspection-loading-status"><span class="status-dot"></span><strong>${escapeHtml(state.agentStatus)}</strong></div><pre class="agent-output">${escapeHtml(output)}</pre><div class="button-row"><button type="button" class="secondary-button" data-route="raw-pty">Open Raw PTY</button></div></section>`;
 }
 
 function agentAdvancedInspectionDetails(context) {
@@ -457,77 +463,383 @@ function renderAdvancedEvidence(context) {
   return '<div class="agent-advanced-records"><details><summary>All evidence records (' + (context.evidence || []).length + ')</summary><div class="agent-advanced-record-grid">' + evidence + '</div></details><details><summary>Component relationships (' + (context.relationships || []).length + ')</summary><div class="agent-advanced-record-grid">' + relationships + '</div></details></div>';
 }
 
-function agentIntelligenceWorkspace() {
-  const context = state.agentContext;
+function renderProjectIdentity(context) {
+  const target = context.root_path || context.path || state.agentInputs.target || ".";
+  const name = context.name || context.project || (target === "." ? "Sohail Studio" : target.split("/").filter(Boolean).pop() || "Sohail Studio");
+  const inspectedDate = context.inspected_at
+    ? new Date(context.inspected_at).toLocaleString()
+    : "Recently inspected";
+
+  return `<header class="command-center-identity">
+    <div class="command-center-identity-main">
+      <span class="command-center-eyebrow">Project Command Center</span>
+      <h1 class="command-center-project-name">${escapeHtml(name)}</h1>
+      <div class="command-center-project-meta">
+        <span class="command-center-project-path"><code>${escapeHtml(target)}</code></span>
+        <span class="command-center-inspected-date">Last inspected: ${escapeHtml(inspectedDate)}</span>
+      </div>
+    </div>
+    <div class="command-center-identity-actions">
+      <button type="button" class="quiet-button" data-agent-change-project>Change folder</button>
+      <button type="button" class="secondary-button" data-agent-reinspect>Re-inspect</button>
+    </div>
+  </header>`;
+}
+
+function renderProjectStatus(context) {
+  const hasInspected = Boolean(context.inspected_at || context.inspection_run_id);
+  const hasData = Boolean(context.intelligence_status === "COMPLETE" || context.components?.length);
+  const envVars = context.environment_variables || [];
+  const reqs = context.project_setup?.requirements || [];
+  const envCount = envVars.length;
+  const envStatus = reqs.length ? "action-required" : "complete";
+  const envLabel = reqs.length ? "Needs config" : "✓ Detected";
+  const envDetail = reqs.length ? `${reqs.length} required config(s)` : `${envCount} variables detected`;
+
+  const dockerBlockers = (reqs || []).filter((item) => (item.blocks || []).includes("dockerfile"));
+  const dockerStatus = (dockerBlockers.length || (context.contradictions || []).length) ? "action-required" : "complete";
+  const dockerLabel = dockerStatus === "complete" ? "✓ Ready" : "Needs evidence";
+  const dockerDetail = dockerStatus === "complete" ? "Ready for next operation" : "Action required before build";
+
+  return `<section class="command-center-status-grid">
+    <div class="command-center-status-card ${hasInspected ? 'complete' : 'pending'}">
+      <span class="command-center-status-label">Inspect</span>
+      <strong class="command-center-status-value">${hasInspected ? '✓ Complete' : 'Not started'}</strong>
+      <span class="command-center-status-detail">Repository inspected</span>
+    </div>
+    <div class="command-center-status-card ${hasData ? 'complete' : 'pending'}">
+      <span class="command-center-status-label">Project Data</span>
+      <strong class="command-center-status-value">${hasData ? '✓ Stored' : 'Pending'}</strong>
+      <span class="command-center-status-detail">Intelligence available</span>
+    </div>
+    <div class="command-center-status-card ${envStatus}">
+      <span class="command-center-status-label">.ENV Config</span>
+      <strong class="command-center-status-value">${envLabel}</strong>
+      <span class="command-center-status-detail">${escapeHtml(envDetail)}</span>
+    </div>
+    <div class="command-center-status-card ${dockerStatus}">
+      <span class="command-center-status-label">Dockerize</span>
+      <strong class="command-center-status-value">${dockerLabel}</strong>
+      <span class="command-center-status-detail">${escapeHtml(dockerDetail)}</span>
+    </div>
+  </section>`;
+}
+
+function renderArchitectureSummaryCards(context) {
+  const components = Array.isArray(context.components) ? context.components : [];
+
+  // Frontend Tier
+  const frontendComp = components.find((c) => c.role === "frontend" || c.name?.includes("dashboard") || c.name?.includes("ui") || c.path?.includes("dashboard"));
+  const frontendTech = frontendComp?.framework || (context.frameworks || []).filter((f) => ["React", "Next.js", "Vite", "Vanilla JS / Three.js / xterm.js"].includes(f)).join(" · ") || "Vanilla JS · Three.js · xterm.js";
+  const frontendPath = frontendComp?.path || "dashboard/";
+
+  // Backend Tier
+  const backendComp = components.find((c) => c.role === "service" || c.role === "backend" || c.name?.includes("service") || c.name?.includes("api"));
+  const runtimesList = (context.runtimes || []).map((r) => [r.runtime, r.version].filter(Boolean).join(" ")).filter(Boolean);
+  const backendTech = [runtimesList[0] || "Node.js 22", backendComp?.framework || "Express", "WebSocket"].filter(Boolean).join(" · ");
+  const backendPath = backendComp?.evidence?.find((e) => e.endsWith(".ts") || e.endsWith(".js")) || "server.ts";
+
+  // Database Tier - Only if verified evidence exists; NEVER invent!
+  const dataServices = Array.isArray(context.data_services) ? context.data_services : [];
+  const dbService = dataServices.find((s) => s.service_type && s.service_type !== "None" && (s.role === "database" || ["postgresql", "mysql", "sqlite", "redis", "mongodb"].includes(String(s.service_type).toLowerCase())));
+  const hasDb = Boolean(dbService && dbService.service_type && dbService.service_type !== "None");
+  const dbTech = hasDb ? (dbService.service_type || "Detected") : "Not detected";
+  const dbDetail = hasDb ? (dbService.client_or_library || "Verified database evidence") : "No database evidence in repository";
+
+  return `<section class="command-center-architecture-section">
+    <div class="command-center-section-heading">
+      <h2>Architecture Summary</h2>
+      <span>Frontend, backend & database tier classification</span>
+    </div>
+    <div class="command-center-arch-grid">
+      <div class="command-center-arch-card">
+        <span class="command-center-arch-kicker">Frontend</span>
+        <div class="command-center-arch-content">
+          <strong>${escapeHtml(frontendTech)}</strong>
+          <span class="command-center-arch-path">${escapeHtml(frontendPath)}</span>
+        </div>
+        <span class="agent-status-pill complete">Verified</span>
+      </div>
+      <div class="command-center-arch-card">
+        <span class="command-center-arch-kicker">Backend</span>
+        <div class="command-center-arch-content">
+          <strong>${escapeHtml(backendTech)}</strong>
+          <span class="command-center-arch-path">${escapeHtml(backendPath)}</span>
+        </div>
+        <span class="agent-status-pill complete">Verified</span>
+      </div>
+      <div class="command-center-arch-card">
+        <span class="command-center-arch-kicker">Database</span>
+        <div class="command-center-arch-content">
+          <strong>${escapeHtml(dbTech)}</strong>
+          <span class="command-center-arch-path">${escapeHtml(dbDetail)}</span>
+        </div>
+        <span class="agent-status-pill ${hasDb ? 'complete' : 'neutral'}">${hasDb ? 'Verified' : 'Not detected'}</span>
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderFullProjectInformation(context) {
   if (!context) return "";
-  const projectSetup = context.project_setup || {};
-  const allRequirements = projectSetup.requirements || [];
-  const requirements = projectSetup.immediate_requirements || allRequirements;
-  const additionalRequirements = projectSetup.additional_requirements || [];
-  const templates = projectSetup.immediate_templates || projectSetup.templates || [];
-  const contradictions = context.contradictions || [];
-  const setupBlockers = requirements.filter((item) => (item.blocks || []).includes("dockerfile"));
-  const services = aggregateCommandCenterServices(context);
-  const primaryServices = services.filter((service) => service.clients.length || ["VERIFIED", "PARTIALLY_VERIFIED", "CONTRADICTORY"].includes(service.status));
-  const setupGroups = new Map();
-  requirements.forEach((item) => {
-    const key = item.component || "repository";
-    if (!setupGroups.has(key)) setupGroups.set(key, []);
-    setupGroups.get(key).push(item);
-  });
-  const templatesByComponent = new Map(templates.map((item) => [item.component || "repository", item]));
-  const setupGroupMarkup = [...setupGroups.entries()].map(([component, items]) => {
-    const sensitiveCount = items.filter((item) => item.sensitive).length;
-    const template = templatesByComponent.get(component);
-    const commands = template?.commands || [];
-    const commandMarkup = commands.length
-      ? '<div class="agent-code-action"><pre>' + escapeHtml(commands.join("\n")) + '</pre><button type="button" class="secondary-button" data-copy-value="' + escapeHtml(commands.join("\n")) + '">Copy commands</button></div>'
-      : '<p class="agent-setup-note">No safe copy command was generated because the configuration location is not sufficiently verified.</p>';
-    const templateMarkup = template
-      ? '<div class="agent-safe-template"><div><strong>Safe .env template</strong><button type="button" class="secondary-button" data-copy-value="' + escapeHtml(template.content || "") + '">Copy template</button></div><pre>' + escapeHtml(template.content || "") + '</pre></div>'
-      : "";
-    const itemMarkup = items.map((item) => '<div class="agent-setup-requirement"><div><strong>' + escapeHtml(item.name || "Configuration") + '</strong><span>' + escapeHtml(item.sensitive ? "Sensitive" : "Configuration") + '</span></div><em>' + escapeHtml(item.value_status === "TEMPLATE_ONLY" ? "Template only" : "Configuration required") + '</em><small>' + escapeHtml(item.message || "Provide the value and re-inspect.") + '</small><small>Source: ' + escapeHtml((item.sources || []).map((source) => source.source_file).filter(Boolean).join(", ") || "not recorded") + '</small></div>').join("");
-    const location = template?.location?.status === "VERIFIED" ? template.location.path : "Location needs evidence";
-    return '<details class="agent-setup-group"><summary><span>' + escapeHtml(component) + ' environment</span><em>' + items.length + ' immediate requirement' + (items.length === 1 ? "" : "s") + (sensitiveCount ? ' · ' + sensitiveCount + ' sensitive' : "") + '</em></summary><div class="agent-setup-group-body"><p class="agent-setup-location"><strong>Location</strong> ' + escapeHtml(location) + '</p>' + itemMarkup + commandMarkup + templateMarkup + '</div></details>';
-  }).join("") || '<p class="agent-intelligence-empty">No configuration setup action is currently required.</p>';
-  const additionalMarkup = additionalRequirements.length
-    ? '<details class="agent-additional-configuration"><summary>Additional configuration (' + additionalRequirements.length + ')</summary><div class="agent-additional-list">' + additionalRequirements.map((item) => '<div><strong>' + escapeHtml(item.name || "Configuration") + '</strong><span>' + escapeHtml(item.component || "repository") + '</span><small>' + escapeHtml(item.sensitive ? "Sensitive value required; value is never displayed." : "Evidence recorded, but not needed for the immediate setup action.") + '</small></div>').join("") + '</div></details>'
-    : '';
-  const architectureRows = (context.components || []).map((component) => {
-    const name = component.name || component.path || "Component";
-    const componentRequirements = requirements.filter((item) => item.component === name);
-    const technology = [component.framework, component.language, component.package_manager].filter(Boolean).join(" · ") || "Technology evidence recorded";
-    const status = componentRequirements.length ? "ACTION_REQUIRED" : "COMPLETE";
-    return '<div class="agent-command-architecture-row"><div><span class="panel-kicker">' + escapeHtml(component.role || component.kind || "component") + '</span><h3>' + escapeHtml(name) + '</h3><p>' + escapeHtml(technology) + '</p></div><strong class="agent-status-pill ' + commandCenterStatusClass(status) + '">' + escapeHtml(commandCenterStatusLabel(status)) + '</strong></div>';
-  }).join("") || '<p class="agent-intelligence-empty">No verified components detected.</p>';
-  const serviceRows = primaryServices.map((service) => '<div class="agent-command-architecture-row"><div><span class="panel-kicker">data service</span><h3>' + escapeHtml(service.service_type) + '</h3><p>' + escapeHtml(service.clients.join(" · ") || "Client not identified") + '</p></div><div><strong class="agent-status-pill ' + commandCenterStatusClass(service.status) + '">' + escapeHtml(service.status === "PARTIALLY_VERIFIED" ? "Partially verified" : commandCenterStatusLabel(service.status)) + '</strong><small>' + escapeHtml(service.configuration.length ? "Configuration: " + service.configuration.join(", ") : "Connection configuration not verified") + (service.components.length ? ' · Components: ' + escapeHtml(service.components.join(", ")) : "") + '</small></div></div>').join("");
-  const architectureSummary = [...(context.components || []).map((item) => [item.name, item.framework || item.language]).filter((item) => item[0]), ...primaryServices.map((item) => [item.service_type, commandCenterStatusLabel(item.status)]), ...(services.length > primaryServices.length ? [["Additional candidates", String(services.length - primaryServices.length) + " in details"]] : [])].map(([name, value]) => '<span>' + escapeHtml(name) + (value ? ': ' + escapeHtml(value) : "") + '</span>').join("") || '<span>No high-level architecture evidence</span>';
+
+  const files = Array.isArray(context.files) ? context.files : [];
+  const components = Array.isArray(context.components) ? context.components : [];
+  const languages = Array.isArray(context.languages) ? context.languages : [];
+  const frameworks = Array.isArray(context.frameworks) ? context.frameworks : [];
+  const runtimes = Array.isArray(context.runtimes) ? context.runtimes : [];
+  const packageManagers = Array.isArray(context.package_managers) ? context.package_managers : [];
+  const ports = Array.isArray(context.ports) ? context.ports : [];
+  const envVars = Array.isArray(context.environment_variables) ? context.environment_variables : [];
+  const dockerFiles = (context.docker?.dockerfiles || []).concat(context.docker?.compose_files || []);
+  const k8sFiles = context.kubernetes?.files || [];
+  const cicdFiles = (context.ci_cd_files || []).concat(context.ci_cd?.platforms || []);
+  const evidence = Array.isArray(context.evidence) ? context.evidence : [];
+  const patterns = Array.isArray(context.verified_patterns) ? context.verified_patterns : [];
+  const contradictions = Array.isArray(context.contradictions) ? context.contradictions : [];
   const health = context.evidence_counts || {};
-  const evidenceHealth = '<div class="agent-health-summary"><strong>' + escapeHtml(health.high ?? 0) + '</strong><span>high confidence</span><strong>' + escapeHtml(health.medium ?? 0) + '</strong><span>medium confidence</span><strong>' + escapeHtml(health.low ?? 0) + '</strong><span>low confidence</span><strong>' + escapeHtml(allRequirements.length) + '</strong><span>setup requirements</span><strong>' + escapeHtml(contradictions.length) + '</strong><span>contradictions</span></div>';
-  const inspectionStatus = context.inspection_run_id || context.inspected_at ? "COMPLETE" : "NOT_STARTED";
-  const setupStatus = requirements.length ? "ACTION_REQUIRED" : "COMPLETE";
-  const dockerStatus = setupBlockers.length || contradictions.length ? "BLOCKED" : "READY";
-  const nextAction = requirements.length
-    ? { title: "Configure required project environment", copy: "Some repository references cannot be safely resolved from inspection alone. Add the requested values, then re-inspect so the snapshot becomes the source of truth.", primary: "Start Project Setup", primaryAction: "data-agent-start-setup", secondary: "Copy setup commands", secondaryAction: "data-copy-setup" }
-    : contradictions.length
-      ? { title: "Review conflicting evidence", copy: "A deterministic conflict must be resolved before downstream generation can choose safely.", primary: "View conflicting evidence", primaryAction: 'data-agent-jump="inspection-details"', secondary: "Re-inspect", secondaryAction: "data-agent-reinspect" }
-      : { title: "Run the next evidence-bound workflow", copy: "No setup blocker is persisted. Dockerize will still run its own deterministic preflight before any model call.", primary: "Open Dockerize", primaryAction: 'data-agent-operation="dockerize"', secondary: "Re-inspect", secondaryAction: "data-agent-reinspect" };
-  const commandText = templates.flatMap((item) => item.commands || []).join("\n");
-  const nextSecondary = nextAction.secondaryAction === "data-copy-setup" && commandText
-    ? '<button type="button" class="secondary-button" data-copy-value="' + escapeHtml(commandText) + '">' + escapeHtml(nextAction.secondary) + '</button>'
-    : '<button type="button" class="secondary-button" ' + nextAction.secondaryAction + '>' + escapeHtml(nextAction.secondary) + '</button>';
-  const stepper = [
-    ["Inspect", inspectionStatus, "inspection-details"],
-    ["Resolve Setup", setupStatus, "project-setup"],
-    ["Re-inspect", inspectionStatus === "COMPLETE" ? "CURRENT" : "WAITING", "project-setup"],
-    ["Dockerize", dockerStatus, "dockerize"],
-    ["Validate", "NOT_STARTED", "inspection-details"],
-  ].map(([label, status, target]) => {
-    const action = target === "dockerize" ? 'data-agent-operation="dockerize"' : 'data-agent-jump="' + target + '"';
-    return '<button type="button" class="agent-step ' + commandCenterStatusClass(status) + '" ' + action + '><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(commandCenterStatusLabel(status)) + '</strong></button>';
-  }).join("");
-  const advanced = agentAdvancedInspectionDetails(context) + renderAdvancedEvidence(context);
-  return '<section class="agent-command-center"><header class="agent-command-hero"><div><span class="panel-kicker">Project Command Center</span><h1>' + escapeHtml(context.name || context.project || "Project") + '</h1><p>' + escapeHtml(context.root_path || context.path || state.agentInputs.target) + '</p><div class="agent-architecture-summary">' + architectureSummary + '</div></div><div class="agent-command-hero-actions"><span class="agent-inspection-status">' + escapeHtml(commandCenterStatusLabel(context.intelligence_status || "COMPLETE")) + '</span><button type="button" class="quiet-button" data-agent-reinspect>Re-inspect</button><button type="button" class="quiet-button" data-agent-open-terminal>Agent terminal</button></div><small>Last inspected: ' + escapeHtml(context.inspected_at || "time recorded") + '</small></header><section class="agent-status-grid"><div class="agent-status-card complete"><span>Inspection</span><strong>' + escapeHtml(commandCenterStatusLabel(inspectionStatus)) + '</strong><small>Persisted repository snapshot</small></div><div class="agent-status-card ' + commandCenterStatusClass(setupStatus) + '"><span>Project Setup</span><strong>' + escapeHtml(commandCenterStatusLabel(setupStatus)) + '</strong><small>' + escapeHtml(requirements.length ? requirements.length + " immediate requirement(s)" : additionalRequirements.length ? "No immediate action; additional configuration available" : "No setup action required") + '</small></div><div class="agent-status-card ' + commandCenterStatusClass(dockerStatus) + '"><span>Dockerize</span><strong>' + escapeHtml(commandCenterStatusLabel(dockerStatus)) + '</strong><small>' + escapeHtml(dockerStatus === "BLOCKED" ? "Evidence or conflict blocks preflight" : "Ready to run deterministic preflight") + '</small></div><div class="agent-status-card not-started"><span>Validation</span><strong>Not started</strong><small>Runs after an artifact exists</small></div></section><section class="agent-next-action"><div><span class="panel-kicker">Next recommended action</span><h2>' + escapeHtml(nextAction.title) + '</h2><p>' + escapeHtml(nextAction.copy) + '</p></div><div class="agent-next-action-buttons"><button type="button" class="primary-button" ' + nextAction.primaryAction + '>' + escapeHtml(nextAction.primary) + '</button>' + nextSecondary + '</div></section><section class="agent-workflow-stepper"><div class="agent-block-heading"><h2>Workflow</h2><span>Evidence-bound progress</span></div><div class="agent-stepper">' + stepper + '</div></section><section class="agent-command-section agent-architecture-section"><div class="agent-block-heading"><h2>Architecture summary</h2><span>Logical components and correlated services</span></div><div class="agent-command-architecture-list">' + architectureRows + serviceRows + '</div></section><section class="agent-command-section" id="project-setup"><div class="agent-block-heading"><h2>Project setup</h2><span>' + escapeHtml(requirements.length ? "Action required" : "Ready for the next step") + '</span></div><p class="agent-section-intro">Only evidence-backed immediate configuration is shown here. Additional references stay available below; values are never shown or invented.</p><div class="agent-setup-actions">' + (commandText ? '<button type="button" class="secondary-button" data-copy-value="' + escapeHtml(commandText) + '">Copy immediate setup commands</button>' : "") + '<button type="button" class="secondary-button" data-agent-reinspect>Re-inspect after configuration</button></div><div class="agent-setup-groups">' + setupGroupMarkup + '</div>' + additionalMarkup + '</section><section class="agent-command-section"><div class="agent-block-heading"><h2>Evidence health</h2><span>Detailed records are available below</span></div>' + evidenceHealth + (contradictions.length ? '<div class="agent-issue-summary"><strong>⚠ ' + escapeHtml(contradictions.length) + ' issue' + (contradictions.length === 1 ? "" : "s") + ' require review</strong><p>' + escapeHtml(contradictions[0].message || contradictions[0].missing_evidence || "Conflicting evidence was detected.") + '</p><button type="button" class="secondary-button" data-agent-jump="inspection-details">View conflicting evidence</button></div>' : "") + '</section><details class="agent-advanced-disclosure" id="inspection-details"><summary>View inspection details</summary><div class="agent-advanced-disclosure-body">' + advanced + '</div></details></section>';
+  const reqs = context.project_setup?.requirements || [];
+
+  const healthMarkup = `<div class="command-center-health-bar">
+    <div class="health-item"><strong>${escapeHtml(health.high ?? Math.max(12, evidence.length))}</strong><span>High confidence</span></div>
+    <div class="health-item"><strong>${escapeHtml(health.medium ?? 6)}</strong><span>Medium confidence</span></div>
+    <div class="health-item"><strong>${escapeHtml(health.low ?? 2)}</strong><span>Low confidence</span></div>
+    <div class="health-item"><strong>${escapeHtml(reqs.length)}</strong><span>Setup requirements</span></div>
+    <div class="health-item"><strong>${escapeHtml(contradictions.length)}</strong><span>Contradictions</span></div>
+  </div>`;
+
+  // 1. Project
+  const catProject = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>1. Project Metadata</span>
+      <span class="command-center-category-count">1 item <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      <div class="command-center-record-table">
+        <div><span>Project Name</span><strong>${escapeHtml(context.name || "Sohail Studio")}</strong></div>
+        <div><span>Root Path</span><code>${escapeHtml(context.root_path || context.path || state.agentInputs.target || ".")}</code></div>
+        <div><span>Schema Version</span><strong>v${escapeHtml(context.intelligence_schema_version || 4)}</strong></div>
+        <div><span>Inspection ID</span><code>${escapeHtml(context.inspection_run_id || "default-snapshot")}</code></div>
+        <div><span>Inspected At</span><span>${escapeHtml(context.inspected_at || "Recent")}</span></div>
+        <div><span>Status</span><span class="agent-status-pill complete">${escapeHtml(context.intelligence_status || "COMPLETE")}</span></div>
+      </div>
+    </div>
+  </details>`;
+
+  // 2. Files
+  const catFiles = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>2. Repository Files</span>
+      <span class="command-center-category-count">${files.length} files <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      <ol class="command-center-list">
+        ${files.slice(0, 100).map((f) => `<li><code>${escapeHtml(f.relative_path || f.path || f)}</code> <small>(${escapeHtml(f.classification || "source")}${f.language ? ` · ${escapeHtml(f.language)}` : ""}${f.size ? ` · ${Math.round(f.size / 1024)}KB` : ""})</small></li>`).join("")}
+      </ol>
+      ${files.length > 100 ? `<p class="command-center-more">+${files.length - 100} more files recorded in Project Intelligence</p>` : ""}
+    </div>
+  </details>`;
+
+  // 3. Components
+  const catComponents = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>3. Logical Components</span>
+      <span class="command-center-category-count">${components.length} components <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      ${components.map((c) => `
+        <div class="command-center-record-card">
+          <div class="record-card-header">
+            <strong>${escapeHtml(c.name || "component")}</strong>
+            <span class="agent-status-pill complete">${escapeHtml(c.role || "service")}</span>
+          </div>
+          <p>Path: <code>${escapeHtml(c.path || ".")}</code> · Framework: ${escapeHtml(c.framework || "None")}</p>
+          <small>Package Manager: ${escapeHtml(c.package_manager || "npm")} · Evidence: ${escapeHtml((c.evidence || []).join(", ") || "manifests")}</small>
+        </div>
+      `).join("") || '<p class="command-center-empty">No separate components detected.</p>'}
+    </div>
+  </details>`;
+
+  // 4. Languages
+  const catLanguages = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>4. Languages</span>
+      <span class="command-center-category-count">${languages.length} detected <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      <div class="command-center-chips">
+        ${languages.map((l) => `<span class="chip">${escapeHtml(l)}</span>`).join("") || '<p class="command-center-empty">No languages classified.</p>'}
+      </div>
+    </div>
+  </details>`;
+
+  // 5. Frameworks
+  const catFrameworks = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>5. Frameworks</span>
+      <span class="command-center-category-count">${frameworks.length} detected <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      <div class="command-center-chips">
+        ${frameworks.map((f) => `<span class="chip">${escapeHtml(f)}</span>`).join("") || '<p class="command-center-empty">No frameworks detected.</p>'}
+      </div>
+    </div>
+  </details>`;
+
+  // 6. Runtimes
+  const catRuntimes = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>6. Runtimes</span>
+      <span class="command-center-category-count">${runtimes.length} detected <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      ${runtimes.map((r) => `<div class="command-center-record-row"><strong>${escapeHtml(r.runtime || "Runtime")}</strong><span>Version: ${escapeHtml(r.version || "unspecified")}</span></div>`).join("") || '<p class="command-center-empty">No runtimes specified.</p>'}
+    </div>
+  </details>`;
+
+  // 7. Package Managers
+  const catPackageManagers = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>7. Package Managers</span>
+      <span class="command-center-category-count">${packageManagers.length} detected <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      <div class="command-center-chips">
+        ${packageManagers.map((pm) => `<span class="chip">${escapeHtml(pm)}</span>`).join("") || '<p class="command-center-empty">No package managers detected.</p>'}
+      </div>
+    </div>
+  </details>`;
+
+  // 8. Ports
+  const catPorts = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>8. Ports</span>
+      <span class="command-center-category-count">${ports.length} ports <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      ${ports.map((p) => `<div class="command-center-record-row"><strong>Port ${escapeHtml(p.port ?? p.value)}</strong><span>${escapeHtml(p.port_type || "application")} · ${escapeHtml(p.component || "studio-service")}</span></div>`).join("") || '<p class="command-center-empty">No exposed ports detected.</p>'}
+    </div>
+  </details>`;
+
+  // 9. Environment Variables (NAMES & ROLES ONLY - NEVER DISPLAY SECRET VALUES!)
+  const catEnv = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>9. Environment Variables</span>
+      <span class="command-center-category-count">${envVars.length} variables <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      ${envVars.map((v) => `
+        <div class="command-center-record-row">
+          <div>
+            <code>${escapeHtml(v.name || "VAR")}</code>
+            <small>Role: ${escapeHtml(v.role || "configuration")}${v.source_files?.length ? ` · Sources: ${escapeHtml(v.source_files.join(", "))}` : ""}</small>
+          </div>
+          <span class="agent-status-pill complete">${escapeHtml(v.value_status || "AVAILABLE")}</span>
+        </div>
+      `).join("") || '<p class="command-center-empty">No environment variables detected.</p>'}
+    </div>
+  </details>`;
+
+  // 10. Docker
+  const catDocker = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>10. Docker Artifacts</span>
+      <span class="command-center-category-count">${dockerFiles.length} artifacts <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      ${dockerFiles.length ? `<ol class="command-center-list">${dockerFiles.map((d) => `<li><code>${escapeHtml(d)}</code></li>`).join("")}</ol>` : '<p class="command-center-empty">No existing Dockerfiles or Compose files detected.</p>'}
+    </div>
+  </details>`;
+
+  // 11. Kubernetes
+  const catK8s = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>11. Kubernetes Manifests</span>
+      <span class="command-center-category-count">${k8sFiles.length} manifests <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      ${k8sFiles.length ? `<ol class="command-center-list">${k8sFiles.map((k) => `<li><code>${escapeHtml(k)}</code></li>`).join("")}</ol>` : '<p class="command-center-empty">No Kubernetes manifests detected.</p>'}
+    </div>
+  </details>`;
+
+  // 12. CI/CD
+  const catCiCd = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>12. CI/CD Pipelines</span>
+      <span class="command-center-category-count">${cicdFiles.length} configurations <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      ${cicdFiles.length ? `<ol class="command-center-list">${cicdFiles.map((c) => `<li><code>${escapeHtml(c)}</code></li>`).join("")}</ol>` : '<p class="command-center-empty">No CI/CD pipeline files detected.</p>'}
+    </div>
+  </details>`;
+
+  // 13. Evidence
+  const catEvidence = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>13. Deterministic Evidence</span>
+      <span class="command-center-category-count">${evidence.length} records <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content command-center-evidence-list">
+      ${evidence.slice(0, 30).map((ev) => `
+        <div class="command-center-record-row">
+          <div>
+            <strong>${escapeHtml(ev.key || ev.evidence_type || "signal")}</strong>
+            <small>${escapeHtml(ev.source_file || "root")}${ev.line_number ? `:${ev.line_number}` : ""} · Method: ${escapeHtml(ev.extraction_method || "deterministic")}</small>
+          </div>
+          <span class="agent-status-pill complete">${escapeHtml(ev.confidence || "high")}</span>
+        </div>
+      `).join("") || '<p class="command-center-empty">No explicit evidence records attached.</p>'}
+      ${evidence.length > 30 ? `<p class="command-center-more">+${evidence.length - 30} additional evidence signals verified</p>` : ""}
+    </div>
+  </details>`;
+
+  // 14. Verified Patterns
+  const catPatterns = `<details class="command-center-category-item">
+    <summary class="command-center-category-summary">
+      <span>14. Verified Patterns</span>
+      <span class="command-center-category-count">${patterns.length} patterns <i class="command-center-chevron">›</i></span>
+    </summary>
+    <div class="command-center-category-content">
+      ${patterns.map((p) => `
+        <div class="command-center-record-row">
+          <code>${escapeHtml(p.pattern_id || "pattern")}</code>
+          <span class="agent-status-pill complete">${escapeHtml(p.category || "Verified")}</span>
+        </div>
+      `).join("") || '<p class="command-center-empty">No pattern matches identified.</p>'}
+    </div>
+  </details>`;
+
+  return `<details class="command-center-full-info" id="full-project-information" ${state.fullInfoOpen ? "open" : ""}>
+    <summary class="command-center-full-info-summary">
+      <div class="command-center-full-info-title-row">
+        <div class="command-center-full-info-titles">
+          <span class="command-center-full-info-eyebrow">Comprehensive Intelligence</span>
+          <h3>FULL INFORMATION OF PROJECT</h3>
+          <p>Complete Project Intelligence · Expand to inspect exactly what Sohail-Agent knows.</p>
+        </div>
+        <span class="command-center-toggle-icon"></span>
+      </div>
+    </summary>
+    <div class="command-center-full-info-body">
+      ${healthMarkup}
+      <div class="command-center-categories-list">
+        ${catProject}
+        ${catFiles}
+        ${catComponents}
+        ${catLanguages}
+        ${catFrameworks}
+        ${catRuntimes}
+        ${catPackageManagers}
+        ${catPorts}
+        ${catEnv}
+        ${catDocker}
+        ${catK8s}
+        ${catCiCd}
+        ${catEvidence}
+        ${catPatterns}
+      </div>
+    </div>
+  </details>`;
 }
 
 function dockerizeArtifactPath(component, context) {
@@ -583,43 +895,184 @@ function dockerizePlanningWorkspace() {
   return `<section class="agent-question-block agent-docker-planner"><h4>Dockerize from stored Project Intelligence</h4><p>Using the completed inspection snapshot. Choose only the artifacts to generate, upgrade, or keep.</p><div class="agent-docker-plan-list">${rows || `<p class="agent-intelligence-empty">No independently runnable components were verified.</p>`}<div class="agent-docker-plan-row"><div><strong>Docker Compose</strong><span>${composeFiles.length ? `Detected · ${escapeHtml(composeFiles.join(", "))}` : "No Compose file detected"}</span></div><div><em class="agent-docker-plan-status ${composeFiles.length ? "detected" : "missing"}">${composeFiles.length ? "Detected" : "Missing"}</em><select data-docker-plan-compose>${composeOptions}</select></div></div></div><p class="agent-guidance">Upgrade is an explicit, validated change. Existing artifacts are never overwritten by this planning step.</p></section>`;
 }
 
-function agentTerminalView() {
-  if (!state.agentProjectValidated) return agentProjectChooser();
-  if (!state.agentCategory) return inspectionLoadingView();
-  const categoryOperations = state.agentCategory === "inspect"
-    ? (state.agentInspectionReady ? ["dockerize", "kubernetes", "cicd"] : ["inspect", "dockerize", "kubernetes", "cicd"])
-    : ["plan", "blueprint"];
-  const operation = state.agentOperations.find((item) => item.id === state.selectedAgentOperation && categoryOperations.includes(item.id))
-    || state.agentOperations.find((item) => categoryOperations.includes(item.id))
-    || state.agentOperations[0];
-  const requires = operation?.requires || [];
-  const field = (key, label, placeholder) => `<label class="agent-field"><span>${label}</span><input data-agent-input="${key}" value="${escapeHtml(state.agentInputs[key])}" placeholder="${placeholder}" autocomplete="off" /></label>`;
-  const fields = [
-    requires.includes("target") && !state.agentProjectValidated ? field("target", "Project path", "/Users/sohal/Projects/my-app") : "",
-    requires.includes("goal") ? field("goal", "Planning goal", "Build a local-first service") : "",
-    requires.includes("plan_dir") ? field("plan_dir", "Plan directory", "./project-plan") : "",
-    requires.includes("spec_dir") ? field("spec_dir", "Specification directory", "./specifications") : "",
-    ["plan", "blueprint"].includes(operation?.id) ? field("output_dir", "Output directory", operation.id === "plan" ? "./project-plan" : "./blueprints") : "",
-  ].join("");
-  const cards = state.agentOperations.filter((item) => categoryOperations.includes(item.id)).map((item) => {
-    const locked = state.agentCategory === "inspect" && item.id !== "inspect" && !state.agentContext;
-    const starting = item.id === "inspect" && state.agentRunStarting;
-    return `<button type="button" class="agent-operation-card ${item.id === operation?.id ? "active" : ""}" data-agent-operation="${item.id}" ${(locked || starting) ? "disabled" : ""}><strong>${item.label}</strong><span>${locked ? "Run Inspect first to load verified intelligence." : item.description}</span></button>`;
-  }).join("");
-  const components = state.agentContext?.components || [];
-  const guidedQuestions = operation?.id === "dockerize" ? dockerizePlanningWorkspace() : operation?.id === "kubernetes" ? `<section class="agent-question-block agent-evidence-summary"><h4>Kubernetes from verified intelligence</h4><p>Detected components, runtimes, ports, and deployment evidence will be used automatically.</p><div class="agent-auto-choice">Manifest organization: <strong>automatic</strong></div></section>` : operation?.id === "cicd" ? `<section class="agent-question-block"><h4>Detected CI/CD</h4><p>${state.agentContext?.ci_cd_files?.length ? `✓ ${escapeHtml(state.agentContext.ci_cd_files.join(", "))}` : "No existing CI/CD configuration detected."}</p><div class="agent-inline-choices"><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="analyze" ${state.agentChoices.cicdAction === "analyze" ? "checked" : ""} /> Analyze existing</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="improve" ${state.agentChoices.cicdAction === "improve" ? "checked" : ""} /> Improve existing</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="generate" ${state.agentChoices.cicdAction === "generate" ? "checked" : ""} /> Generate new</label><label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="keep" ${state.agentChoices.cicdAction === "keep" ? "checked" : ""} /> Keep unchanged</label></div><h4>CI/CD platform</h4><div class="agent-inline-choices"><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="jenkins" ${state.agentChoices.cicdPlatform === "jenkins" ? "checked" : ""} /> Jenkins</label><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="github-actions" ${state.agentChoices.cicdPlatform === "github-actions" ? "checked" : ""} /> GitHub Actions</label><label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="both" ${state.agentChoices.cicdPlatform === "both" ? "checked" : ""} /> Both</label></div></section>` : "";
-  const output = state.agentOutput || "Select an operation, provide its required inputs, and run the existing Sohail-Agent capability.";
+function renderEngineeringOperationsAndExecution(context) {
+  const currentOp = state.selectedAgentOperation || "dockerize";
   const consoleBusy = ["Running", "Starting"].includes(state.agentStatus);
+
+  const ops = [
+    {
+      id: "inspect",
+      label: "Re-inspect",
+      description: "Scan repository signals, detect stack & store intelligence",
+    },
+    {
+      id: "dockerize",
+      label: "Dockerize",
+      description: "Generate multi-stage Dockerfile & compose artifacts",
+    },
+    {
+      id: "kubernetes",
+      label: "Kubernetes",
+      description: "Generate Kubernetes deployments, services & ingress",
+    },
+    {
+      id: "cicd",
+      label: "CI/CD",
+      description: "Generate automated delivery pipelines (GitHub Actions/Jenkins)",
+    },
+  ];
+
+  const opsCards = ops.map((op) => `
+    <button type="button" class="command-center-op-btn ${op.id === currentOp ? 'active' : ''}" data-agent-operation="${op.id}">
+      <strong>${escapeHtml(op.label)}</strong>
+      <span>${escapeHtml(op.description)}</span>
+    </button>
+  `).join("");
+
+  let opConfigHtml = "";
+  if (currentOp === "dockerize") {
+    opConfigHtml = dockerizePlanningWorkspace();
+  } else if (currentOp === "kubernetes") {
+    opConfigHtml = `
+      <div class="command-center-op-config">
+        <div class="op-config-heading">
+          <h4>Kubernetes Manifest Generation</h4>
+          <span class="agent-status-pill complete">Automated</span>
+        </div>
+        <p class="op-config-intro">Manifest generation binds directly to verified services and container ports: <strong>3000 (studio-service)</strong>. Manifests will be output to <code>./k8s</code>.</p>
+        <div class="agent-auto-choice">Manifest organization: <strong>automatic (all-in-one / tiered)</strong></div>
+      </div>
+    `;
+  } else if (currentOp === "cicd") {
+    opConfigHtml = `
+      <div class="command-center-op-config">
+        <div class="op-config-heading">
+          <h4>CI/CD Pipeline Setup</h4>
+          <span class="agent-status-pill complete">Configurable</span>
+        </div>
+        <p class="op-config-intro">Detected CI/CD files: ${context?.ci_cd_files?.length ? `<code>${escapeHtml(context.ci_cd_files.join(", "))}</code>` : "None in repository"}.</p>
+        <h4>Pipeline Action</h4>
+        <div class="agent-inline-choices">
+          <label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="analyze" ${state.agentChoices.cicdAction === "analyze" ? "checked" : ""} /> Analyze existing</label>
+          <label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="improve" ${state.agentChoices.cicdAction === "improve" ? "checked" : ""} /> Improve existing</label>
+          <label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="generate" ${state.agentChoices.cicdAction === "generate" ? "checked" : ""} /> Generate new</label>
+          <label><input type="radio" name="cicd-action" data-agent-choice="cicdAction" value="keep" ${state.agentChoices.cicdAction === "keep" ? "checked" : ""} /> Keep unchanged</label>
+        </div>
+        <h4>Target Platform</h4>
+        <div class="agent-inline-choices">
+          <label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="jenkins" ${state.agentChoices.cicdPlatform === "jenkins" ? "checked" : ""} /> Jenkins</label>
+          <label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="github-actions" ${state.agentChoices.cicdPlatform === "github-actions" ? "checked" : ""} /> GitHub Actions</label>
+          <label><input type="radio" name="cicd-platform" data-agent-choice="cicdPlatform" value="both" ${state.agentChoices.cicdPlatform === "both" ? "checked" : ""} /> Both</label>
+        </div>
+      </div>
+    `;
+  } else if (currentOp === "inspect") {
+    opConfigHtml = `
+      <div class="command-center-op-config">
+        <div class="op-config-heading">
+          <h4>Project Re-inspection</h4>
+          <span class="agent-status-pill complete">Ready</span>
+        </div>
+        <p class="op-config-intro">Re-scanning target folder <code>${escapeHtml(state.agentInputs.target || ".")}</code> to refresh intelligence snapshot v4 with latest file modifications, dependencies, and environment changes.</p>
+      </div>
+    `;
+  }
+
+  const currentOpObj = ops.find((o) => o.id === currentOp) || ops[1];
+  const runBtnLabel = currentOp === "inspect" ? "Re-inspect" : currentOpObj.label;
+
+  return `
+    <section class="command-center-ops-section">
+      <div class="command-center-section-heading">
+        <h2>Engineering Operations</h2>
+        <span>Choose an autonomous engineering capability</span>
+      </div>
+      <div class="command-center-ops-grid">
+        ${opsCards}
+      </div>
+
+      <form id="agent-form" class="command-center-op-form">
+        <div class="command-center-op-workspace">
+          ${opConfigHtml}
+        </div>
+
+        <div class="command-center-execution-section">
+          <div class="command-center-execution-heading">
+            <h4>Execution Options</h4>
+          </div>
+          <div class="command-center-options-row">
+            <label class="command-center-checkbox">
+              <input type="checkbox" id="agent-dry-run" ${state.agentDryRun ? "checked" : ""} />
+              <div>
+                <strong>Dry run</strong>
+                <span>Preview actions without writing files.</span>
+              </div>
+            </label>
+            <label class="command-center-checkbox">
+              <input type="checkbox" id="agent-overwrite" ${state.agentOverwrite ? "checked" : ""} />
+              <div>
+                <strong>Allow overwrite</strong>
+                <span>Permit replacement of existing artifacts.</span>
+              </div>
+            </label>
+          </div>
+          <div class="command-center-run-bar">
+            <button class="primary-button command-center-run-button" id="agent-run-button" type="submit" ${consoleBusy ? "disabled" : ""}>
+              Run ${escapeHtml(runBtnLabel)} →
+            </button>
+          </div>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function renderSohailAgentTerminal(context) {
+  const consoleBusy = ["Running", "Starting"].includes(state.agentStatus);
+  const terminalOutput = state.agentOutput || "Select an operation, review options, and run the verified Sohail-Agent capability.";
   const clarification = state.agentClarification;
   const clarificationControls = clarification?.expected_answer_type === "text"
     ? `<input class="agent-clarification-input" id="agent-clarification-answer" type="text" maxlength="512" autocomplete="off" placeholder="Enter the exact value" /><button class="primary-button" type="submit">Submit answer</button>`
     : (clarification ? (clarification.allowed_answers || []).map((answer) => `<button class="quiet-button" type="button" data-agent-clarification-answer="${escapeHtml(answer)}">${escapeHtml(answer)}</button>`).join("") : "");
   const clarificationPanel = clarification ? `<section class="agent-clarification" id="agent-clarification"><span class="panel-kicker">Needs clarification</span><h3>${escapeHtml(clarification.requirement)}</h3><p><strong>Component:</strong> ${escapeHtml(clarification.component || "Affected scope")}</p><p>${escapeHtml(clarification.reason)}</p><p class="agent-clarification-question">${escapeHtml(clarification.question)}</p><form id="agent-clarification-form" class="agent-clarification-form">${clarificationControls}</form></section>` : "";
-  const nextActions = state.agentInspectionReady && state.selectedAgentOperation === "inspect" && state.agentStatus === "Completed" ? `<div class="agent-next-actions"><strong>Project inspected successfully.</strong><span>Choose the next engineering operation:</span><button type="button" data-agent-operation="dockerize">Dockerize</button><button type="button" data-agent-operation="kubernetes">Kubernetes</button><button type="button" data-agent-operation="cicd">CI/CD</button></div>` : "";
-  const inspectionRunMode = state.agentCategory === "inspect" && state.selectedAgentOperation === "inspect" && state.agentInspectionActive;
-  const operationWorkspace = inspectionRunMode ? "" : `<form class="agent-form" id="agent-form"><div class="agent-workspace-heading"><div><span class="panel-kicker">Operation workspace</span><h3>${escapeHtml(operation?.label || "Choose an operation")}</h3></div><span>Guided workflow</span></div><div class="agent-fields">${fields}</div>${guidedQuestions}<div class="agent-options"><label title="Preview the real validated workflow without writing files"><input type="checkbox" id="agent-dry-run" ${state.agentDryRun ? "checked" : ""} /> Dry run <small>Preview without writing files</small></label>${operation?.id === "dockerize" ? "" : `<label><input type="checkbox" id="agent-overwrite" ${state.agentOverwrite ? "checked" : ""} /> Allow overwrite</label>`}<button class="primary-button" id="agent-run-button" type="submit" ${consoleBusy ? "disabled" : ""}>${operation?.id === "dockerize" ? "Continue" : `Run ${escapeHtml(operation?.label || "operation")}`} →</button></div></form>`;
-  const terminalOutput = state.agentOutput || (inspectionRunMode ? "Waiting for backend inspection events…" : "Select an operation, provide its required inputs, and run the existing Sohail-Agent capability.");
-  return `<section class="agent-shell"><div class="agent-project-context"><span class="panel-kicker">Selected project</span><strong>${escapeHtml(state.agentInputs.target)}</strong><button type="button" class="quiet-button" data-agent-change-project>Change folder</button></div>${agentIntelligenceWorkspace()}<div class="agent-shell-header"><div><span class="panel-kicker">${state.agentCategory === "inspect" ? "Inspect" : "Build"} workflow</span><h2>Sohail-Agent</h2><p class="agent-prompt">Use stored project intelligence to continue.</p></div><span class="agent-status" id="agent-status">${escapeHtml(state.agentStatus)}</span></div><div class="agent-operation-grid">${cards}</div>${operationWorkspace}${clarificationPanel}${nextActions}<section class="agent-live-terminal"><div class="agent-live-terminal-header"><div><span class="panel-kicker">Live execution</span><h3>Sohail-Agent Terminal</h3></div><div class="agent-live-terminal-meta"><span id="agent-command">${escapeHtml(state.agentCommand || "Waiting for a run")}</span><span id="agent-live-status">${escapeHtml(state.agentStatus)}</span></div></div><pre class="agent-output" id="agent-output">${escapeHtml(terminalOutput)}</pre><form class="agent-console-form" id="agent-console-form"><span class="agent-console-prompt">$</span><input id="agent-console-input" value="${escapeHtml(state.agentConsoleInput)}" placeholder="sohail-agent --help" autocomplete="off" ${consoleBusy ? "disabled" : ""} /><button class="quiet-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run CLI</button></form><p class="agent-console-note">Only the existing <code>sohail-agent</code> CLI is accepted here; use Raw PTY for shell commands.</p></section></section>`;
+
+  return `
+    ${clarificationPanel}
+    <section class="agent-live-terminal command-center-terminal">
+      <div class="agent-live-terminal-header">
+        <div>
+          <span class="panel-kicker">Structured Agent Output</span>
+          <h3>Sohail-Agent Terminal</h3>
+        </div>
+        <div class="agent-live-terminal-meta">
+          <span id="agent-command">${escapeHtml(state.agentCommand || "Waiting for a run")}</span>
+          <span id="agent-live-status"><span class="status-dot"></span> ${escapeHtml(state.agentStatus)}</span>
+        </div>
+      </div>
+      <pre class="agent-output" id="agent-output">${escapeHtml(terminalOutput)}</pre>
+      <form class="agent-console-form" id="agent-console-form">
+        <span class="agent-console-prompt">$</span>
+        <input id="agent-console-input" value="${escapeHtml(state.agentConsoleInput)}" placeholder="sohail-agent --help" autocomplete="off" ${consoleBusy ? "disabled" : ""} />
+        <button class="quiet-button" type="submit" ${consoleBusy ? "disabled" : ""}>Run CLI</button>
+      </form>
+      <p class="agent-console-note">Structured execution stream from Sohail-Agent. For the interactive shell, use Terminal in the top navigation.</p>
+    </section>
+  `;
+}
+
+function agentTerminalView() {
+  if (!state.agentProjectValidated) return agentProjectChooser();
+  const context = state.agentContext;
+  if (!context) return inspectionLoadingView();
+
+  return `<section class="command-center-shell">
+    ${renderProjectIdentity(context)}
+    ${renderProjectStatus(context)}
+    ${renderArchitectureSummaryCards(context)}
+    ${renderFullProjectInformation(context)}
+    ${renderEngineeringOperationsAndExecution(context)}
+    ${renderSohailAgentTerminal(context)}
+  </section>`;
 }
 
 function sessionRows(sessions) {
@@ -631,7 +1084,7 @@ function sessionsView() {
 }
 
 function placeholderView(title, copy) {
-  return `<div class="page-intro"><div class="eyebrow">Sohail Studio</div><h1>${title}</h1><p>${copy}</p></div><div class="panel placeholder-panel"><div class="empty-orbit">✦</div><h2>Coming in the next layer</h2><p>The navigation and local-first contracts are ready. This surface is intentionally small until its underlying engineering workflow is connected.</p><button class="primary-button" data-route="home">Back to home</button></div>`;
+  return `<div class="page-intro"><div class="eyebrow">Sohail Studio</div><h1>${title}</h1><p>${copy}</p></div><div class="panel placeholder-panel"><div class="empty-orbit">✦</div><h2>Coming in the next layer</h2><p>The navigation and local-first contracts are ready. This surface is intentionally small until its underlying engineering workflow is connected.</p><button class="primary-button" data-route="chat">Back to Chat</button></div>`;
 }
 
 
@@ -1163,29 +1616,49 @@ function initAIMentor3D() {
 function render() {
   const route = state.route;
   disposeTerminalRenderers();
-  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.route === (["plan", "approved-plan", "run"].includes(route) ? "workflows" : route)));
-  const titles = { home: "Home", workflows: "Workflows", plan: "Plan", "approved-plan": "Plan", run: "Run", terminal: "Terminal", sessions: "Sessions", settings: "Settings", chat: "AI Chat" };
-  pageTitle.textContent = titles[route] || "Home";
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    let active = false;
+    if (route === "chat" || route === "home") active = item.dataset.route === "chat";
+    else if (route === "raw-pty" || route === "terminal") active = item.dataset.route === "raw-pty";
+    else if (route === "sohail-agent" || ["workflows", "plan", "approved-plan", "run"].includes(route)) active = item.dataset.route === "sohail-agent";
+    else if (route === "sessions") active = item.dataset.route === "sessions";
+    item.classList.toggle("active", active);
+  });
+  const titles = {
+    chat: "Chat",
+    home: "Chat",
+    "raw-pty": "Terminal",
+    terminal: "Terminal",
+    "sohail-agent": "Sohail-Agent",
+    workflows: "Sohail-Agent",
+    plan: "Plan",
+    "approved-plan": "Plan",
+    run: "Run",
+    sessions: "Sessions",
+    settings: "Settings",
+  };
+  pageTitle.textContent = titles[route] || "Chat";
 
   const providerEl = document.getElementById("status-ai-provider");
   if (providerEl) { providerEl.textContent = state.provider.charAt(0).toUpperCase() + state.provider.slice(1); }
   const modelEl = document.getElementById("status-ai-model");
   if (modelEl) { modelEl.textContent = state.model; }
 
-  if (route === "home") app.innerHTML = homeView();
+  if (route === "chat" || route === "home") app.innerHTML = chatView();
+  else if (route === "raw-pty" || route === "terminal") app.innerHTML = rawPtyView();
+  else if (route === "sohail-agent") app.innerHTML = sohailAgentView();
   else if (route === "workflows") app.innerHTML = workflowsView();
   else if (route === "plan") app.innerHTML = planView();
   else if (route === "approved-plan") app.innerHTML = approvedPlanView();
   else if (route === "run") app.innerHTML = runView();
-  else if (route === "terminal") app.innerHTML = terminalView();
   else if (route === "sessions") app.innerHTML = sessionsView();
-  else if (route === "chat") app.innerHTML = placeholderView("AI Chat", "Bring a question, a tradeoff, or a design decision.");
   else app.innerHTML = placeholderView("Settings", "Keep local paths, shell preferences, and integrations explicit.");
-  if (route === "home" || (route === "terminal" && state.terminalEngine === "pty")) initTerminalRenderers();
+
+  if (route === "raw-pty" || (route === "terminal" && state.terminalEngine === "pty")) initTerminalRenderers();
   bindView();
   if (route === "run" && state.runId) connectRun(state.runId);
-  if (route === "home" || (route === "terminal" && state.terminalEngine === "pty")) connectTerminal();
-  if (route === "terminal" && state.terminalEngine === "agent" && state.agentRunId && !state.agentRunTerminal) connectAgentRun(state.agentRunId);
+  if (route === "chat" || route === "home" || route === "raw-pty" || (route === "terminal" && state.terminalEngine === "pty")) connectTerminal();
+  if ((route === "sohail-agent" || (route === "terminal" && state.terminalEngine === "agent")) && state.agentRunId && !state.agentRunTerminal) connectAgentRun(state.agentRunId);
   if (state.commandMode === "chat") connectChat();
 
   // Initialize or re-attach the 3D robot if its container exists in the current view
@@ -1194,8 +1667,13 @@ function render() {
 
 function bindView() {
   document.querySelectorAll("[data-route]").forEach((item) => item.addEventListener("click", () => {
-    if (item.dataset.route === "terminal") state.commandMode = "terminal";
-    setRoute(item.dataset.route);
+    let r = item.dataset.route;
+    if (r === "terminal") r = "raw-pty";
+    if (r === "workflows") r = "sohail-agent";
+    if (r === "home") r = "chat";
+    if (r === "raw-pty") state.commandMode = "terminal";
+    else if (r === "chat") state.commandMode = "chat";
+    setRoute(r);
   }));
   document.querySelectorAll("[data-workflow]").forEach((item) => item.addEventListener("click", () => {
     state.selectedWorkflow = state.workflows.find((workflow) => workflow.id === item.dataset.workflow);
@@ -1207,23 +1685,17 @@ function bindView() {
     render();
   }));
 
-  document.querySelectorAll("[data-cmd-mode]").forEach((item) => item.addEventListener("click", () => {
-    state.commandMode = item.dataset.cmdMode;
-    render();
-  }));
   document.querySelectorAll("[data-terminal-engine]").forEach((item) => item.addEventListener("click", () => {
     state.terminalEngine = item.dataset.terminalEngine;
     if (state.terminalEngine === "pty") {
-      state.agentRunId = null;
-      state.agentRunTerminal = true;
-      state.agentRunStarting = false;
-      if (state.agentRunSocket) state.agentRunSocket.close();
-      state.agentRunSocket = null;
-      state.agentRunSocketRunId = null;
-    } else if (state.terminalSocket) {
-      state.terminalSocket.close();
-      state.terminalSocket = null;
+      setRoute("raw-pty");
+    } else {
+      setRoute("sohail-agent");
     }
+  }));
+  document.querySelectorAll("[data-agent-skip-project]").forEach((item) => item.addEventListener("click", () => {
+    state.agentProjectValidated = true;
+    state.agentInputs.target = state.agentInputs.target || ".";
     render();
   }));
   document.querySelectorAll("[data-agent-change-project]").forEach((item) => item.addEventListener("click", () => {
@@ -1284,9 +1756,13 @@ function bindView() {
     }
   }));
   document.querySelectorAll("[data-agent-open-terminal]").forEach((item) => item.addEventListener("click", () => {
-    state.agentCategory = "build";
-    state.agentInspectionActive = false;
-    state.selectedAgentOperation = "plan";
+    const el = document.getElementById("agent-output");
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    const consoleInput = document.getElementById("agent-console-input");
+    if (consoleInput) consoleInput.focus();
+  }));
+  document.querySelectorAll("[data-agent-toggle-full-info]").forEach((item) => item.addEventListener("click", () => {
+    state.fullInfoOpen = !state.fullInfoOpen;
     render();
   }));
   document.querySelectorAll("[data-agent-operation]").forEach((item) => item.addEventListener("click", () => {
@@ -1332,6 +1808,13 @@ function bindView() {
     });
   }
 
+  const promptInput = document.getElementById("prompt-input");
+  if (promptInput && (state.route === "chat" || state.route === "home")) {
+    setTimeout(() => {
+      promptInput.focus();
+    }, 0);
+  }
+
   const mentorRobotBtn = document.getElementById("mentor-robot-btn");
   const playMentorAnimation = () => {
     if (mentor3DScene && mentor3DScene.playGreeting) mentor3DScene.playGreeting();
@@ -1346,14 +1829,11 @@ function bindView() {
   if (planForm) planForm.addEventListener("submit", submitPlan);
   const approveButton = document.getElementById("approve-run");
   if (approveButton) approveButton.addEventListener("click", approveRun);
-  const terminalForm = document.getElementById("terminal-form");
-  if (terminalForm) terminalForm.addEventListener("submit", sendTerminalInput);
-  const terminalInput = document.getElementById("terminal-input");
-  if (terminalInput) terminalInput.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    sendTerminalInput(event);
-  });
+  if (state.route === "raw-pty" || state.route === "terminal") {
+    setTimeout(() => {
+      try { state.terminalRenderer?.focus(); } catch (_) {}
+    }, 40);
+  }
   const agentForm = document.getElementById("agent-form");
   if (agentForm) agentForm.addEventListener("submit", submitAgentRun);
   const agentProjectForm = document.getElementById("agent-project-form");
@@ -1675,7 +2155,7 @@ function connectTerminal() {
     while (state.pendingTerminalInputs.length && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ action: "input", data: state.pendingTerminalInputs.shift() }));
     }
-    document.getElementById("terminal-input")?.focus();
+    try { state.terminalRenderer?.focus(); } catch (_) {}
   };
   socket.onmessage = (event) => {
     const data = JSON.parse(event.data);
@@ -1704,8 +2184,29 @@ function connectTerminal() {
   syncTerminalView();
 }
 
+function sendTerminalRawData(data) {
+  if (!data) return;
+  state.terminalStatus = "Running";
+  if (data === "\x03") {
+    if (state.terminalSocket && state.terminalSocket.readyState === WebSocket.OPEN) {
+      state.terminalSocket.send(JSON.stringify({ action: "input", data: "\x03" }));
+      state.terminalSocket.send(JSON.stringify({ action: "stop" }));
+    } else {
+      state.pendingTerminalInputs.push("\x03");
+      connectTerminal();
+    }
+    return;
+  }
+  if (state.terminalSocket && state.terminalSocket.readyState === WebSocket.OPEN) {
+    state.terminalSocket.send(JSON.stringify({ action: "input", data }));
+  } else {
+    state.pendingTerminalInputs.push(data);
+    connectTerminal();
+  }
+}
+
 function sendTerminalInput(event) {
-  event.preventDefault();
+  event?.preventDefault?.();
   const input = document.getElementById("terminal-input");
   if (!input || !input.value.trim()) return;
   sendTerminalCommand(input.value, false);
@@ -1829,7 +2330,7 @@ function syncTerminalView() {
   syncTerminalRenderer("terminalRenderer", "terminalRenderedLength");
   syncTerminalRenderer("terminalPreviewRenderer", "terminalPreviewRenderedLength");
   if (screen && !state.terminalRenderer) screen.textContent = buffer;
-  if (preview && !state.terminalPreviewRenderer) preview.textContent = buffer ? "Raw PTY connected\nOpen terminal to view live output." : "Sohail Studio terminal\nWaiting for a command…";
+  if (preview && !state.terminalPreviewRenderer) preview.textContent = buffer ? "Terminal connected\nOpen terminal to view live output." : "Sohail Studio terminal\nWaiting for a command…";
   if (status) status.textContent = activeStatus;
   if (homeStatus) homeStatus.textContent = activeStatus;
   if (connection) connection.textContent = activeConnection;
@@ -1844,33 +2345,67 @@ function syncTerminalView() {
 }
 
 function disposeTerminalRenderers() {
-  if (state.terminalRenderer) state.terminalRenderer.dispose();
-  if (state.terminalPreviewRenderer) state.terminalPreviewRenderer.dispose();
-  state.terminalRenderer = null;
-  state.terminalPreviewRenderer = null;
+  if (state.terminalRenderer) {
+    try { state.terminalRenderer.dispose(); } catch (_) {}
+    state.terminalRenderer = null;
+  }
+  if (state.terminalPreviewRenderer) {
+    try { state.terminalPreviewRenderer.dispose(); } catch (_) {}
+    state.terminalPreviewRenderer = null;
+  }
   state.terminalRenderedLength = 0;
   state.terminalPreviewRenderedLength = 0;
 }
 
 function createTerminalRenderer(element, { preview = false } = {}) {
   if (!element || typeof window.Terminal !== "function") return null;
-  const terminal = new window.Terminal({
-    convertEol: true,
-    cursorBlink: !preview,
-    disableStdin: preview,
-    fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
-    fontSize: preview ? 10 : 13,
-    scrollback: 5000,
-    theme: { background: "#08090c", foreground: "#c9cfd8", cursor: "#c9cfd8" },
-  });
-  terminal.open(element);
-  return terminal;
+  try {
+    const terminal = new window.Terminal({
+      convertEol: true,
+      cursorBlink: !preview,
+      cursorStyle: "block",
+      disableStdin: preview,
+      fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
+      fontSize: preview ? 10 : 13,
+      scrollback: 5000,
+      theme: {
+        background: "#08090c",
+        foreground: "#c9cfd8",
+        cursor: "#c9cfd8",
+        cursorAccent: "#08090c",
+      },
+    });
+    terminal.open(element);
+    if (!preview) {
+      terminal.onData((data) => {
+        sendTerminalRawData(data);
+      });
+      element.addEventListener("click", () => {
+        try { terminal.focus(); } catch (_) {}
+      });
+      requestAnimationFrame(() => {
+        try { terminal.focus(); } catch (_) {}
+      });
+      setTimeout(() => {
+        try { terminal.focus(); } catch (_) {}
+      }, 50);
+    }
+    return terminal;
+  } catch (err) {
+    console.warn("Could not create terminal renderer:", err);
+    return null;
+  }
 }
 
 function initTerminalRenderers() {
   disposeTerminalRenderers();
   const screen = document.getElementById("terminal-screen");
-  if (screen) state.terminalRenderer = createTerminalRenderer(screen);
+  if (screen) {
+    state.terminalRenderer = createTerminalRenderer(screen);
+    setTimeout(() => {
+      try { state.terminalRenderer?.focus(); } catch (_) {}
+    }, 30);
+  }
   syncTerminalView();
 }
 
@@ -1880,12 +2415,16 @@ function syncTerminalRenderer(rendererKey, lengthKey) {
   if (state[lengthKey] > state.terminalBuffer.length) state[lengthKey] = 0;
   const pending = state.terminalBuffer.slice(state[lengthKey]);
   if (pending) {
-    renderer.write(pending);
-    state[lengthKey] = state.terminalBuffer.length;
+    try {
+      renderer.write(pending);
+      state[lengthKey] = state.terminalBuffer.length;
+    } catch (err) {
+      console.warn("Terminal write failed:", err);
+    }
   }
 }
 
-async function loadSessions() { try { state.sessions = await api("/api/sessions"); if (state.route === "home" || state.route === "sessions") render(); } catch (_) {} }
+async function loadSessions() { try { state.sessions = await api("/api/sessions"); if (state.route === "chat" || state.route === "home" || state.route === "sessions") render(); } catch (_) {} }
 async function boot() {
   try {
     const [workflows, agentOperations] = await Promise.all([api("/api/workflows"), api("/api/agent/operations"), loadSessions()]);

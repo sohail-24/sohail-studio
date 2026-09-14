@@ -803,7 +803,7 @@ function getGemini(): GoogleGenAI | null {
 }
 
 function handleChatSocket(ws: WebSocket) {
-  const modelName = "gemini-2.5-flash";
+  const modelName = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
   ws.send(JSON.stringify({
     type: "status",
@@ -866,9 +866,27 @@ function handleChatSocket(ws: WebSocket) {
           }
         } catch (err: any) {
           const errMsg = `Gemini API error: ${err.message || String(err)}`;
+          console.warn(errMsg);
+          const mentorResponse = generateMentorResponse(text);
+          const words = mentorResponse.split(" ");
+          for (let i = 0; i < words.length; i += 3) {
+            const chunk = words.slice(i, i + 3).join(" ") + " ";
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: "output",
+                message: chunk,
+                transport: "local-mentor"
+              }));
+            }
+            await new Promise((r) => setTimeout(r, 20));
+          }
+          chatHistory.push({ role: "assistant", content: mentorResponse });
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "error", message: errMsg }));
-            ws.send(JSON.stringify({ type: "complete", status: "completed", model: modelName }));
+            ws.send(JSON.stringify({
+              type: "complete",
+              status: "completed",
+              model: "local-mentor"
+            }));
           }
         }
       } else {
