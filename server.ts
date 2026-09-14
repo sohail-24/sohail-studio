@@ -98,7 +98,7 @@ function publishEvent(state: RunState, event: RunEvent) {
 }
 
 // Deep Inspector helper for a target directory
-function inspectTargetDirectory(targetPath: string, runId: string) {
+export function inspectTargetDirectory(targetPath: string, runId: string) {
   const resolved = path.resolve(targetPath);
   const projectName = path.basename(resolved) || "sohail-studio";
   const files: any[] = [];
@@ -110,6 +110,8 @@ function inspectTargetDirectory(targetPath: string, runId: string) {
   const evidence: any[] = [];
   const environmentVariables: any[] = [];
   const components: any[] = [];
+  const evidenceGaps: any[] = [];
+  let nodeVersionEvidence: { version: string; source_file: string; method: string } | null = null;
   let hasDocker = false;
   let hasKubernetes = false;
   let hasCiCd = false;
@@ -166,7 +168,6 @@ function inspectTargetDirectory(targetPath: string, runId: string) {
           } else if (entry.name === "package.json") {
             classification = "manifest";
             packageManagers.add("npm");
-            runtimes.push({ runtime: "Node.js", version: "22" });
             try {
               const pkg = JSON.parse(fs.readFileSync(full, "utf-8"));
               const deps = { ...pkg.dependencies, ...pkg.devDependencies };
@@ -175,6 +176,43 @@ function inspectTargetDirectory(targetPath: string, runId: string) {
               if (deps.next) frameworks.add("Next.js");
               if (deps.vite) frameworks.add("Vite");
               if (deps.tailwindcss || deps["@tailwindcss/vite"]) frameworks.add("Tailwind CSS");
+
+              if (pkg.engines && typeof pkg.engines.node === "string" && pkg.engines.node.trim()) {
+                nodeVersionEvidence = {
+                  version: pkg.engines.node.trim(),
+                  source_file: rel,
+                  method: "manifest-engines"
+                };
+              }
+            } catch {
+              // ignore
+            }
+          } else if (entry.name === ".nvmrc" || entry.name === ".node-version") {
+            classification = "config";
+            try {
+              const content = fs.readFileSync(full, "utf-8").trim();
+              if (content && !nodeVersionEvidence) {
+                nodeVersionEvidence = {
+                  version: content,
+                  source_file: rel,
+                  method: entry.name === ".nvmrc" ? "nvmrc" : "node-version"
+                };
+              }
+            } catch {
+              // ignore
+            }
+          } else if (entry.name === ".tool-versions") {
+            classification = "config";
+            try {
+              const content = fs.readFileSync(full, "utf-8");
+              const match = content.match(/^nodejs\s+([^\s#]+)/m);
+              if (match && !nodeVersionEvidence) {
+                nodeVersionEvidence = {
+                  version: match[1].trim(),
+                  source_file: rel,
+                  method: "tool-versions"
+                };
+              }
             } catch {
               // ignore
             }
@@ -231,16 +269,47 @@ function inspectTargetDirectory(targetPath: string, runId: string) {
 
   scan(resolved);
 
-  if (languages.has("JavaScript") || languages.has("TypeScript")) {
-    runtimes.push({ runtime: "Node.js", version: "22" });
+  const versionInfo = nodeVersionEvidence as { version: string; source_file: string; method: string } | null;
+  const isNodeProject = languages.has("JavaScript") || languages.has("TypeScript") || packageManagers.has("npm") || Boolean(versionInfo);
+
+  if (isNodeProject) {
     packageManagers.add("npm");
+    const runtimeVersion = versionInfo ? versionInfo.version : "NEEDS_EVIDENCE";
+    const runtimeEntry = {
+      runtime: "Node.js",
+      version: runtimeVersion
+    };
+    runtimes.push(runtimeEntry);
+
+    if (versionInfo) {
+      evidence.push({
+        source_file: versionInfo.source_file,
+        evidence_type: "runtime_version",
+        key: "Node.js",
+        value: versionInfo.version,
+        confidence: "high",
+        extraction_method: versionInfo.method
+      });
+    } else {
+      evidenceGaps.push({
+        status: "NEEDS_EVIDENCE",
+        kind: "runtime_version",
+        name: "Node.js",
+        component: "studio-service",
+        source_file: "package.json",
+        message: "No explicit Node.js version declared in package.json (engines.node) or runtime configuration files (.nvmrc, .node-version).",
+        missing_evidence: "Node.js runtime version declaration",
+        decision: "Declare engines.node or .nvmrc to establish verified runtime version"
+      });
+    }
+
     components.push({
       name: "studio-service",
       path: ".",
       role: "service",
       framework: frameworks.has("Express") ? "Express" : "Node.js",
       package_manager: "npm",
-      runtimes: [{ runtime: "Node.js", version: "22" }],
+      runtimes: [runtimeEntry],
       evidence: ["package.json", "server.ts"]
     });
   }
@@ -298,7 +367,7 @@ function inspectTargetDirectory(targetPath: string, runId: string) {
     ],
     infrastructure: hasDocker ? [{ type: "Docker", status: "Detected", path: dockerFiles[0] }] : [],
     contradictions: [],
-    evidence_gaps: [],
+    evidence_gaps: evidenceGaps,
     project_setup: {
       status: "READY",
       requirements: [],
@@ -944,6 +1013,8 @@ function generateMentorResponse(prompt: string): string {
   return `### Engineering Mentor Guidance\n\nI can assist you with:\n- **Repository Inspection**: Mapping technology stacks and service dependencies.\n- **Containerization**: Drafting optimized multi-stage Dockerfiles.\n- **Kubernetes & CI/CD**: Generating production deployment manifests and delivery pipelines.\n- **Architecture Planning**: Designing resilient engineering workflows.\n\n*(Tip: Add your \`GEMINI_API_KEY\` in your environment settings to enable live Gemini AI streaming!)*`;
 }
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Sohail Studio server running on http://0.0.0.0:${PORT}`);
-});
+if (process.env.NODE_ENV !== "test") {
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Sohail Studio server running on http://0.0.0.0:${PORT}`);
+  });
+}
