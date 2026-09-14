@@ -6,63 +6,61 @@ The CLI implementation lives in `sohail_agent_cli/`. Studio is self-contained: n
 
 ## What it includes
 
-- FastAPI backend with workflow planning, approval, execution, and WebSocket streaming.
+- Node.js / Express backend with workflow planning, approval, execution, and WebSocket streaming.
 - Three-column dashboard with the Workspace Canvas, AI Mentor, Engineering Knowledge Sphere, and Terminal / Execution Engine.
-- Raw local PTY terminal that starts at the Studio project root with `.venv` on `PATH`.
+- Raw local PTY terminal that starts at the Studio project root.
 - Integrated `sohail-agent` commands for repository inspection, generation, planning, and project scaffolding.
-- Local session persistence and optional Ollama-backed generation.
+- Local session persistence and optional Google Gemini-backed generation.
 
 ## Install and run
 
 From the Studio project root:
 
 ```bash
-python3 -m venv .venv        # only if .venv does not already exist
-.venv/bin/python -m pip install -e .
-.venv/bin/uvicorn backend.main:app --reload
+npm install
+npm run dev
 ```
 
-Open <http://127.0.0.1:8000>. The embedded terminal configures the same Studio environment automatically; no `source` command or directory switch is required.
+Open <http://127.0.0.1:3000>. The embedded terminal configures the same Studio environment automatically; no `source` command or directory switch is required.
+
+## Production Build
+
+To compile and run in production:
+
+```bash
+npm run build
+npm start
+```
 
 ## CLI
 
-The installed entry point is:
-
-```bash
-.venv/bin/sohail-agent --help
-.venv/bin/sohail-agent --version
-```
-
 Available commands:
 
-`inspect`, `dockerize`, `k8s`, `cicd`, `docs`, `interview`, `plan`, `plan-v2`, `bootstrap`, `stack`, `specification`, `blueprint`, and `all`.
+`inspect`, `dockerize`, `kubernetes`, `cicd`, `plan`, `blueprint`.
 
 ## Workflow model
 
 Studio-backed workflows create a plan first. The user reviews and approves that plan before `CliBridge` launches an allowlisted CLI command. Output, process information, completion, and errors are streamed locally to the dashboard, and completed runs are stored in `sessions/`.
 
-Workflow execution uses structured subprocess arguments and does not use `shell=True`. Ollama remains an external local service; Studio does not install or start it.
+Workflow execution uses structured subprocess arguments and does not use `shell=True`.
 
 ## Project layout
 
 ```text
-backend/            FastAPI API, workflow runs, and WebSockets
-core/               CliBridge and session storage
-dashboard/          Static dashboard application and assets
-terminal/           Terminal integration boundary
-settings/           Local runtime defaults
-sohail_agent_cli/   Integrated Sohail-Agent-CLI implementation
-tests/              Studio and integrated CLI tests
-.venv/              Single Python environment
+server.ts           Node.js / Express API, workflow runs, and WebSockets
+dashboard/          Static dashboard application and browser UI
+sessions/           Session history storage
+settings/           Local runtime configuration defaults
+test_runtime_evidence.ts  Project Intelligence and evidence-derived test suite
+package.json        Package manifest and scripts
 ```
 
 ## Testing
 
-Install test dependencies and run the integrated suite:
+Run the test suite, linter, and build checks:
 
 ```bash
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest -q
+npm test
+npm run lint
+npm run build
 ```
-
-The Phase 4 baseline is 146 passing tests.

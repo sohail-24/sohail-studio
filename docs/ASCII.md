@@ -318,7 +318,7 @@ DESIGN GOALS
 ✓ Transparent
 ✓ Fast
 ✓ No duplicate Sohail-Agent-CLI logic
-✓ Preserve existing FastAPI / WebSocket / CLI architecture
+✓ Preserve existing Node.js Express / WebSocket / CLI architecture
 
 
 ==============================================================================================================

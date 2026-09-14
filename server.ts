@@ -2,7 +2,7 @@ import express from "express";
 import http from "http";
 import path from "path";
 import fs from "fs";
-import { spawn, ChildProcessWithoutNullStreams } from "child_process";
+import { spawn, execSync, ChildProcessWithoutNullStreams } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI } from "@google/genai";
 
@@ -581,6 +581,302 @@ app.get("*", (req, res) => {
 });
 
 // Execution engines
+export interface DockerizePlanResult {
+  status: "SUCCESS" | "NEEDS_EVIDENCE" | "ERROR";
+  target: string;
+  missing_evidence?: Array<{
+    kind: string;
+    name: string;
+    message: string;
+    source_file?: string;
+    decision?: string;
+  }>;
+  plan?: {
+    runtime: string;
+    runtime_version: string;
+    requires_version_pin: boolean;
+    evidence_provenance?: {
+      source_file: string;
+      key: string;
+      value: string;
+      confidence?: string;
+      extraction_method?: string;
+    };
+    base_image: string | null;
+    base_image_note?: string;
+    package_manager: string;
+    port: number | null;
+    framework: string | null;
+    stages: string[];
+    dockerfile_content?: string;
+  };
+  validation: {
+    docker_available: boolean;
+    message: string;
+  };
+  files_generated: string[];
+}
+
+export function checkDockerAvailable(): boolean {
+  try {
+    execSync("docker --version", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function planDockerize(target: string, options: any = {}, runId?: string): DockerizePlanResult {
+  const resolved = path.resolve(target || ROOT);
+  if (!fs.existsSync(resolved)) {
+    return {
+      status: "ERROR",
+      target: resolved,
+      validation: {
+        docker_available: checkDockerAvailable(),
+        message: `Target directory not found: ${resolved}`
+      },
+      files_generated: []
+    };
+  }
+
+  // 1. Verify target has a valid completed inspection / intelligence snapshot
+  let intel = storedIntelligence.get(resolved);
+  if (!intel || !intel.intelligence_status || intel.intelligence_status !== "COMPLETE") {
+    intel = inspectTargetDirectory(resolved, runId || "dockerize-plan");
+  }
+
+  const dockerAvailable = checkDockerAvailable();
+  const validationMessage = dockerAvailable
+    ? "Host system has Docker CLI installed and accessible."
+    : "Docker CLI not detected in host environment. Live image build verification skipped.";
+
+  // 2. Extract required Dockerization inputs from evidence
+  const nodeRuntime = intel.runtimes ? intel.runtimes.find((r: any) => r.runtime === "Node.js") : null;
+
+  // If no runtime or runtime version is NEEDS_EVIDENCE
+  if (!nodeRuntime || !nodeRuntime.version || nodeRuntime.version === "NEEDS_EVIDENCE") {
+    return {
+      status: "NEEDS_EVIDENCE",
+      target: resolved,
+      missing_evidence: [
+        {
+          kind: "runtime_version",
+          name: "Node.js",
+          message: "Node.js runtime version declaration is missing.",
+          source_file: "package.json",
+          decision: "Declare engines.node in package.json or add .nvmrc"
+        }
+      ],
+      validation: {
+        docker_available: dockerAvailable,
+        message: validationMessage
+      },
+      files_generated: []
+    };
+  }
+
+  // 3. Extract other evidence
+  const rawVersion = String(nodeRuntime.version).trim();
+  const isConstraint = /[><=^~| ]/.test(rawVersion);
+
+  const runtimeEvidence = (intel.evidence || []).find(
+    (e: any) => e.evidence_type === "runtime_version" && e.key === "Node.js"
+  ) || {
+    source_file: "package.json",
+    key: "Node.js",
+    value: rawVersion,
+    extraction_method: "manifest-engines"
+  };
+
+  const packageManager = (intel.package_managers && intel.package_managers[0]) || "npm";
+  const portEntry = intel.ports && intel.ports[0];
+  const port = portEntry ? (portEntry.port ?? portEntry.value) : 3000;
+  const framework = (intel.frameworks && intel.frameworks[0]) || "Node.js";
+
+  // Formulate deterministic plan without inventing versions
+  let baseImage: string | null = null;
+  let baseImageNote: string | undefined = undefined;
+
+  if (isConstraint) {
+    // Range constraint e.g. ">=20 <23"
+    // MUST NOT convert to invented single version
+    baseImage = null;
+    baseImageNote = `Runtime constraint '${rawVersion}' preserved from evidence. Dockerfile FROM requires a concrete pinned version or base image tag.`;
+  } else {
+    // Concrete version e.g. "22"
+    baseImage = `node:${rawVersion}`;
+  }
+
+  const plan = {
+    runtime: "Node.js",
+    runtime_version: rawVersion,
+    requires_version_pin: isConstraint,
+    evidence_provenance: {
+      source_file: runtimeEvidence.source_file || "package.json",
+      key: runtimeEvidence.key || "Node.js",
+      value: runtimeEvidence.value || rawVersion,
+      confidence: runtimeEvidence.confidence || "high",
+      extraction_method: runtimeEvidence.extraction_method || "manifest-engines"
+    },
+    base_image: baseImage,
+    base_image_note: baseImageNote,
+    package_manager: packageManager,
+    port,
+    framework,
+    stages: ["base", "build", "production"],
+    dockerfile_content: !isConstraint && baseImage ? [
+      `# Evidence-derived Dockerfile generated by Sohail Studio`,
+      `# Runtime: Node.js ${rawVersion} (Source: ${runtimeEvidence.source_file})`,
+      `# Port: ${port}`,
+      `FROM ${baseImage} AS base`,
+      `WORKDIR /app`,
+      `COPY package*.json ./`,
+      `RUN ${packageManager} install`,
+      `COPY . .`,
+      `EXPOSE ${port}`,
+      `CMD ["${packageManager}", "start"]`
+    ].join("\n") : undefined
+  };
+
+  // 4. File generation logic: distinguish clearly between planning and file generation
+  const filesGenerated: string[] = [];
+  if (options.dryRun === false && options.generateFiles === true && plan.dockerfile_content) {
+    const dockerfilePath = path.join(resolved, "Dockerfile");
+    if (!fs.existsSync(dockerfilePath) || options.overwrite) {
+      fs.writeFileSync(dockerfilePath, plan.dockerfile_content, "utf-8");
+      if (fs.existsSync(dockerfilePath)) {
+        filesGenerated.push(dockerfilePath);
+      }
+    }
+  }
+
+  return {
+    status: "SUCCESS",
+    target: resolved,
+    plan,
+    validation: {
+      docker_available: dockerAvailable,
+      message: validationMessage
+    },
+    files_generated: filesGenerated
+  };
+}
+
+export function executeDockerize(state: RunState, target: string, options: any = {}) {
+  const planResult = planDockerize(target, options, state.runId);
+
+  publishEvent(state, {
+    type: "output",
+    message: `[Sohail-Agent] Evaluating containerization strategy for target: ${target}\nInspecting Project Intelligence snapshot...\n`
+  });
+
+  if (planResult.status === "NEEDS_EVIDENCE") {
+    const missing = planResult.missing_evidence || [];
+    const missingDesc = missing.map((m) => `- ${m.message}`).join("\n");
+    publishEvent(state, {
+      type: "output",
+      message: `[Evidence Evaluation]\n` +
+        `- Target: ${target}\n` +
+        `- Status: NEEDS_EVIDENCE\n` +
+        `\n[Missing Evidence]\n${missingDesc}\n\n` +
+        `Sohail Studio's evidence-bound contract prohibits guessing runtime versions or base images.\n` +
+        `Declare the runtime version in package.json (e.g. "engines": { "node": "<version>" }) or create .nvmrc.\n` +
+        `Containerization planning paused until required evidence is supplied.\n`
+    });
+
+    publishEvent(state, {
+      type: "complete",
+      status: "needs_evidence",
+      result_status: "NEEDS_EVIDENCE",
+      exit_code: 2,
+      missing_evidence: missing
+    });
+
+    saveSession({
+      run_id: state.runId,
+      workflow: state.workflow || "dockerize",
+      target,
+      status: "needs_evidence",
+      result_status: "NEEDS_EVIDENCE",
+      exit_code: 2,
+      output: state.events.map((e) => e.message || "").join("")
+    });
+
+    state.complete = true;
+    publishEvent(state, { type: "closed" });
+    return;
+  }
+
+  if (planResult.status === "ERROR") {
+    publishEvent(state, {
+      type: "output",
+      message: `[Error] ${planResult.validation.message || "Failed to formulate containerization plan."}\n`
+    });
+
+    publishEvent(state, {
+      type: "complete",
+      status: "failed",
+      result_status: "ERROR",
+      exit_code: 1
+    });
+
+    saveSession({
+      run_id: state.runId,
+      workflow: state.workflow || "dockerize",
+      target,
+      status: "failed",
+      result_status: "ERROR",
+      exit_code: 1,
+      output: state.events.map((e) => e.message || "").join("")
+    });
+
+    state.complete = true;
+    publishEvent(state, { type: "closed" });
+    return;
+  }
+
+  // SUCCESS path
+  const plan = planResult.plan!;
+  const prov = plan.evidence_provenance;
+  publishEvent(state, {
+    type: "output",
+    message: `[Evidence Verified]\n` +
+      `- Runtime: ${plan.runtime}\n` +
+      `- Declared Version / Constraint: ${plan.runtime_version} (Evidence source: ${prov?.source_file || "package.json"}, extraction: ${prov?.extraction_method || "manifest-engines"})\n` +
+      `- Package Manager: ${plan.package_manager}\n` +
+      `- Target Port: ${plan.port ?? "Not detected"}\n` +
+      `- Base Image Strategy: ${plan.base_image ? plan.base_image : plan.base_image_note}\n\n` +
+      `[Validation]\n${planResult.validation.message}\n\n` +
+      `[Planning]\nContainerization plan formulated from verified evidence.\n` +
+      (planResult.files_generated.length > 0
+        ? `[Files Generated]\n${planResult.files_generated.map(f => `- ${f}`).join("\n")}\n`
+        : `[File Generation]\nDry run active — no container files written to disk.\n`)
+  });
+
+  publishEvent(state, {
+    type: "complete",
+    status: "completed",
+    result_status: "SUCCESS",
+    exit_code: 0,
+    plan: planResult.plan,
+    files_generated: planResult.files_generated
+  });
+
+  saveSession({
+    run_id: state.runId,
+    workflow: state.workflow || "dockerize",
+    target,
+    status: "completed",
+    result_status: "SUCCESS",
+    exit_code: 0,
+    output: state.events.map((e) => e.message || "").join("")
+  });
+
+  state.complete = true;
+  publishEvent(state, { type: "closed" });
+}
+
 function executeWorkflowRun(state: RunState, workflow: string, target: string) {
   publishEvent(state, {
     type: "command",
@@ -600,10 +896,8 @@ function executeWorkflowRun(state: RunState, workflow: string, target: string) {
       message: `Inspecting directory structure and configuration files...\nFound ${intel.files.length} files across ${intel.languages.join(", ") || "various languages"}.\nFrameworks detected: ${intel.frameworks.join(", ") || "standard Node.js"}.\nSnapshot saved to project memory.\n`
     });
   } else if (workflow === "dockerize-project") {
-    publishEvent(state, {
-      type: "output",
-      message: `Analyzing containerization strategy...\nApplication detected on port 3000.\nTarget runtime: Node.js 22-slim.\nGenerating optimized multi-stage Dockerfile and .dockerignore...\nDockerfile ready.\n`
-    });
+    executeDockerize(state, target, { dryRun: true });
+    return;
   } else if (workflow === "kubernetes") {
     publishEvent(state, {
       type: "output",
@@ -666,10 +960,8 @@ function executeAgentOperation(state: RunState, operation: string, target: strin
       message: `\n[Verified] Inspection run stored: ${state.runId}\nDetected ${intel.files.length} files.\nLanguages: ${intel.languages.join(", ") || "None"}\nFrameworks: ${intel.frameworks.join(", ") || "Standard"}\nIntelligence snapshot persisted.\n`
     });
   } else if (operation === "dockerize") {
-    publishEvent(state, {
-      type: "output",
-      message: `[Sohail-Agent] Planning containerization configuration...\nTarget port: 3000\nBase image: node:22-alpine\nCreating Dockerfile and docker-compose.yml specification...\nVerification successful.\n`
-    });
+    executeDockerize(state, target, body);
+    return;
   } else if (operation === "kubernetes") {
     publishEvent(state, {
       type: "output",
@@ -726,7 +1018,12 @@ function executeConsoleCommand(state: RunState, command: string) {
   } else if (cmd.startsWith("plan")) {
     output = `sohail-agent: plan synthesized for specified targets.\n`;
   } else if (cmd.startsWith("dockerize")) {
-    output = `sohail-agent: docker container configuration verified.\n`;
+    const planResult = planDockerize(ROOT, { dryRun: true }, state.runId);
+    if (planResult.status === "NEEDS_EVIDENCE") {
+      output = `sohail-agent: dockerize blocked - NEEDS_EVIDENCE\nMissing evidence: Node.js runtime version declaration is missing.\n`;
+    } else {
+      output = `sohail-agent: dockerize plan formulated from verified evidence (${planResult.plan?.runtime_version}).\n`;
+    }
   } else if (cmd === "help" || cmd === "--help" || cmd === "-h") {
     output = `Sohail-Agent CLI commands:\n  inspect     Read repository structure and signals\n  dockerize   Generate Dockerfile and compose manifests\n  kubernetes  Generate Kubernetes manifests\n  cicd        Generate CI/CD workflows\n  plan        Create structured implementation plan\n  blueprint   Generate blueprints from specifications\n`;
   } else {

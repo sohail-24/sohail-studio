@@ -90,7 +90,7 @@ everything should exist inside one application.
 Browser UI
       │
       ▼
- FastAPI Backend
+ Node.js / Express Backend
       │
       ▼
   CLI Bridge
@@ -119,8 +119,8 @@ dashboard/
     CSS
     JavaScript
 
-backend/
-    FastAPI
+server.ts
+    Node.js / Express
     REST API
     WebSocket
 
@@ -495,7 +495,7 @@ Frontend
 
 Backend
 
-* FastAPI
+* Node.js / Express
 * WebSockets
 * PTY
 
