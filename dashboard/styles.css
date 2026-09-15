@@ -1,5 +1,5 @@
 :root {
-  --bg: #040914;
+  --bg: #030712;
   --panel: #0a1128;
   --panel-raised: #111c3b;
   --panel-soft: #060d1e;
@@ -21,7 +21,12 @@ body { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Se
 button, input { font: inherit; }
 button { border: 0; cursor: pointer; color: inherit; }
 
-.studio-shell { min-height: 100vh; background: radial-gradient(circle at 50% -20%, #14171d 0, var(--bg) 38%); }
+.studio-shell {
+  min-height: 100vh;
+  background-color: var(--bg);
+  background-image: radial-gradient(ellipse 75% 60% at 50% 50%, rgba(30, 85, 230, .18) 0%, rgba(16, 46, 128, .10) 38%, rgba(3, 7, 18, 0) 72%);
+  background-attachment: fixed;
+}
 .studio-header { height: 66px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 22px; padding: 0 28px; border-bottom: 1px solid var(--line); }
 .studio-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand-avatar { width: 44px; height: 44px; border-radius: 8px; border: 1px solid var(--line); object-fit: cover; }
