@@ -4,7 +4,6 @@ import path from "path";
 import fs from "fs";
 import { spawn, execSync, ChildProcessWithoutNullStreams } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
-import { GoogleGenAI } from "@google/genai";
 
 export const app = express();
 export const server = http.createServer(app);
@@ -12,6 +11,38 @@ const PORT = 3000;
 const ROOT = process.cwd();
 const DASHBOARD = path.join(ROOT, "dashboard");
 const SESSIONS_DIR = path.join(ROOT, "sessions");
+const SETTINGS_FILE = path.join(ROOT, "settings", "default.json");
+
+export interface StudioSettings {
+  terminal_cwd?: string;
+  venv_path?: string;
+  shell?: string;
+  local_only?: boolean;
+  chat_model?: string;
+  devops_model?: string;
+  ollama_base_url?: string;
+}
+
+export function loadSettings(): StudioSettings {
+  const defaults: StudioSettings = {
+    terminal_cwd: ".",
+    venv_path: ".venv",
+    shell: "/bin/zsh",
+    local_only: true,
+    chat_model: "devops-qwen:v1",
+    devops_model: "devops-qwen:latest",
+    ollama_base_url: "http://localhost:11434",
+  };
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf-8"));
+      return { ...defaults, ...parsed };
+    }
+  } catch {
+    // fallback to defaults
+  }
+  return defaults;
+}
 
 if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -454,8 +485,75 @@ app.post("/api/workflows/plan", (req, res) => {
   });
 });
 
+app.get("/api/settings", (req, res) => {
+  res.json(loadSettings());
+});
+
+app.post("/api/chat", async (req, res) => {
+  const settings = loadSettings();
+  const chatModel = process.env.CHAT_MODEL || settings.chat_model || "devops-qwen:v1";
+  const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || settings.ollama_base_url || "http://localhost:11434";
+  const { messages, message, stream = false } = req.body || {};
+
+  const history = Array.isArray(messages)
+    ? messages
+    : message
+    ? [{ role: "user", content: String(message) }]
+    : [];
+
+  if (history.length === 0) {
+    return res.status(400).json({ error: "Missing messages or message in request body" });
+  }
+
+  try {
+    const ollamaRes = await fetch(`${ollamaBaseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: chatModel,
+        messages: history,
+        stream,
+      }),
+    });
+
+    if (!ollamaRes.ok) {
+      const errText = await ollamaRes.text().catch(() => "");
+      return res.status(ollamaRes.status).json({
+        error: `Local Ollama returned HTTP ${ollamaRes.status}`,
+        detail: errText,
+        model: chatModel,
+        endpoint: `${ollamaBaseUrl}/api/chat`,
+      });
+    }
+
+    if (stream) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      // @ts-ignore
+      for await (const chunk of ollamaRes.body) {
+        res.write(chunk);
+      }
+      return res.end();
+    } else {
+      const data = await ollamaRes.json();
+      return res.json(data);
+    }
+  } catch (err: any) {
+    return res.status(503).json({
+      error: `Local Ollama service unavailable at ${ollamaBaseUrl}`,
+      detail: err?.message || String(err),
+      provider: "ollama",
+      model: chatModel,
+      hint: `Ensure Ollama is running on your local machine with model '${chatModel}' (ollama run ${chatModel})`,
+    });
+  }
+});
+
 app.post("/api/runs", (req, res) => {
-  const { workflow, target = ROOT, approved, provider, model } = req.body || {};
+  const settings = loadSettings();
+  const agentModel = process.env.SOHAIL_AGENT_MODEL || process.env.DEVOPS_MODEL || settings.devops_model || "devops-qwen:latest";
+  const { workflow, target = ROOT, approved, provider = "ollama", model = agentModel } = req.body || {};
   if (!approved) return res.status(400).json({ detail: "Approval required" });
   const runId = Math.random().toString(36).substring(2, 14);
   const resolvedTarget = path.resolve(target || ROOT);
@@ -464,8 +562,8 @@ app.post("/api/runs", (req, res) => {
     runId,
     workflow,
     target: resolvedTarget,
-    provider,
-    model,
+    provider: provider || "ollama",
+    model: model || agentModel,
     events: [],
     subscribers: new Set(),
     complete: false,
@@ -497,6 +595,8 @@ app.get("/api/runs/:run_id", (req, res) => {
 });
 
 app.post("/api/agent/runs", (req, res) => {
+  const settings = loadSettings();
+  const agentModel = process.env.SOHAIL_AGENT_MODEL || process.env.DEVOPS_MODEL || settings.devops_model || "devops-qwen:latest";
   const body = req.body || {};
   if (body.approved !== true) {
     return res.status(400).json({ detail: "Approval required" });
@@ -509,6 +609,8 @@ app.post("/api/agent/runs", (req, res) => {
     runId,
     workflow: operation,
     target,
+    provider: body.provider || "ollama",
+    model: body.model || agentModel,
     events: [],
     subscribers: new Set(),
     complete: false,
@@ -922,9 +1024,10 @@ export function executeDockerize(state: RunState, target: string, options: any =
 }
 
 function executeWorkflowRun(state: RunState, workflow: string, target: string) {
+  const model = state.model || "devops-qwen:latest";
   publishEvent(state, {
     type: "command",
-    command: `sohail-agent workflow ${workflow} --target "${target}"`,
+    command: `sohail-agent workflow ${workflow} --target "${target}" --provider ollama --model ${model}`,
     purpose: `Execute ${workflow} on ${path.basename(target)}`
   });
 
@@ -981,9 +1084,10 @@ function executeWorkflowRun(state: RunState, workflow: string, target: string) {
 }
 
 function executeAgentOperation(state: RunState, operation: string, target: string, body: any) {
+  const model = body.model || state.model || "devops-qwen:latest";
   publishEvent(state, {
     type: "command",
-    command: `sohail-agent ${operation} --target "${target}"`
+    command: `sohail-agent ${operation} --target "${target}" --provider ollama --model ${model}`
   });
 
   if (operation === "inspect") {
@@ -1207,23 +1311,19 @@ function handleTerminalSocket(ws: WebSocket, cwdParam: string) {
   });
 }
 
-let geminiClient: GoogleGenAI | null = null;
-function getGemini(): GoogleGenAI | null {
-  if (!geminiClient && process.env.GEMINI_API_KEY) {
-    geminiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  }
-  return geminiClient;
-}
-
 function handleChatSocket(ws: WebSocket) {
-  const modelName = process.env.GEMINI_MODEL || "gemini-3.6-flash";
+  const settings = loadSettings();
+  const chatModel = process.env.CHAT_MODEL || settings.chat_model || "devops-qwen:v1";
+  const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || settings.ollama_base_url || "http://localhost:11434";
 
   ws.send(JSON.stringify({
     type: "status",
     status: "ready",
     session: "chat",
-    transport: "gemini-api",
-    model: modelName
+    provider: "ollama",
+    transport: "ollama",
+    model: chatModel,
+    endpoint: `${ollamaBaseUrl}/api/chat`,
   }));
 
   const chatHistory: { role: string; content: string }[] = [];
@@ -1237,95 +1337,108 @@ function handleChatSocket(ws: WebSocket) {
 
       chatHistory.push({ role: "user", content: text });
 
-      const ai = getGemini();
-      if (ai) {
-        try {
-          const formattedHistory = chatHistory.slice(-10).map((h) => ({
-            role: h.role === "assistant" ? "model" : "user",
-            parts: [{ text: h.content }]
-          }));
+      try {
+        const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: chatModel,
+            messages: chatHistory.slice(-10),
+            stream: true,
+          }),
+        });
 
-          const responseStream = await ai.models.generateContentStream({
-            model: modelName,
-            contents: formattedHistory,
-            config: {
-              systemInstruction: "You are the Sohail Studio engineering mentor. You help developers inspect, plan, dockerize, automate, and deploy projects. You provide concise, practical, high-signal engineering advice. Format code and terminal steps with markdown.",
+        if (!response.ok) {
+          const errBody = await response.text().catch(() => "");
+          throw new Error(`Ollama returned HTTP ${response.status}: ${errBody || response.statusText}`);
+        }
+
+        if (!response.body) {
+          throw new Error("No readable response body received from local Ollama");
+        }
+
+        let fullResponse = "";
+        let lineBuffer = "";
+        const decoder = new TextDecoder();
+
+        // @ts-ignore
+        for await (const chunk of response.body) {
+          lineBuffer += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+          const lines = lineBuffer.split("\n");
+          lineBuffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const data = JSON.parse(trimmed);
+              if (data.message && data.message.content) {
+                fullResponse += data.message.content;
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({
+                    type: "output",
+                    message: data.message.content,
+                    provider: "ollama",
+                    transport: "ollama",
+                    model: chatModel,
+                  }));
+                }
+              }
+              if (data.done) {
+                chatHistory.push({ role: "assistant", content: fullResponse });
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({
+                    type: "complete",
+                    status: "completed",
+                    provider: "ollama",
+                    model: chatModel,
+                  }));
+                }
+              }
+            } catch {
+              // Line may be partial JSON
             }
-          });
+          }
+        }
 
-          let fullResponse = "";
-          for await (const chunk of responseStream) {
-            const chunkText = chunk.text;
-            if (chunkText) {
-              fullResponse += chunkText;
+        if (lineBuffer.trim()) {
+          try {
+            const data = JSON.parse(lineBuffer.trim());
+            if (data.message && data.message.content) {
+              fullResponse += data.message.content;
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                   type: "output",
-                  message: chunkText,
-                  transport: "gemini-api"
+                  message: data.message.content,
+                  provider: "ollama",
+                  transport: "ollama",
+                  model: chatModel,
                 }));
               }
             }
-          }
-
-          chatHistory.push({ role: "assistant", content: fullResponse });
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: "complete",
-              status: "completed",
-              model: modelName
-            }));
-          }
-        } catch (err: any) {
-          const errMsg = `Gemini API error: ${err.message || String(err)}`;
-          console.warn(errMsg);
-          const mentorResponse = generateMentorResponse(text);
-          const words = mentorResponse.split(" ");
-          for (let i = 0; i < words.length; i += 3) {
-            const chunk = words.slice(i, i + 3).join(" ") + " ";
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                type: "output",
-                message: chunk,
-                transport: "local-mentor"
-              }));
+            if (data.done) {
+              chatHistory.push({ role: "assistant", content: fullResponse });
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  type: "complete",
+                  status: "completed",
+                  provider: "ollama",
+                  model: chatModel,
+                }));
+              }
             }
-            await new Promise((r) => setTimeout(r, 20));
-          }
-          chatHistory.push({ role: "assistant", content: mentorResponse });
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: "complete",
-              status: "completed",
-              model: "local-mentor"
-            }));
-          }
+          } catch {}
         }
-      } else {
-        // High-signal intelligent local mentor response when GEMINI_API_KEY is not configured
-        const mentorResponse = generateMentorResponse(text);
-        // Stream chunks smoothly
-        const words = mentorResponse.split(" ");
-        for (let i = 0; i < words.length; i += 3) {
-          const chunk = words.slice(i, i + 3).join(" ") + " ";
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: "output",
-              message: chunk,
-              transport: "local-mentor"
-            }));
-          }
-          await new Promise((r) => setTimeout(r, 25));
-        }
-
-        chatHistory.push({ role: "assistant", content: mentorResponse });
-
+      } catch (err: any) {
+        const errorDetail = err?.message || String(err);
+        const errMsg = `[Local Ollama Error] Could not reach Ollama at ${ollamaBaseUrl} with model '${chatModel}'.\n\nDetail: ${errorDetail}\n\nPlease verify that Ollama is running locally on your Mac:\n  ollama run ${chatModel}\n  curl ${ollamaBaseUrl}/api/tags`;
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
-            type: "complete",
-            status: "completed",
-            model: "local-mentor"
+            type: "error",
+            message: errMsg,
+            provider: "ollama",
+            model: chatModel,
+            endpoint: `${ollamaBaseUrl}/api/chat`,
           }));
         }
       }

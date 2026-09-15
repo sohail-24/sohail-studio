@@ -58,13 +58,15 @@ const state = {
   workspaceTab: "overview",
   advancedOpen: true,
   provider: "ollama",
+  chatModel: "devops-qwen:v1",
+  agentModel: "devops-qwen:latest",
   model: "devops-qwen:latest",
   commandMode: "chat",
   chatHistory: [],
 };
 
 const aiModels = {
-  ollama: ["devops-qwen:latest", "qwen3.5", "llama3", "mistral"],
+  ollama: ["devops-qwen:v1", "devops-qwen:latest", "qwen3.5", "llama3", "mistral"],
   gemini: ["gemini-pro", "gemini-flash"]
 };
 
@@ -1642,7 +1644,13 @@ function render() {
   const providerEl = document.getElementById("status-ai-provider");
   if (providerEl) { providerEl.textContent = state.provider.charAt(0).toUpperCase() + state.provider.slice(1); }
   const modelEl = document.getElementById("status-ai-model");
-  if (modelEl) { modelEl.textContent = state.model; }
+  if (modelEl) {
+    if (route === "chat" || route === "home") {
+      modelEl.textContent = state.chatModel || "devops-qwen:v1";
+    } else {
+      modelEl.textContent = state.agentModel || "devops-qwen:latest";
+    }
+  }
 
   if (route === "chat" || route === "home") app.innerHTML = chatView();
   else if (route === "raw-pty" || route === "terminal") app.innerHTML = rawPtyView();
@@ -1935,7 +1943,7 @@ async function startAgentOperation(operation) {
     const operationComponents = operation === "dockerize" && dockerPlan
       ? Object.keys(dockerPlan.dockerfiles)
       : state.agentChoices.components;
-    const result = await api("/api/agent/runs", { method: "POST", body: JSON.stringify({ operation, target: liveInputs.target || state.agentInputs.target, goal: liveInputs.goal, plan_dir: liveInputs.plan_dir, spec_dir: liveInputs.spec_dir, output_dir: liveInputs.output_dir, dry_run: state.agentDryRun, overwrite: state.agentOverwrite, components: operationComponents, compose: state.agentChoices.compose, compose_action: state.agentChoices.composeAction, organization: state.agentChoices.organization, cicd_action: state.agentChoices.cicdAction, cicd_platform: state.agentChoices.cicdPlatform, inspection_run_id: operation === "inspect" ? "" : state.agentInspectionRunId, docker_plan: dockerPlan || {} }) });
+    const result = await api("/api/agent/runs", { method: "POST", body: JSON.stringify({ operation, target: liveInputs.target || state.agentInputs.target, approved: true, provider: state.provider, model: state.agentModel || "devops-qwen:latest", goal: liveInputs.goal, plan_dir: liveInputs.plan_dir, spec_dir: liveInputs.spec_dir, output_dir: liveInputs.output_dir, dry_run: state.agentDryRun, overwrite: state.agentOverwrite, components: operationComponents, compose: state.agentChoices.compose, compose_action: state.agentChoices.composeAction, organization: state.agentChoices.organization, cicd_action: state.agentChoices.cicdAction, cicd_platform: state.agentChoices.cicdPlatform, inspection_run_id: operation === "inspect" ? "" : state.agentInspectionRunId, docker_plan: dockerPlan || {} }) });
     state.agentRunId = result.run_id;
     state.agentRunStarting = false;
     state.agentStatus = "Running";
@@ -2269,6 +2277,13 @@ function connectChat() {
     if (data.type === "status") {
       state.chatConnection = ["ready", "running"].includes(data.status) ? "Available" : data.status;
       if (["ready", "running"].includes(data.status) && state.chatStatus !== "Running") state.chatStatus = "Idle";
+      if (data.model) {
+        state.chatModel = data.model;
+        const modelEl = document.getElementById("status-ai-model");
+        if (modelEl && (state.route === "chat" || state.route === "home" || !state.route)) {
+          modelEl.textContent = data.model;
+        }
+      }
       syncTerminalView();
     }
     if (data.type === "complete") {
