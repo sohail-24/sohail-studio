@@ -20,27 +20,21 @@ console.log("=== Running Project Intelligence Runtime Evidence & Dockerize Tests
 // -------------------------------------------------------------
 
 // TEST A: Current Sohail Studio Repository
-console.log("\n[INSPECTOR TEST A] Current Sohail Studio repository (no engines.node)");
+console.log("\n[INSPECTOR TEST A] Current Sohail Studio repository declares engines.node = 22");
 const repoIntel = inspectTargetDirectory(".", "run-test-a");
 
-const hasHardcoded22Runtime = repoIntel.runtimes.some(
-  (r: any) => r.runtime === "Node.js" && r.version === "22"
-);
-assert.equal(hasHardcoded22Runtime, false, "Must NOT report hard-coded Node.js 22 in runtimes");
-
-const hasHardcoded22Evidence = repoIntel.evidence.some(
-  (e: any) => e.evidence_type === "runtime_version" && e.value === "22"
-);
-assert.equal(hasHardcoded22Evidence, false, "Must NOT claim Node.js 22 in verified evidence list");
-
 const nodeRuntime = repoIntel.runtimes.find((r: any) => r.runtime === "Node.js");
-assert.ok(nodeRuntime, "Node.js runtime should still be detected");
-assert.equal(nodeRuntime.version, "NEEDS_EVIDENCE", "Node.js version should be NEEDS_EVIDENCE");
+assert.ok(nodeRuntime, "Node.js runtime must be detected");
+assert.equal(nodeRuntime.version, "22", "Node.js runtime version must be 22");
 
-const runtimeGap = repoIntel.evidence_gaps.find(
-  (g: any) => g.kind === "runtime_version" && g.status === "NEEDS_EVIDENCE"
+const runtimeEvidence = repoIntel.evidence.find(
+  (e: any) => e.evidence_type === "runtime_version" && e.key === "Node.js"
 );
-assert.ok(runtimeGap, "evidence_gaps should record a NEEDS_EVIDENCE finding for runtime_version");
+assert.ok(runtimeEvidence, "Runtime version evidence must exist");
+assert.equal(runtimeEvidence.value, "22", "Evidence value must be 22");
+assert.equal(runtimeEvidence.source_file, "package.json", "Evidence source_file must be package.json");
+assert.equal(runtimeEvidence.extraction_method, "manifest-engines", "extraction_method must be manifest-engines");
+
 assert.ok(repoIntel.languages.includes("TypeScript"), "TypeScript must remain detected");
 assert.ok(repoIntel.languages.includes("JavaScript"), "JavaScript must remain detected");
 assert.ok(repoIntel.package_managers.includes("npm"), "npm must remain detected");
@@ -137,16 +131,18 @@ console.log("✓ INSPECTOR TEST D passed.");
 console.log("\n=== DOCKERIZE VERIFICATION TESTS ===");
 
 // DOCKERIZE TEST A: Current Sohail Studio Repository
-console.log("\n[DOCKERIZE TEST A] Current Sohail Studio repo must return NEEDS_EVIDENCE, no invented Node 22 image");
+console.log("\n[DOCKERIZE TEST A] Current Sohail Studio repo selects node:22 base image from declared engines.node");
 const dockerResA = planDockerize(".", { dryRun: true }, "docker-test-a");
-assert.equal(dockerResA.status, "NEEDS_EVIDENCE", "Must return NEEDS_EVIDENCE when node version lacks evidence");
-assert.ok(dockerResA.missing_evidence && dockerResA.missing_evidence.length > 0, "Must report missing evidence");
-const missingA = dockerResA.missing_evidence.find((m: any) => m.name === "Node.js" || m.kind === "runtime_version");
-assert.ok(missingA, "Must identify missing Node.js runtime version declaration");
-assert.equal(missingA.message, "Node.js runtime version declaration is missing.");
-assert.equal(dockerResA.plan, undefined, "Must NOT generate a plan or base image when evidence is missing");
-assert.equal(dockerResA.files_generated.length, 0, "Must not claim any files generated");
-console.log("✓ DOCKERIZE TEST A passed: Correctly blocked with NEEDS_EVIDENCE without inventing Node 22.");
+assert.equal(dockerResA.status, "SUCCESS", "Must succeed when valid explicit runtime evidence exists");
+assert.ok(dockerResA.plan, "Plan must be formulated");
+assert.equal(dockerResA.plan.runtime, "Node.js");
+assert.equal(dockerResA.plan.runtime_version, "22");
+assert.equal(dockerResA.plan.base_image, "node:22");
+assert.equal(dockerResA.plan.evidence_provenance.source_file, "package.json");
+assert.equal(dockerResA.plan.evidence_provenance.value, "22");
+assert.equal(dockerResA.plan.evidence_provenance.extraction_method, "manifest-engines");
+assert.equal(dockerResA.files_generated.length, 0, "Dry run must generate 0 files on disk");
+console.log("✓ DOCKERIZE TEST A passed: Correctly selected node:22 from declared engines.node.");
 
 // DOCKERIZE TEST B: Synthetic project with explicit engines.node = "22"
 console.log("\n[DOCKERIZE TEST B] Synthetic project with explicit engines.node: '22'");
@@ -267,14 +263,14 @@ console.log("✓ DOCKERIZE TEST G passed: Files only claimed when verified to ex
 console.log("\n=== MENTOR GUIDANCE TESTS ===");
 
 console.log("\n[MENTOR TEST 1] Verify mentor guidance never references node:22-alpine");
-const mentorQuery1 = generateMentorResponse("How do I dockerize my project?");
+const mentorQuery1 = generateMentorResponse("How do I dockerize my project?", tmpD);
 assert.equal(mentorQuery1.includes("node:22-alpine"), false, "Mentor guidance must NEVER use node:22-alpine");
 assert.equal(mentorQuery1.includes("multi-stage"), false, "Mentor guidance must NOT describe 1-FROM container as multi-stage");
 assert.ok(mentorQuery1.includes("NEEDS_EVIDENCE") || mentorQuery1.includes("Declare Runtime Version"), "Mentor guidance must be evidence-aware and flag missing declarations");
 console.log("✓ MENTOR TEST 1 passed: Mentor container guidance is evidence-aware with zero node:22-alpine.");
 
 console.log("\n[MENTOR TEST 2] Verify mentor guidance for project with declared engines.node");
-const mentorQuery2 = generateMentorResponse("How should I containerize this?", tmpB);
+const mentorQuery2 = generateMentorResponse("How should I containerize this?", ".");
 assert.equal(mentorQuery2.includes("node:22-alpine"), false, "Must not use node:22-alpine even on pinned project");
 assert.ok(mentorQuery2.includes("node:22"), "Mentor should reflect detected node:22 from evidence");
 assert.equal(mentorQuery2.includes("multi-stage"), false, "Must not claim multi-stage");

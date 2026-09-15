@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Local-first AI engineering workspace",
   "type": "module",
+  "engines": {
+    "node": "22"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "lint": "tsc --noEmit",
