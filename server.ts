@@ -853,21 +853,36 @@ function handleChatSocket(ws: WebSocket) {
 
       chatHistory.push({ role: "user", content: text });
 
-      // Gather factual evidence from Read-Only Control Plane
-      const evidence = await controlPlane.gatherEvidenceForQuery(text);
+      // Determine whether real local evidence is required
+      const plan = controlPlane.detectEvidenceRequirement(text);
 
-      const systemPrompt: OllamaChatMessage = {
-        role: "system",
-        content: `You are Sohail Studio Chat, an engineering mentor powered by local Ollama model ${OLLAMA_CHAT_MODEL}.
+      let systemPrompt: OllamaChatMessage;
+      if (plan.required) {
+        // Real local / workspace / system question: gather genuine runtime evidence
+        const evidence = await controlPlane.gatherEvidenceByPlan(plan);
+
+        systemPrompt = {
+          role: "system",
+          content: `You are Sohail Studio Chat, an expert DevOps and software engineering mentor powered by local Ollama model ${OLLAMA_CHAT_MODEL}.
 You are integrated with a strict Read-Only Control Plane providing factual local evidence.
-Rules:
-1. Ground your answers strictly in the verified local evidence provided below.
-2. If evidence reports that a file, folder, or resource does not exist (e.g., searching for 'sms' returns no matches), state that factually without hallucination. Follow the principle: No evidence = NEEDS_EVIDENCE.
-3. You are strictly read-only. You cannot perform write operations, filesystem modifications, or execute arbitrary shell commands. The terminal is reserved for user commands.
 
 [Verified Local Evidence from Read-Only Control Plane]
-${JSON.stringify(evidence, null, 2)}`
-      };
+${JSON.stringify(evidence, null, 2)}
+
+Rules:
+1. Ground your answers strictly in the verified local evidence provided above.
+2. If evidence reports that a file, folder, or resource does not exist (e.g., 'not found' or 'No file or folder matching...'), state that factually without hallucination. Follow the principle: No evidence = NEEDS_EVIDENCE.
+3. The Control Plane only searches within the configured workspace boundary. Never claim to have searched outside this boundary or the entire computer unless explicitly evidenced.
+4. You are strictly read-only. You cannot perform write operations, filesystem modifications, or execute arbitrary shell commands. The terminal is reserved for user commands.`
+        };
+      } else {
+        // Normal knowledge / engineering question: Send directly to Ollama without unnecessary Control Plane calls
+        systemPrompt = {
+          role: "system",
+          content: `You are Sohail Studio Chat, an expert DevOps and software engineering mentor powered by local Ollama model ${OLLAMA_CHAT_MODEL}.
+Provide concise, practical, high-signal engineering advice. Format code and terminal commands with markdown.`
+        };
+      }
 
       const messagesForOllama: OllamaChatMessage[] = [
         systemPrompt,

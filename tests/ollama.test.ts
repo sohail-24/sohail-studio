@@ -103,7 +103,64 @@ describe("Ollama Integration & Architectural Separation", () => {
     }
   });
 
-  it("5. Strict safety: Chat cannot execute arbitrary shell commands", async () => {
+  it("5. Normal engineering question goes to Ollama without unneeded Control Plane evidence", async () => {
+    let capturedRequestBody: any = null;
+
+    const server = http.createServer((req, res) => {
+      if (req.url === "/api/chat" && req.method === "POST") {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          capturedRequestBody = JSON.parse(body);
+          res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+          res.end(JSON.stringify({
+            model: "devops-qwen:v1",
+            message: { role: "assistant", content: "1. docker run\n2. docker ps\n3. docker stop\n4. docker build\n5. docker images" },
+            done: true,
+          }) + "\n");
+        });
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as any).port;
+    const testUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const client = new OllamaClient(testUrl, "devops-qwen:v1");
+      const question = "Tell me 5 Docker commands";
+
+      // Detect evidence requirement: should be false
+      const plan = controlPlane.detectEvidenceRequirement(question);
+      assert.equal(plan.required, false, "Normal engineering question must not require local evidence");
+
+      // Verify that the prompt sent to Ollama does NOT include unneeded local filesystem or clock evidence
+      const response = await client.streamChat({
+        baseUrl: testUrl,
+        model: "devops-qwen:v1",
+        messages: [
+          {
+            role: "system",
+            content: "You are Sohail Studio Chat, an expert DevOps and software engineering mentor powered by local Ollama model devops-qwen:v1.",
+          },
+          { role: "user", content: question },
+        ],
+        controlPlane,
+      });
+
+      assert.ok(response.includes("docker run"));
+      assert.equal(capturedRequestBody.model, "devops-qwen:v1");
+      assert.equal(capturedRequestBody.messages.length, 2);
+      assert.ok(!JSON.stringify(capturedRequestBody.messages).includes("Verified Local Evidence"));
+    } finally {
+      server.close();
+    }
+  });
+
+  it("6. Strict safety: Chat cannot execute arbitrary shell commands", async () => {
     const cp = new ReadOnlyControlPlane(process.cwd());
 
     // Try executing a shell command via Control Plane

@@ -113,6 +113,12 @@ export interface ControlPlaneEvidence {
   error?: string;
 }
 
+export interface EvidenceRequirementPlan {
+  required: boolean;
+  tools: ReadOnlyToolName[];
+  searchParams?: Record<string, any>;
+}
+
 export class ReadOnlyControlPlane {
   private workspaceRoot: string;
 
@@ -247,16 +253,44 @@ export class ReadOnlyControlPlane {
 
   /**
    * Tool 4: project_files
-   * Searches for files or folders matching a query.
+   * Searches for files or folders matching a query within the configured workspace.
    * Reports factually: if no matches, reports found: false and no hallucinated paths.
    */
   public searchProjectFiles(query: string = ""): ProjectFilesEvidence {
-    const trimmed = query.trim().toLowerCase();
+    const trimmed = query.trim();
+    if (!trimmed) {
+      return {
+        query: "",
+        found: false,
+        count: 0,
+        matches: [],
+        searched_in: this.workspaceRoot,
+        message: "No search term provided.",
+      };
+    }
+
+    // Check if query is an explicit path that resolves outside workspace boundary
+    const isExplicitPath = trimmed.startsWith("/") || trimmed.startsWith("..") || trimmed.includes(path.sep);
+    if (isExplicitPath) {
+      const resolved = path.resolve(this.workspaceRoot, trimmed);
+      if (!resolved.startsWith(this.workspaceRoot)) {
+        return {
+          query: trimmed,
+          found: false,
+          count: 0,
+          matches: [],
+          searched_in: this.workspaceRoot,
+          message: `The requested path '${trimmed}' is outside the configured workspace boundary (${this.workspaceRoot}). Only the configured workspace was searched.`,
+        };
+      }
+    }
+
+    const queryLower = trimmed.toLowerCase();
     const matches: ProjectFileMatch[] = [];
     const ignoredDirs = new Set(["node_modules", ".git", "dist", ".cache"]);
 
     const walk = (dir: string, depth: number) => {
-      if (depth > 6) return;
+      if (depth > 10) return;
       let entries: string[] = [];
       try {
         entries = fs.readdirSync(dir);
@@ -280,7 +314,7 @@ export class ReadOnlyControlPlane {
         const entryLower = entry.toLowerCase();
         const relLower = relPath.toLowerCase();
 
-        const isMatch = !trimmed || entryLower.includes(trimmed) || relLower.includes(trimmed);
+        const isMatch = entryLower === queryLower || entryLower.includes(queryLower) || relLower.includes(queryLower);
 
         if (isMatch) {
           matches.push({
@@ -301,11 +335,11 @@ export class ReadOnlyControlPlane {
 
     const found = matches.length > 0;
     const message = found
-      ? `Found ${matches.length} match(es) for '${query}' in workspace.`
-      : `No file or folder matching '${query}' exists in workspace.`;
+      ? `Found ${matches.length} match(es) for '${trimmed}' in workspace (${this.workspaceRoot}).`
+      : `No file or folder matching '${trimmed}' exists in workspace (${this.workspaceRoot}). Only the configured workspace was searched.`;
 
     return {
-      query,
+      query: trimmed,
       found,
       count: matches.length,
       matches,
@@ -590,58 +624,154 @@ export class ReadOnlyControlPlane {
   }
 
   /**
-   * Proactive Evidence Gatherer:
-   * Inspects user prompt and gathers factual evidence before/with inference.
-   * Ensures the model receives genuine local evidence for queries about time, git, files, docker, etc.
+   * Evidence Requirement Detector:
+   * Distinguishes normal engineering questions from questions requiring real local/system/workspace evidence.
+   * Normal engineering questions (e.g. "Tell me 5 Docker commands", "Explain Kubernetes") return required: false.
+   * Local questions (e.g. "What is today's date?", "What is my current workspace?", "Find folder new-wedding") return required: true with specific tools.
    */
-  public async gatherEvidenceForQuery(query: string): Promise<Record<string, any>> {
-    const lower = query.toLowerCase();
+  public detectEvidenceRequirement(query: string): EvidenceRequirementPlan {
+    const trimmed = query.trim();
+    const lower = trimmed.toLowerCase();
+
+    const tools: ReadOnlyToolName[] = [];
+    let searchParams: Record<string, any> | undefined;
+
+    // 1. local_time: asks for dynamic local/system clock/date/time
+    const isTimeQuery =
+      /\b(?:what(?:'s|\s+is)?\s+(?:the\s+)?(?:current\s+)?(?:date|time|day|clock|timezone)|today(?:'s)?\s+date|date\s+today|what\s+time\s+is\s+it|time\s+now|current\s+time|current\s+date|local\s+time)\b/i.test(trimmed);
+    if (isTimeQuery) {
+      tools.push("local_time");
+    }
+
+    // 2. workspace_pwd: asks for current workspace, directory, or pwd
+    const isPwdQuery =
+      /^(?:pwd)$/i.test(trimmed) ||
+      /\b(?:what(?:'s|\s+is)?\s+(?:my\s+|the\s+)?(?:current\s+)?workspace|workspace\s+path|where\s+am\s+i|current\s+(?:working\s+)?directory|what\s+folder\s+am\s+i\s+in)\b/i.test(trimmed);
+    if (isPwdQuery) {
+      tools.push("workspace_pwd");
+    }
+
+    // 3. workspace_ls: asks to list files or directory contents
+    const isLsQuery =
+      /^(?:ls|dir)(?:\s+.*)?$/i.test(trimmed) ||
+      /\b(?:list\s+(?:the\s+)?(?:files|directory|folder|workspace)|show\s+(?:the\s+)?(?:files|directory\s+contents|workspace\s+files)|what\s+files\s+(?:are\s+in|exist|do\s+we\s+have))\b/i.test(trimmed);
+    if (isLsQuery && !tools.includes("workspace_ls")) {
+      tools.push("workspace_ls");
+    }
+
+    // 4. project_files: asks to find / search / locate a specific file or folder
+    // e.g. "find folder new-wedding", "find file package.json", "where is index.html", "search for server.ts", "do we have a new-wedding folder"
+    let fileSearchTerm: string | null = null;
+    const findMatch = trimmed.match(
+      /\b(?:find|locate|search(?:\s+for)?|where\s+is)\s+(?:(?:the|a|an)\s+)?(?:(?:folder|directory|dir|file)\s+)?([a-zA-Z0-9_\-./]+)/i
+    );
+    if (findMatch && findMatch[1]) {
+      const candidate = findMatch[1].trim();
+      if (!/^(?:how|what|why|who|a|an|the|me|my|your|this|that|some)$/i.test(candidate)) {
+        fileSearchTerm = candidate;
+      }
+    }
+    if (!fileSearchTerm) {
+      const existMatch = trimmed.match(
+        /\b(?:do\s+(?:we|i)\s+have|is\s+there)\s+(?:(?:a|an|the)\s+)?([a-zA-Z0-9_\-./]+)\s+(?:folder|directory|dir|file)\b/i
+      );
+      if (existMatch && existMatch[1]) {
+        fileSearchTerm = existMatch[1].trim();
+      }
+    }
+    if (fileSearchTerm) {
+      tools.push("project_files");
+      searchParams = { query: fileSearchTerm };
+    }
+
+    // 5. git_read: asks about the local Git repository state / branch / status
+    const isGitLocalQuery =
+      /^(?:git\s+(?:status|branch|log))$/i.test(trimmed) ||
+      /\b(?:what\s+git\s+branch|what\s+branch\s+am\s+i|what\s+is\s+my\s+git\s+branch|current\s+git\s+branch|show\s+git\s+branch|check\s+git\s+status|is\s+this\s+a\s+git\s+repo(?:sitory)?|what\s+branch\s+are\s+we\s+on)\b/i.test(trimmed);
+    if (isGitLocalQuery) {
+      tools.push("git_read");
+    }
+
+    // 6. docker_read: asks about local Docker status / Docker in this project
+    const isDockerLocalQuery =
+      /\b(?:what\s+docker\s+information|is\s+docker\s+(?:installed|running|available)|check\s+docker|do\s+i\s+have\s+(?:a\s+)?dockerfile|docker\s+status)\b/i.test(trimmed);
+    if (isDockerLocalQuery && !tools.includes("docker_read")) {
+      tools.push("docker_read");
+    }
+
+    // 7. kubernetes_read: asks about local Kubernetes configuration / manifests in this project
+    const isK8sLocalQuery =
+      /\b(?:do\s+(?:i|we)\s+have\s+(?:a\s+)?kubernetes\s+config(?:uration)?|do\s+(?:i|we)\s+have\s+k8s\s+manifests|is\s+kubectl\s+(?:installed|running|available)|check\s+kubernetes\s+setup|kubernetes\s+configuration\s+available)\b/i.test(trimmed);
+    if (isK8sLocalQuery && !tools.includes("kubernetes_read")) {
+      tools.push("kubernetes_read");
+    }
+
+    // 8. Mixed / Project-specific questions (e.g. "What Docker setup should I use for this project?")
+    const isProjectContext = /\b(?:for\s+this\s+project|in\s+this\s+project|for\s+this\s+repo(?:sitory)?|in\s+this\s+repo(?:sitory)?|this\s+project|this\s+workspace)\b/i.test(trimmed);
+    if (isProjectContext) {
+      if (lower.includes("docker") && !tools.includes("docker_read")) {
+        tools.push("docker_read");
+        if (!tools.includes("workspace_ls")) tools.push("workspace_ls");
+      }
+      if ((lower.includes("k8s") || lower.includes("kubernetes")) && !tools.includes("kubernetes_read")) {
+        tools.push("kubernetes_read");
+        if (!tools.includes("workspace_ls")) tools.push("workspace_ls");
+      }
+    }
+
+    return {
+      required: tools.length > 0,
+      tools,
+      searchParams,
+    };
+  }
+
+  /**
+   * Gather evidence strictly according to the detected plan.
+   */
+  public async gatherEvidenceByPlan(plan: EvidenceRequirementPlan): Promise<Record<string, any>> {
     const evidence: Record<string, any> = {};
 
-    // Local time query
-    if (lower.includes("time") || lower.includes("date") || lower.includes("clock") || lower.includes("today") || lower.includes("day") || lower.includes("timezone")) {
-      evidence.local_time = this.getLocalTime();
-    }
-
-    // Git / branch query
-    if (lower.includes("git") || lower.includes("branch") || lower.includes("commit") || lower.includes("repo")) {
-      evidence.git = await this.getGitRead();
-    }
-
-    // Docker query
-    if (lower.includes("docker") || lower.includes("container") || lower.includes("dockerfile") || lower.includes("compose")) {
-      evidence.docker = await this.getDockerRead();
-    }
-
-    // Kubernetes query
-    if (lower.includes("k8s") || lower.includes("kubernetes") || lower.includes("pod") || lower.includes("deployment") || lower.includes("service")) {
-      evidence.kubernetes = await this.getKubernetesRead();
-    }
-
-    // Search or find file/folder query (e.g. "Find the sms folder", "Where is index.html")
-    const searchMatch = query.match(/(?:find|search|look for|where is|locate)\s+(?:the\s+)?([a-zA-Z0-9_\-./]+)/i);
-    if (searchMatch && searchMatch[1]) {
-      const term = searchMatch[1].replace(/folder|directory|file/gi, "").trim();
-      if (term) {
-        evidence.file_search = this.searchProjectFiles(term);
+    for (const tool of plan.tools) {
+      switch (tool) {
+        case "local_time":
+          evidence.local_time = this.getLocalTime();
+          break;
+        case "workspace_pwd":
+          evidence.workspace_pwd = this.getWorkspacePwd();
+          break;
+        case "workspace_ls":
+          evidence.workspace_ls = this.getWorkspaceLs(".");
+          break;
+        case "project_files":
+          evidence.file_search = this.searchProjectFiles(plan.searchParams?.query || "");
+          break;
+        case "docker_read":
+          evidence.docker = await this.getDockerRead();
+          break;
+        case "git_read":
+          evidence.git = await this.getGitRead();
+          break;
+        case "kubernetes_read":
+          evidence.kubernetes = await this.getKubernetesRead();
+          break;
       }
-    } else if (lower.includes("sms")) {
-      evidence.file_search = this.searchProjectFiles("sms");
-    }
-
-    // Path / PWD / Workspace list
-    if (lower.includes("pwd") || lower.includes("path") || lower.includes("workspace") || lower.includes("directory") || lower.includes("files") || lower.includes("ls")) {
-      evidence.workspace_pwd = this.getWorkspacePwd();
-      evidence.workspace_ls = this.getWorkspaceLs(".");
-    }
-
-    // Always provide baseline factual context if nothing specific was matched
-    if (Object.keys(evidence).length === 0) {
-      evidence.workspace_pwd = this.getWorkspacePwd();
-      evidence.local_time = this.getLocalTime();
     }
 
     return evidence;
+  }
+
+  /**
+   * Proactive Evidence Gatherer:
+   * Inspects user prompt and gathers factual evidence ONLY when required.
+   * For normal engineering questions, returns an empty object without injecting fake baseline context.
+   */
+  public async gatherEvidenceForQuery(query: string): Promise<Record<string, any>> {
+    const plan = this.detectEvidenceRequirement(query);
+    if (!plan.required) {
+      return {};
+    }
+    return this.gatherEvidenceByPlan(plan);
   }
 
   /**

@@ -54,16 +54,32 @@ describe("ReadOnlyControlPlane - 7 Tools & Read-Only Evidence", () => {
     assert.equal(searchExisting.found, true);
     assert.ok(searchExisting.matches.some((m) => m.name === "package.json"));
 
-    // Search for non-existent folder/file (e.g., 'sms')
+    // Search for non-existent folder/file (e.g., 'sms', 'new-wedding')
     const searchMissing = cp.searchProjectFiles("sms");
     assert.equal(searchMissing.found, false);
     assert.equal(searchMissing.count, 0);
     assert.deepEqual(searchMissing.matches, []);
-    assert.equal(
-      searchMissing.message,
-      "No file or folder matching 'sms' exists in workspace.",
+    assert.ok(
+      searchMissing.message.includes("No file or folder matching 'sms' exists in workspace"),
       "Must report factually without hallucinating paths"
     );
+    assert.ok(
+      searchMissing.message.includes("Only the configured workspace was searched"),
+      "Must confirm workspace search boundary"
+    );
+
+    // Search for missing folder 'new-wedding'
+    const searchNewWedding = cp.searchProjectFiles("new-wedding");
+    assert.equal(searchNewWedding.found, false);
+    assert.equal(searchNewWedding.count, 0);
+    assert.deepEqual(searchNewWedding.matches, []);
+    assert.ok(searchNewWedding.message.includes("new-wedding"));
+    assert.ok(searchNewWedding.message.includes("Only the configured workspace was searched"));
+
+    // Path outside workspace boundary is blocked
+    const searchOutside = cp.searchProjectFiles("../../../etc/passwd");
+    assert.equal(searchOutside.found, false);
+    assert.ok(searchOutside.message.includes("outside the configured workspace boundary"));
   });
 
   it("5. docker_read: performs read-only docker inspection", async () => {
@@ -119,17 +135,56 @@ describe("ReadOnlyControlPlane - 7 Tools & Read-Only Evidence", () => {
       ]);
     });
 
-    it("provides proactive evidence gathering based on query keywords", async () => {
-      const timeEvidence = await cp.gatherEvidenceForQuery("What time is it right now?");
-      assert.ok(timeEvidence.local_time, "Must gather local_time");
+    it("distinguishes general engineering questions from local evidence queries", () => {
+      // General engineering questions MUST NOT require Control Plane evidence
+      assert.equal(cp.detectEvidenceRequirement("Tell me 5 Docker commands").required, false);
+      assert.equal(cp.detectEvidenceRequirement("Explain Docker volumes").required, false);
+      assert.equal(cp.detectEvidenceRequirement("What is Kubernetes?").required, false);
+      assert.equal(cp.detectEvidenceRequirement("Explain CI/CD").required, false);
+      assert.equal(cp.detectEvidenceRequirement("How does Terraform state work?").required, false);
+      assert.equal(cp.detectEvidenceRequirement("Explain Kubernetes Deployment").required, false);
+      assert.equal(cp.detectEvidenceRequirement("Give me a Dockerfile example").required, false);
+      assert.equal(cp.detectEvidenceRequirement("How do I learn DevOps?").required, false);
 
-      const gitEvidence = await cp.gatherEvidenceForQuery("What git branch am I on?");
-      assert.ok(gitEvidence.git, "Must gather git");
+      // Local evidence questions MUST require Control Plane evidence
+      const timePlan = cp.detectEvidenceRequirement("What is today's date?");
+      assert.equal(timePlan.required, true);
+      assert.ok(timePlan.tools.includes("local_time"));
 
-      const searchEvidence = await cp.gatherEvidenceForQuery("Find the sms folder");
-      assert.ok(searchEvidence.file_search, "Must gather file_search");
-      assert.equal(searchEvidence.file_search.found, false);
-      assert.ok(searchEvidence.file_search.message.includes("sms"));
+      const pwdPlan = cp.detectEvidenceRequirement("What is my current workspace?");
+      assert.equal(pwdPlan.required, true);
+      assert.ok(pwdPlan.tools.includes("workspace_pwd"));
+
+      const lsPlan = cp.detectEvidenceRequirement("List files");
+      assert.equal(lsPlan.required, true);
+      assert.ok(lsPlan.tools.includes("workspace_ls"));
+
+      const findPlan = cp.detectEvidenceRequirement("Find folder new-wedding");
+      assert.equal(findPlan.required, true);
+      assert.ok(findPlan.tools.includes("project_files"));
+      assert.equal(findPlan.searchParams?.query, "new-wedding");
+
+      const gitPlan = cp.detectEvidenceRequirement("What Git branch am I on?");
+      assert.equal(gitPlan.required, true);
+      assert.ok(gitPlan.tools.includes("git_read"));
+
+      const dockerPlan = cp.detectEvidenceRequirement("What Docker information is available?");
+      assert.equal(dockerPlan.required, true);
+      assert.ok(dockerPlan.tools.includes("docker_read"));
+
+      const k8sPlan = cp.detectEvidenceRequirement("Do I have Kubernetes configuration?");
+      assert.equal(k8sPlan.required, true);
+      assert.ok(k8sPlan.tools.includes("kubernetes_read"));
+
+      const mixedPlan = cp.detectEvidenceRequirement("What Docker setup should I use for this project?");
+      assert.equal(mixedPlan.required, true);
+      assert.ok(mixedPlan.tools.includes("docker_read"));
+      assert.ok(mixedPlan.tools.includes("workspace_ls"));
+    });
+
+    it("gatherEvidenceForQuery returns empty for general engineering queries", async () => {
+      const generalEvidence = await cp.gatherEvidenceForQuery("Tell me 5 Docker commands");
+      assert.deepEqual(generalEvidence, {}, "Must not inject fake local context for general questions");
     });
   });
 });

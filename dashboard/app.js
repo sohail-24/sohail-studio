@@ -58,12 +58,13 @@ const state = {
   advancedOpen: true,
   provider: "ollama",
   model: "devops-qwen:latest",
+  chatModel: "devops-qwen:v1",
   commandMode: "terminal",
   chatHistory: [],
 };
 
 const aiModels = {
-  ollama: ["devops-qwen:latest", "qwen3.5", "llama3", "mistral"],
+  ollama: ["devops-qwen:latest", "devops-qwen:v1", "qwen3.5", "llama3", "mistral"],
   gemini: ["gemini-pro", "gemini-flash"]
 };
 
@@ -1170,7 +1171,10 @@ function render() {
   const providerEl = document.getElementById("status-ai-provider");
   if (providerEl) { providerEl.textContent = state.provider.charAt(0).toUpperCase() + state.provider.slice(1); }
   const modelEl = document.getElementById("status-ai-model");
-  if (modelEl) { modelEl.textContent = state.model; }
+  if (modelEl) {
+    const isChat = state.commandMode === "chat" || state.route === "chat" || state.route === "home";
+    modelEl.textContent = isChat ? (state.chatModel || "devops-qwen:v1") : state.model;
+  }
 
   if (route === "home") app.innerHTML = homeView();
   else if (route === "workflows") app.innerHTML = workflowsView();
@@ -1768,6 +1772,14 @@ function connectChat() {
     if (data.type === "status") {
       state.chatConnection = ["ready", "running"].includes(data.status) ? "Available" : data.status;
       if (["ready", "running"].includes(data.status) && state.chatStatus !== "Running") state.chatStatus = "Idle";
+      if (data.model) {
+        state.chatModel = data.model;
+        const modelEl = document.getElementById("status-ai-model");
+        if (modelEl) {
+          const isChat = state.commandMode === "chat" || state.route === "chat" || state.route === "home";
+          if (isChat) modelEl.textContent = state.chatModel;
+        }
+      }
       syncTerminalView();
     }
     if (data.type === "complete") {
