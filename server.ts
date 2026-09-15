@@ -6,8 +6,8 @@ import { spawn, execSync, ChildProcessWithoutNullStreams } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI } from "@google/genai";
 
-const app = express();
-const server = http.createServer(app);
+export const app = express();
+export const server = http.createServer(app);
 const PORT = 3000;
 const ROOT = process.cwd();
 const DASHBOARD = path.join(ROOT, "dashboard");
@@ -63,7 +63,7 @@ interface RunState {
 }
 
 const runs = new Map<string, RunState>();
-const storedIntelligence = new Map<string, any>();
+export const storedIntelligence = new Map<string, any>();
 const sessionList: any[] = [];
 
 // Load persisted sessions if available
@@ -440,7 +440,7 @@ app.post("/api/workflows/plan", (req, res) => {
 
   const stepSets: Record<string, string[]> = {
     "inspect-project": ["Read repository signals and file structure", "Detect stack, frameworks, and entry points", "Save verified inspection snapshot"],
-    "dockerize-project": ["Review application entry point and port", "Propose minimal multi-stage Docker container", "Generate container files after approval"],
+    "dockerize-project": ["Review application entry point and port", "Propose minimal container configuration", "Generate container files after approval"],
     "kubernetes": ["Review runtime and exposed port requirements", "Draft deployment and service manifests", "Apply manifests after approval"],
     "cicd": ["Identify project test and build commands", "Generate delivery pipeline configuration", "Commit workflow file after approval"],
     "documentation": ["Read project metadata and architecture signals", "Draft clean developer documentation", "Update README and guides after approval"],
@@ -651,23 +651,71 @@ export function planDockerize(target: string, options: any = {}, runId?: string)
     ? "Host system has Docker CLI installed and accessible."
     : "Docker CLI not detected in host environment. Live image build verification skipped.";
 
-  // 2. Extract required Dockerization inputs from evidence
-  const nodeRuntime = intel.runtimes ? intel.runtimes.find((r: any) => r.runtime === "Node.js") : null;
+  // 2. Extract required Dockerization inputs from evidence & validate
+  const missingEvidence: Array<{
+    kind: string;
+    name: string;
+    message: string;
+    source_file?: string;
+    decision?: string;
+  }> = [];
 
-  // If no runtime or runtime version is NEEDS_EVIDENCE
+  // Runtime evidence check (NO fallback to any default Node version)
+  const nodeRuntime = intel.runtimes ? intel.runtimes.find((r: any) => r.runtime === "Node.js") : null;
   if (!nodeRuntime || !nodeRuntime.version || nodeRuntime.version === "NEEDS_EVIDENCE") {
+    missingEvidence.push({
+      kind: "runtime_version",
+      name: "Node.js",
+      message: "Node.js runtime version declaration is missing.",
+      source_file: "package.json",
+      decision: "Declare engines.node in package.json or add .nvmrc"
+    });
+  }
+
+  // Package manager evidence check (NO fallback to "npm")
+  const packageManager = (intel.package_managers && intel.package_managers.length > 0)
+    ? intel.package_managers[0]
+    : null;
+  if (!packageManager) {
+    missingEvidence.push({
+      kind: "package_manager",
+      name: "package_manager",
+      message: "Package manager evidence (package-lock.json, yarn.lock, pnpm-lock.yaml, or packageManager field) is missing.",
+      source_file: "package.json",
+      decision: "Provide a lockfile or declare packageManager in package.json"
+    });
+  }
+
+  // Port evidence check (NO fallback to 3000)
+  const portEntry = (intel.ports && intel.ports.length > 0) ? intel.ports[0] : null;
+  const port = portEntry ? (portEntry.port ?? portEntry.value) : null;
+  if (port == null) {
+    missingEvidence.push({
+      kind: "port",
+      name: "port",
+      message: "Application port declaration is missing from server entry points or configuration.",
+      decision: "Declare application port in server configuration or environment defaults"
+    });
+  }
+
+  // Framework evidence check (NO fallback to "Node.js")
+  const framework = (intel.frameworks && intel.frameworks.length > 0) ? intel.frameworks[0] : null;
+  if (!framework) {
+    missingEvidence.push({
+      kind: "framework",
+      name: "framework",
+      message: "Application framework evidence (Express, Next.js, Fastify, etc.) is missing.",
+      source_file: "package.json",
+      decision: "Declare application framework dependencies in package.json"
+    });
+  }
+
+  // Missing required evidence must produce NEEDS_EVIDENCE
+  if (missingEvidence.length > 0) {
     return {
       status: "NEEDS_EVIDENCE",
       target: resolved,
-      missing_evidence: [
-        {
-          kind: "runtime_version",
-          name: "Node.js",
-          message: "Node.js runtime version declaration is missing.",
-          source_file: "package.json",
-          decision: "Declare engines.node in package.json or add .nvmrc"
-        }
-      ],
+      missing_evidence: missingEvidence,
       validation: {
         docker_available: dockerAvailable,
         message: validationMessage
@@ -677,7 +725,7 @@ export function planDockerize(target: string, options: any = {}, runId?: string)
   }
 
   // 3. Extract other evidence
-  const rawVersion = String(nodeRuntime.version).trim();
+  const rawVersion = String(nodeRuntime!.version).trim();
   const isConstraint = /[><=^~| ]/.test(rawVersion);
 
   const runtimeEvidence = (intel.evidence || []).find(
@@ -689,22 +737,17 @@ export function planDockerize(target: string, options: any = {}, runId?: string)
     extraction_method: "manifest-engines"
   };
 
-  const packageManager = (intel.package_managers && intel.package_managers[0]) || "npm";
-  const portEntry = intel.ports && intel.ports[0];
-  const port = portEntry ? (portEntry.port ?? portEntry.value) : 3000;
-  const framework = (intel.frameworks && intel.frameworks[0]) || "Node.js";
-
-  // Formulate deterministic plan without inventing versions
+  // Base image: strictly derived from exact evidence, ZERO production fallbacks
   let baseImage: string | null = null;
   let baseImageNote: string | undefined = undefined;
 
   if (isConstraint) {
     // Range constraint e.g. ">=20 <23"
-    // MUST NOT convert to invented single version
+    // MUST NOT convert to invented single version or default base image
     baseImage = null;
     baseImageNote = `Runtime constraint '${rawVersion}' preserved from evidence. Dockerfile FROM requires a concrete pinned version or base image tag.`;
   } else {
-    // Concrete version e.g. "22"
+    // Concrete pinned version e.g. "22"
     baseImage = `node:${rawVersion}`;
   }
 
@@ -721,15 +764,15 @@ export function planDockerize(target: string, options: any = {}, runId?: string)
     },
     base_image: baseImage,
     base_image_note: baseImageNote,
-    package_manager: packageManager,
-    port,
-    framework,
-    stages: ["base", "build", "production"],
+    package_manager: packageManager!,
+    port: port!,
+    framework: framework!,
+    stages: ["runtime"],
     dockerfile_content: !isConstraint && baseImage ? [
       `# Evidence-derived Dockerfile generated by Sohail Studio`,
       `# Runtime: Node.js ${rawVersion} (Source: ${runtimeEvidence.source_file})`,
       `# Port: ${port}`,
-      `FROM ${baseImage} AS base`,
+      `FROM ${baseImage}`,
       `WORKDIR /app`,
       `COPY package*.json ./`,
       `RUN ${packageManager} install`,
@@ -844,6 +887,7 @@ export function executeDockerize(state: RunState, target: string, options: any =
     message: `[Evidence Verified]\n` +
       `- Runtime: ${plan.runtime}\n` +
       `- Declared Version / Constraint: ${plan.runtime_version} (Evidence source: ${prov?.source_file || "package.json"}, extraction: ${prov?.extraction_method || "manifest-engines"})\n` +
+      `- Framework: ${plan.framework}\n` +
       `- Package Manager: ${plan.package_manager}\n` +
       `- Target Port: ${plan.port ?? "Not detected"}\n` +
       `- Base Image Strategy: ${plan.base_image ? plan.base_image : plan.base_image_note}\n\n` +
@@ -1293,10 +1337,54 @@ function handleChatSocket(ws: WebSocket) {
   });
 }
 
-function generateMentorResponse(prompt: string): string {
+export function generateMentorResponse(prompt: string, targetDir: string = ROOT): string {
   const lower = prompt.toLowerCase();
   if (lower.includes("docker") || lower.includes("container")) {
-    return `### Containerization Strategy for Sohail Studio\n\nTo dockerize a Node.js project reproducibly:\n1. Use a multi-stage Docker build with \`node:22-alpine\` for minimal attack surface and fast startup.\n2. Separate dependency installation from build and runtime steps to take advantage of Docker layer caching.\n3. Run as non-root user (\`USER node\`) in production.\n4. Expose port \`3000\`.\n\nWould you like me to inspect your project files or generate a Dockerfile?`;
+    let intel = storedIntelligence.get(targetDir);
+    if (!intel || !intel.intelligence_status || intel.intelligence_status !== "COMPLETE") {
+      try {
+        intel = inspectTargetDirectory(targetDir, "mentor-query");
+      } catch {
+        intel = null;
+      }
+    }
+
+    const nodeRuntime = intel?.runtimes ? intel.runtimes.find((r: any) => r.runtime === "Node.js") : null;
+    const hasRuntimeVersion = nodeRuntime && nodeRuntime.version && nodeRuntime.version !== "NEEDS_EVIDENCE";
+    const rawVersion = hasRuntimeVersion ? String(nodeRuntime.version).trim() : null;
+    const isConstraint = rawVersion ? /[><=^~| ]/.test(rawVersion) : false;
+    const pkgManager = (intel?.package_managers && intel.package_managers[0]) || null;
+    const portEntry = intel?.ports && intel.ports[0];
+    const portVal = portEntry ? (portEntry.port ?? portEntry.value) : null;
+    const framework = (intel?.frameworks && intel.frameworks[0]) || null;
+
+    let response = `### Containerization Strategy (Evidence-Aware)\n\n`;
+    response += `**Verified Project Signals:**\n`;
+    response += `- **Runtime**: Node.js (${hasRuntimeVersion ? `declared: \`${rawVersion}\`` : "undeclared — NEEDS_EVIDENCE"})\n`;
+    response += `- **Package Manager**: ${pkgManager ? `\`${pkgManager}\`` : "undeclared — NEEDS_EVIDENCE"}\n`;
+    response += `- **Exposed Port**: ${portVal != null ? `\`${portVal}\`` : "undeclared — NEEDS_EVIDENCE"}\n`;
+    response += `- **Framework**: ${framework ? `\`${framework}\`` : "undeclared — NEEDS_EVIDENCE"}\n\n`;
+
+    if (!hasRuntimeVersion) {
+      response += `**Container Strategy Requirements:**\n` +
+        `1. **Declare Runtime Version**: Sohail Studio strictly avoids guessing base image versions. Declare \`engines.node\` in \`package.json\` or create a \`.nvmrc\` file.\n` +
+        `2. **Base Image Selection**: Once declared, the container image will be bound to that exact version (e.g., \`node:<version>\`), never an arbitrary default.\n` +
+        `3. **Single-Stage Container**: Copy manifest files, install dependencies with ${pkgManager || "your package manager"}, copy sources, and expose port ${portVal ?? "3000"}.\n\n` +
+        `Would you like to declare your engine version or inspect the repository signals first?`;
+    } else if (isConstraint) {
+      response += `**Container Strategy Requirements:**\n` +
+        `1. **Runtime Constraint**: \`${rawVersion}\` is a range constraint. Dockerfile \`FROM\` requires a pinned, concrete base image tag.\n` +
+        `2. **Version Pinning**: To ensure reproducible builds, pin an explicit version for container packaging.\n` +
+        `3. **Single-Stage Container**: Build from the pinned image without inventing versions.\n\n` +
+        `Would you like to pin a concrete version in package.json or review options?`;
+    } else {
+      response += `**Recommended Container Configuration:**\n` +
+        `1. **Base Image**: \`node:${rawVersion}\` (exact match from verified repository manifest engines evidence).\n` +
+        `2. **Single-Stage Container**: A reproducible container build running \`${pkgManager || "npm"} install\`, exposing port \`${portVal ?? "detected port"}\`.\n` +
+        `3. **Layer Caching**: Copy lockfiles before application source to optimize build times.\n\n` +
+        `Would you like to formulate the Dockerfile plan for this configuration?`;
+    }
+    return response;
   }
   if (lower.includes("k8s") || lower.includes("kubernetes")) {
     return `### Kubernetes Deployment Architecture\n\nFor production readiness on Kubernetes:\n- **Deployment**: Specify \`replicas: 2\`, configure rolling update strategies, and set CPU/memory limits.\n- **Service**: Expose via a ClusterIP on port 3000 (with Ingress controller routing external traffic).\n- **Health Probes**: Connect liveness and readiness probes to \`/api/health\`.\n\nUse the **Kubernetes** workflow in Sohail Studio to generate validated manifests.`;
@@ -1307,7 +1395,7 @@ function generateMentorResponse(prompt: string): string {
   if (lower.includes("inspect") || lower.includes("stack") || lower.includes("architecture")) {
     return `### Project Architecture & Inspection\n\nSohail Studio maps your repository's signals without altering source files:\n- Discovers component hierarchies and service ports.\n- Extracts manifest dependencies, runtime versions, and scripts.\n- Persists structured Project Intelligence for deterministic packaging.\n\nSelect **Inspect Project** from Workflows or run \`inspect\` in the terminal to view your project snapshot.`;
   }
-  return `### Engineering Mentor Guidance\n\nI can assist you with:\n- **Repository Inspection**: Mapping technology stacks and service dependencies.\n- **Containerization**: Drafting optimized multi-stage Dockerfiles.\n- **Kubernetes & CI/CD**: Generating production deployment manifests and delivery pipelines.\n- **Architecture Planning**: Designing resilient engineering workflows.\n\n*(Tip: Add your \`GEMINI_API_KEY\` in your environment settings to enable live Gemini AI streaming!)*`;
+  return `### Engineering Mentor Guidance\n\nI can assist you with:\n- **Repository Inspection**: Mapping technology stacks and service dependencies.\n- **Containerization**: Formulating evidence-backed container configurations.\n- **Kubernetes & CI/CD**: Generating production deployment manifests and delivery pipelines.\n- **Architecture Planning**: Designing resilient engineering workflows.\n\n*(Tip: Add your \`GEMINI_API_KEY\` in your environment settings to enable live Gemini AI streaming!)*`;
 }
 
 if (process.env.NODE_ENV !== "test") {

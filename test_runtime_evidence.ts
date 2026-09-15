@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { inspectTargetDirectory, planDockerize, checkDockerAvailable } from "./server.js";
+import {
+  server,
+  inspectTargetDirectory,
+  planDockerize,
+  checkDockerAvailable,
+  generateMentorResponse,
+  storedIntelligence
+} from "./server.js";
 
 process.env.NODE_ENV = "test";
 
@@ -54,6 +61,9 @@ fs.writeFileSync(
     name: "fixture-b",
     engines: {
       node: "22"
+    },
+    dependencies: {
+      express: "^4.21.0"
     }
   })
 );
@@ -82,6 +92,9 @@ fs.writeFileSync(
     name: "fixture-c",
     engines: {
       node: ">=20 <23"
+    },
+    dependencies: {
+      express: "^4.21.0"
     }
   })
 );
@@ -172,41 +185,59 @@ console.log("✓ DOCKERIZE TEST D passed: Missing evidence returned correctly.")
 // DOCKERIZE TEST E: Verify approved:false cannot execute Dockerize
 console.log("\n[DOCKERIZE TEST E] Verify approved:false cannot execute Dockerize via API");
 async function testApprovalGates() {
-  const endpoint = "http://127.0.0.1:3000/api/agent/runs";
-  const workflowEndpoint = "http://127.0.0.1:3000/api/runs";
+  let testPort = 3000;
+  let testServer: any = null;
 
-  // Test 1: Agent runs without approved: true
-  const resUnapprovedAgent = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ operation: "dockerize", target: ".", approved: false })
-  });
-  assert.equal(resUnapprovedAgent.status, 400, "Unapproved agent run must return HTTP 400");
-  const unapprovedAgentJson = await resUnapprovedAgent.json();
-  assert.equal(unapprovedAgentJson.detail, "Approval required");
+  if (!server.listening) {
+    await new Promise<void>((resolve) => {
+      testServer = server.listen(0, "127.0.0.1", () => {
+        testPort = (server.address() as any).port;
+        resolve();
+      });
+    });
+  }
 
-  // Test 2: Workflow runs without approved: true
-  const resUnapprovedWorkflow = await fetch(workflowEndpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workflow: "dockerize-project", target: ".", approved: false })
-  });
-  assert.equal(resUnapprovedWorkflow.status, 400, "Unapproved workflow run must return HTTP 400");
-  const unapprovedWorkflowJson = await resUnapprovedWorkflow.json();
-  assert.equal(unapprovedWorkflowJson.detail, "Approval required");
-  console.log("✓ DOCKERIZE TEST E passed: Both /api/agent/runs and /api/runs strictly enforce approved === true.");
+  const endpoint = `http://127.0.0.1:${testPort}/api/agent/runs`;
+  const workflowEndpoint = `http://127.0.0.1:${testPort}/api/runs`;
 
-  // DOCKERIZE TEST F: Verify approved:true reaches the Dockerize planning/validation path
-  console.log("\n[DOCKERIZE TEST F] Verify approved:true reaches Dockerize path");
-  const resApprovedAgent = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ operation: "dockerize", target: ".", approved: true })
-  });
-  assert.equal(resApprovedAgent.status, 200, "Approved agent run must return HTTP 200");
-  const approvedAgentJson = await resApprovedAgent.json();
-  assert.ok(approvedAgentJson.run_id, "Approved agent run returns run_id");
-  console.log("✓ DOCKERIZE TEST F passed: approved:true accepted and launched run " + approvedAgentJson.run_id);
+  try {
+    // Test 1: Agent runs without approved: true
+    const resUnapprovedAgent = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operation: "dockerize", target: ".", approved: false })
+    });
+    assert.equal(resUnapprovedAgent.status, 400, "Unapproved agent run must return HTTP 400");
+    const unapprovedAgentJson = await resUnapprovedAgent.json();
+    assert.equal(unapprovedAgentJson.detail, "Approval required");
+
+    // Test 2: Workflow runs without approved: true
+    const resUnapprovedWorkflow = await fetch(workflowEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workflow: "dockerize-project", target: ".", approved: false })
+    });
+    assert.equal(resUnapprovedWorkflow.status, 400, "Unapproved workflow run must return HTTP 400");
+    const unapprovedWorkflowJson = await resUnapprovedWorkflow.json();
+    assert.equal(unapprovedWorkflowJson.detail, "Approval required");
+    console.log("✓ DOCKERIZE TEST E passed: Both /api/agent/runs and /api/runs strictly enforce approved === true.");
+
+    // DOCKERIZE TEST F: Verify approved:true reaches the Dockerize planning/validation path
+    console.log("\n[DOCKERIZE TEST F] Verify approved:true reaches Dockerize path");
+    const resApprovedAgent = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operation: "dockerize", target: ".", approved: true })
+    });
+    assert.equal(resApprovedAgent.status, 200, "Approved agent run must return HTTP 200");
+    const approvedAgentJson = await resApprovedAgent.json();
+    assert.ok(approvedAgentJson.run_id, "Approved agent run returns run_id");
+    console.log("✓ DOCKERIZE TEST F passed: approved:true accepted and launched run " + approvedAgentJson.run_id);
+  } finally {
+    if (testServer) {
+      testServer.close();
+    }
+  }
 }
 
 await testApprovalGates();
@@ -216,6 +247,8 @@ console.log("\n[DOCKERIZE TEST G] Verify file generation claims match disk reali
 // In dry run:
 assert.equal(fs.existsSync(path.join(tmpB, "Dockerfile")), false, "No Dockerfile should exist in dry-run mode");
 assert.equal(dockerResB.files_generated.length, 0, "No files should be reported as generated");
+assert.deepEqual(dockerResB.plan?.stages, ["runtime"], "Single FROM Dockerfile must be reported with single stage ['runtime']");
+assert.equal(dockerResB.plan?.dockerfile_content?.includes("AS base"), false, "1-FROM Dockerfile must not pretend to be multi-stage");
 
 // In active file generation with verified evidence:
 const dockerResBGenerate = planDockerize(tmpB, { dryRun: false, generateFiles: true }, "docker-test-b-gen");
@@ -227,6 +260,113 @@ const content = fs.readFileSync(generatedPath, "utf-8");
 assert.ok(content.includes("FROM node:22"), "Dockerfile content must use verified base image");
 assert.ok(content.includes("package.json"), "Dockerfile must reference evidence source");
 console.log("✓ DOCKERIZE TEST G passed: Files only claimed when verified to exist on disk.");
+
+// -------------------------------------------------------------
+// PART 3: MENTOR CONTAINERIZATION GUIDANCE
+// -------------------------------------------------------------
+console.log("\n=== MENTOR GUIDANCE TESTS ===");
+
+console.log("\n[MENTOR TEST 1] Verify mentor guidance never references node:22-alpine");
+const mentorQuery1 = generateMentorResponse("How do I dockerize my project?");
+assert.equal(mentorQuery1.includes("node:22-alpine"), false, "Mentor guidance must NEVER use node:22-alpine");
+assert.equal(mentorQuery1.includes("multi-stage"), false, "Mentor guidance must NOT describe 1-FROM container as multi-stage");
+assert.ok(mentorQuery1.includes("NEEDS_EVIDENCE") || mentorQuery1.includes("Declare Runtime Version"), "Mentor guidance must be evidence-aware and flag missing declarations");
+console.log("✓ MENTOR TEST 1 passed: Mentor container guidance is evidence-aware with zero node:22-alpine.");
+
+console.log("\n[MENTOR TEST 2] Verify mentor guidance for project with declared engines.node");
+const mentorQuery2 = generateMentorResponse("How should I containerize this?", tmpB);
+assert.equal(mentorQuery2.includes("node:22-alpine"), false, "Must not use node:22-alpine even on pinned project");
+assert.ok(mentorQuery2.includes("node:22"), "Mentor should reflect detected node:22 from evidence");
+assert.equal(mentorQuery2.includes("multi-stage"), false, "Must not claim multi-stage");
+console.log("✓ MENTOR TEST 2 passed: Mentor guidance reflects explicit project intelligence.");
+
+// -------------------------------------------------------------
+// PART 4: REGRESSION TESTS FOR ALL EVIDENCE GAPS (ZERO FALLBACKS)
+// -------------------------------------------------------------
+console.log("\n=== REGRESSION TESTS: EVIDENCE GAPS & ZERO PRODUCTION FALLBACKS ===");
+
+// GAP 1: Missing Framework (package.json has engines.node 22, but NO framework dependency)
+console.log("\n[GAP TEST 1] Missing framework evidence produces NEEDS_EVIDENCE (no fallback to Node.js)");
+const tmpNoFramework = fs.mkdtempSync(path.join(os.tmpdir(), "sohail-test-no-framework-"));
+fs.writeFileSync(
+  path.join(tmpNoFramework, "package.json"),
+  JSON.stringify({ name: "no-framework", engines: { node: "22" } })
+);
+const resNoFramework = planDockerize(tmpNoFramework, { dryRun: true }, "gap-framework");
+assert.equal(resNoFramework.status, "NEEDS_EVIDENCE");
+assert.ok(resNoFramework.missing_evidence?.some((m) => m.kind === "framework"), "Must report missing framework evidence");
+assert.equal(resNoFramework.plan, undefined, "No plan when framework is missing");
+console.log("✓ GAP TEST 1 passed: Missing framework strictly produces NEEDS_EVIDENCE.");
+fs.rmSync(tmpNoFramework, { recursive: true, force: true });
+
+// GAP 2: Missing Package Manager
+console.log("\n[GAP TEST 2] Missing package manager evidence produces NEEDS_EVIDENCE (no fallback to npm)");
+const tmpNoPkgManager = fs.mkdtempSync(path.join(os.tmpdir(), "sohail-test-no-pkgmgr-"));
+storedIntelligence.set(tmpNoPkgManager, {
+  name: "no-pkgmgr",
+  root_path: tmpNoPkgManager,
+  intelligence_status: "COMPLETE",
+  files: ["index.js"],
+  components: [],
+  languages: ["JavaScript"],
+  frameworks: ["Express"],
+  runtimes: [{ runtime: "Node.js", version: "22" }],
+  package_managers: [], // empty!
+  ports: [{ port: 3000, value: 3000 }],
+  evidence: [{ evidence_type: "runtime_version", key: "Node.js", value: "22" }]
+});
+const resNoPkgManager = planDockerize(tmpNoPkgManager, { dryRun: true }, "gap-pkgmgr");
+assert.equal(resNoPkgManager.status, "NEEDS_EVIDENCE");
+assert.ok(resNoPkgManager.missing_evidence?.some((m) => m.kind === "package_manager"), "Must report missing package manager");
+assert.equal(resNoPkgManager.plan, undefined);
+console.log("✓ GAP TEST 2 passed: Missing package manager strictly produces NEEDS_EVIDENCE.");
+fs.rmSync(tmpNoPkgManager, { recursive: true, force: true });
+
+// GAP 3: Missing Port
+console.log("\n[GAP TEST 3] Missing port evidence produces NEEDS_EVIDENCE (no fallback to 3000)");
+const tmpNoPort = fs.mkdtempSync(path.join(os.tmpdir(), "sohail-test-no-port-"));
+storedIntelligence.set(tmpNoPort, {
+  name: "no-port",
+  root_path: tmpNoPort,
+  intelligence_status: "COMPLETE",
+  files: ["server.js"],
+  components: [],
+  languages: ["JavaScript"],
+  frameworks: ["Express"],
+  runtimes: [{ runtime: "Node.js", version: "22" }],
+  package_managers: ["npm"],
+  ports: [], // empty!
+  evidence: [{ evidence_type: "runtime_version", key: "Node.js", value: "22" }]
+});
+const resNoPort = planDockerize(tmpNoPort, { dryRun: true }, "gap-port");
+assert.equal(resNoPort.status, "NEEDS_EVIDENCE");
+assert.ok(resNoPort.missing_evidence?.some((m) => m.kind === "port"), "Must report missing port declaration");
+assert.equal(resNoPort.plan, undefined);
+console.log("✓ GAP TEST 3 passed: Missing port strictly produces NEEDS_EVIDENCE.");
+fs.rmSync(tmpNoPort, { recursive: true, force: true });
+
+// GAP 4: Missing Runtime Version
+console.log("\n[GAP TEST 4] Missing runtime version declaration strictly produces NEEDS_EVIDENCE");
+const tmpNoRuntime = fs.mkdtempSync(path.join(os.tmpdir(), "sohail-test-no-runtime-"));
+fs.writeFileSync(
+  path.join(tmpNoRuntime, "package.json"),
+  JSON.stringify({ name: "no-runtime", dependencies: { express: "^4.21.0" } })
+);
+const resNoRuntime = planDockerize(tmpNoRuntime, { dryRun: true }, "gap-runtime");
+assert.equal(resNoRuntime.status, "NEEDS_EVIDENCE");
+assert.ok(resNoRuntime.missing_evidence?.some((m) => m.kind === "runtime_version"), "Must report missing runtime version");
+assert.equal(resNoRuntime.plan, undefined);
+console.log("✓ GAP TEST 4 passed: Missing runtime version strictly produces NEEDS_EVIDENCE.");
+fs.rmSync(tmpNoRuntime, { recursive: true, force: true });
+
+// GAP 5: Range Constraint preserves constraint and never invents base image
+console.log("\n[GAP TEST 5] Range constraint preserves constraint, requires_version_pin: true, base_image: null");
+assert.equal(dockerResC.status, "SUCCESS");
+assert.equal(dockerResC.plan?.runtime_version, ">=20 <23");
+assert.equal(dockerResC.plan?.requires_version_pin, true);
+assert.equal(dockerResC.plan?.base_image, null);
+assert.ok(dockerResC.plan?.base_image_note?.includes("Runtime constraint '>=20 <23' preserved"));
+console.log("✓ GAP TEST 5 passed: Range constraint preserved without inventing version or base image.");
 
 // Clean up temporary fixtures
 fs.rmSync(tmpB, { recursive: true, force: true });
