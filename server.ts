@@ -4,6 +4,34 @@ import path from "path";
 import fs from "fs";
 import { spawn, execSync, ChildProcessWithoutNullStreams } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
+import {
+  ControlPlane,
+  ToolResult,
+  getLocalTime,
+  getWorkspacePwd,
+  getWorkspaceLs,
+  getProjectFiles,
+  getDockerRead,
+  getGitRead,
+  getKubernetesRead,
+  assertReadOnlySafety,
+} from "./core/control_plane.js";
+import { cleanOllamaOutput, processOllamaStreamChunk } from "./core/ollama_output.js";
+
+export {
+  ControlPlane,
+  ToolResult,
+  getLocalTime,
+  getWorkspacePwd,
+  getWorkspaceLs,
+  getProjectFiles,
+  getDockerRead,
+  getGitRead,
+  getKubernetesRead,
+  assertReadOnlySafety,
+  cleanOllamaOutput,
+  processOllamaStreamChunk,
+};
 
 export const app = express();
 export const server = http.createServer(app);
@@ -505,13 +533,25 @@ app.post("/api/chat", async (req, res) => {
     return res.status(400).json({ error: "Missing messages or message in request body" });
   }
 
+  const lastUserMsg = [...history].reverse().find((m: any) => m.role === "user")?.content || "";
+  const controlPlane = new ControlPlane(ROOT);
+  const toolResults = controlPlane.inspect_many(String(lastUserMsg));
+  const contextString = toolResults.map((r) => r.as_context()).join("\n\n");
+
+  const systemPrompt = `You are Sohail Studio Chat, a local-first engineering assistant. You must answer questions using the verified read-only facts provided by the Control Plane. Never execute shell commands or invent fake data. For questions about the current date, time, files, or system state, use the verified Control Plane facts.\n\n=== LOCAL CONTROL PLANE FACTS (READ-ONLY) ===\n${contextString}\n=== END FACTS ===`;
+
+  const finalMessages = [
+    { role: "system", content: systemPrompt },
+    ...history.slice(-10),
+  ];
+
   try {
     const ollamaRes = await fetch(`${ollamaBaseUrl}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: chatModel,
-        messages: history,
+        messages: finalMessages,
         stream,
       }),
     });
@@ -536,14 +576,22 @@ app.post("/api/chat", async (req, res) => {
       }
       return res.end();
     } else {
-      const data = await ollamaRes.json();
-      return res.json(data);
+      const data: any = await ollamaRes.json();
+      if (data.message && data.message.content) {
+        data.message.content = cleanOllamaOutput(data.message.content);
+      }
+      return res.json({
+        ...data,
+        transport: "ollama-api",
+        tool_results: toolResults.map((r) => ({ tool: r.tool, success: r.success })),
+      });
     }
   } catch (err: any) {
     return res.status(503).json({
       error: `Local Ollama service unavailable at ${ollamaBaseUrl}`,
       detail: err?.message || String(err),
       provider: "ollama",
+      transport: "ollama-api",
       model: chatModel,
       hint: `Ensure Ollama is running on your local machine with model '${chatModel}' (ollama run ${chatModel})`,
     });
@@ -1321,7 +1369,7 @@ function handleChatSocket(ws: WebSocket) {
     status: "ready",
     session: "chat",
     provider: "ollama",
-    transport: "ollama",
+    transport: "ollama-api",
     model: chatModel,
     endpoint: `${ollamaBaseUrl}/api/chat`,
   }));
@@ -1337,13 +1385,25 @@ function handleChatSocket(ws: WebSocket) {
 
       chatHistory.push({ role: "user", content: text });
 
+      // Read-only AI Control Plane inspection
+      const controlPlane = new ControlPlane(ROOT);
+      const toolResults = controlPlane.inspect_many(text);
+      const contextString = toolResults.map((r) => r.as_context()).join("\n\n");
+
+      const systemInstruction = `You are Sohail Studio Chat, a local-first engineering assistant. You must answer questions using the verified read-only facts provided by the Control Plane. Never execute shell commands or invent fake data. For questions about the current date, time, files, or system state, use the verified Control Plane facts.\n\n=== LOCAL CONTROL PLANE FACTS (READ-ONLY) ===\n${contextString}\n=== END FACTS ===`;
+
+      const messages = [
+        { role: "system", content: systemInstruction },
+        ...chatHistory.slice(-10),
+      ];
+
       try {
         const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: chatModel,
-            messages: chatHistory.slice(-10),
+            messages,
             stream: true,
           }),
         });
@@ -1360,6 +1420,7 @@ function handleChatSocket(ws: WebSocket) {
         let fullResponse = "";
         let lineBuffer = "";
         const decoder = new TextDecoder();
+        const streamState = { inThinkingTag: false };
 
         // @ts-ignore
         for await (const chunk of response.body) {
@@ -1374,23 +1435,26 @@ function handleChatSocket(ws: WebSocket) {
               const data = JSON.parse(trimmed);
               if (data.message && data.message.content) {
                 fullResponse += data.message.content;
-                if (ws.readyState === WebSocket.OPEN) {
+                const filtered = processOllamaStreamChunk(data.message.content, streamState);
+                if (filtered && ws.readyState === WebSocket.OPEN) {
                   ws.send(JSON.stringify({
                     type: "output",
-                    message: data.message.content,
+                    message: filtered,
                     provider: "ollama",
-                    transport: "ollama",
+                    transport: "ollama-api",
                     model: chatModel,
                   }));
                 }
               }
               if (data.done) {
-                chatHistory.push({ role: "assistant", content: fullResponse });
+                const cleanedAssistant = cleanOllamaOutput(fullResponse);
+                chatHistory.push({ role: "assistant", content: cleanedAssistant });
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(JSON.stringify({
                     type: "complete",
                     status: "completed",
                     provider: "ollama",
+                    transport: "ollama-api",
                     model: chatModel,
                   }));
                 }
@@ -1406,23 +1470,26 @@ function handleChatSocket(ws: WebSocket) {
             const data = JSON.parse(lineBuffer.trim());
             if (data.message && data.message.content) {
               fullResponse += data.message.content;
-              if (ws.readyState === WebSocket.OPEN) {
+              const filtered = processOllamaStreamChunk(data.message.content, streamState);
+              if (filtered && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                   type: "output",
-                  message: data.message.content,
+                  message: filtered,
                   provider: "ollama",
-                  transport: "ollama",
+                  transport: "ollama-api",
                   model: chatModel,
                 }));
               }
             }
             if (data.done) {
-              chatHistory.push({ role: "assistant", content: fullResponse });
+              const cleanedAssistant = cleanOllamaOutput(fullResponse);
+              chatHistory.push({ role: "assistant", content: cleanedAssistant });
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                   type: "complete",
                   status: "completed",
                   provider: "ollama",
+                  transport: "ollama-api",
                   model: chatModel,
                 }));
               }
@@ -1437,6 +1504,7 @@ function handleChatSocket(ws: WebSocket) {
             type: "error",
             message: errMsg,
             provider: "ollama",
+            transport: "ollama-api",
             model: chatModel,
             endpoint: `${ollamaBaseUrl}/api/chat`,
           }));
@@ -1444,7 +1512,7 @@ function handleChatSocket(ws: WebSocket) {
       }
     } catch (err: any) {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "error", message: err.message }));
+        ws.send(JSON.stringify({ type: "error", message: err.message, transport: "ollama-api" }));
       }
     }
   });

@@ -10,6 +10,7 @@ import {
   generateMentorResponse,
   storedIntelligence
 } from "./server.js";
+import { runControlPlaneTests } from "./test_control_plane.js";
 
 process.env.NODE_ENV = "test";
 
@@ -370,3 +371,8 @@ fs.rmSync(tmpC, { recursive: true, force: true });
 fs.rmSync(tmpD, { recursive: true, force: true });
 
 console.log("\n=== ALL INSPECTION & DOCKERIZE TESTS PASSED SUCCESSFULLY! ===");
+
+// -------------------------------------------------------------
+// PART 4: AI CONTROL PLANE & LOCAL OLLAMA INTEGRATION TESTS
+// -------------------------------------------------------------
+runControlPlaneTests();
