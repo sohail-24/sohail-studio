@@ -4,7 +4,14 @@ import path from "path";
 import fs from "fs";
 import { spawn, ChildProcessWithoutNullStreams } from "child_process";
 import { WebSocketServer, WebSocket } from "ws";
-import { GoogleGenAI } from "@google/genai";
+import { ReadOnlyControlPlane } from "./core/control_plane.js";
+import { OllamaClient, OllamaChatMessage, OllamaUnavailableError } from "./core/ollama_client.js";
+import {
+  OLLAMA_BASE_URL,
+  OLLAMA_CHAT_MODEL,
+  OLLAMA_DEVOPS_MODEL,
+  loadSettings,
+} from "./core/config.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -16,6 +23,11 @@ const SESSIONS_DIR = path.join(ROOT, "sessions");
 if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
+
+export { OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, OLLAMA_DEVOPS_MODEL };
+
+export const controlPlane = new ReadOnlyControlPlane(ROOT);
+export const ollamaClient = new OllamaClient(OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL);
 
 app.use(express.json());
 
@@ -317,7 +329,34 @@ app.get("/api/health", (req, res) => {
     local_only: true,
     cli_root: ROOT,
     cli_available: true,
-    database: "in_memory"
+    database: "in_memory",
+    ollama: {
+      base_url: OLLAMA_BASE_URL,
+      chat_model: OLLAMA_CHAT_MODEL,
+      devops_model: OLLAMA_DEVOPS_MODEL,
+    },
+    control_plane: {
+      mode: "read_only",
+      tools: [
+        "local_time",
+        "workspace_pwd",
+        "workspace_ls",
+        "project_files",
+        "docker_read",
+        "git_read",
+        "kubernetes_read",
+      ],
+    },
+  });
+});
+
+app.get("/api/settings", (req, res) => {
+  res.json({
+    ollama_base_url: OLLAMA_BASE_URL,
+    chat_model: OLLAMA_CHAT_MODEL,
+    devops_model: OLLAMA_DEVOPS_MODEL,
+    local_only: true,
+    root: ROOT,
   });
 });
 
@@ -794,26 +833,16 @@ function handleTerminalSocket(ws: WebSocket, cwdParam: string) {
   });
 }
 
-let geminiClient: GoogleGenAI | null = null;
-function getGemini(): GoogleGenAI | null {
-  if (!geminiClient && process.env.GEMINI_API_KEY) {
-    geminiClient = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  }
-  return geminiClient;
-}
-
 function handleChatSocket(ws: WebSocket) {
-  const modelName = "gemini-2.5-flash";
-
   ws.send(JSON.stringify({
     type: "status",
     status: "ready",
     session: "chat",
-    transport: "gemini-api",
-    model: modelName
+    transport: "ollama-api",
+    model: OLLAMA_CHAT_MODEL
   }));
 
-  const chatHistory: { role: string; content: string }[] = [];
+  const chatHistory: OllamaChatMessage[] = [];
 
   ws.on("message", async (raw) => {
     try {
@@ -824,77 +853,67 @@ function handleChatSocket(ws: WebSocket) {
 
       chatHistory.push({ role: "user", content: text });
 
-      const ai = getGemini();
-      if (ai) {
-        try {
-          const formattedHistory = chatHistory.slice(-10).map((h) => ({
-            role: h.role === "assistant" ? "model" : "user",
-            parts: [{ text: h.content }]
-          }));
+      // Gather factual evidence from Read-Only Control Plane
+      const evidence = await controlPlane.gatherEvidenceForQuery(text);
 
-          const responseStream = await ai.models.generateContentStream({
-            model: modelName,
-            contents: formattedHistory,
-            config: {
-              systemInstruction: "You are the Sohail Studio engineering mentor. You help developers inspect, plan, dockerize, automate, and deploy projects. You provide concise, practical, high-signal engineering advice. Format code and terminal steps with markdown.",
+      const systemPrompt: OllamaChatMessage = {
+        role: "system",
+        content: `You are Sohail Studio Chat, an engineering mentor powered by local Ollama model ${OLLAMA_CHAT_MODEL}.
+You are integrated with a strict Read-Only Control Plane providing factual local evidence.
+Rules:
+1. Ground your answers strictly in the verified local evidence provided below.
+2. If evidence reports that a file, folder, or resource does not exist (e.g., searching for 'sms' returns no matches), state that factually without hallucination. Follow the principle: No evidence = NEEDS_EVIDENCE.
+3. You are strictly read-only. You cannot perform write operations, filesystem modifications, or execute arbitrary shell commands. The terminal is reserved for user commands.
+
+[Verified Local Evidence from Read-Only Control Plane]
+${JSON.stringify(evidence, null, 2)}`
+      };
+
+      const messagesForOllama: OllamaChatMessage[] = [
+        systemPrompt,
+        ...chatHistory.slice(-10)
+      ];
+
+      try {
+        const fullResponse = await ollamaClient.streamChat({
+          baseUrl: OLLAMA_BASE_URL,
+          model: OLLAMA_CHAT_MODEL,
+          messages: messagesForOllama,
+          controlPlane,
+          onChunk: (chunk: string) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: "output",
+                message: chunk,
+                transport: "ollama-api"
+              }));
             }
-          });
-
-          let fullResponse = "";
-          for await (const chunk of responseStream) {
-            const chunkText = chunk.text;
-            if (chunkText) {
-              fullResponse += chunkText;
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                  type: "output",
-                  message: chunkText,
-                  transport: "gemini-api"
-                }));
-              }
-            }
           }
+        });
 
-          chatHistory.push({ role: "assistant", content: fullResponse });
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: "complete",
-              status: "completed",
-              model: modelName
-            }));
-          }
-        } catch (err: any) {
-          const errMsg = `Gemini API error: ${err.message || String(err)}`;
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "error", message: errMsg }));
-            ws.send(JSON.stringify({ type: "complete", status: "completed", model: modelName }));
-          }
-        }
-      } else {
-        // High-signal intelligent local mentor response when GEMINI_API_KEY is not configured
-        const mentorResponse = generateMentorResponse(text);
-        // Stream chunks smoothly
-        const words = mentorResponse.split(" ");
-        for (let i = 0; i < words.length; i += 3) {
-          const chunk = words.slice(i, i + 3).join(" ") + " ";
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: "output",
-              message: chunk,
-              transport: "local-mentor"
-            }));
-          }
-          await new Promise((r) => setTimeout(r, 25));
-        }
-
-        chatHistory.push({ role: "assistant", content: mentorResponse });
+        chatHistory.push({ role: "assistant", content: fullResponse });
 
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
             type: "complete",
             status: "completed",
-            model: "local-mentor"
+            model: OLLAMA_CHAT_MODEL
+          }));
+        }
+      } catch (err: any) {
+        const errorMessage = err instanceof OllamaUnavailableError
+          ? err.message
+          : `Ollama is unavailable at ${OLLAMA_BASE_URL} (model: ${OLLAMA_CHAT_MODEL}). Please ensure Ollama is running. (${err.message || String(err)})`;
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: "error",
+            message: errorMessage
+          }));
+          ws.send(JSON.stringify({
+            type: "complete",
+            status: "completed",
+            model: OLLAMA_CHAT_MODEL
           }));
         }
       }
@@ -906,23 +925,8 @@ function handleChatSocket(ws: WebSocket) {
   });
 }
 
-function generateMentorResponse(prompt: string): string {
-  const lower = prompt.toLowerCase();
-  if (lower.includes("docker") || lower.includes("container")) {
-    return `### Containerization Strategy for Sohail Studio\n\nTo dockerize a Node.js project reproducibly:\n1. Use a multi-stage Docker build with \`node:22-alpine\` for minimal attack surface and fast startup.\n2. Separate dependency installation from build and runtime steps to take advantage of Docker layer caching.\n3. Run as non-root user (\`USER node\`) in production.\n4. Expose port \`3000\`.\n\nWould you like me to inspect your project files or generate a Dockerfile?`;
-  }
-  if (lower.includes("k8s") || lower.includes("kubernetes")) {
-    return `### Kubernetes Deployment Architecture\n\nFor production readiness on Kubernetes:\n- **Deployment**: Specify \`replicas: 2\`, configure rolling update strategies, and set CPU/memory limits.\n- **Service**: Expose via a ClusterIP on port 3000 (with Ingress controller routing external traffic).\n- **Health Probes**: Connect liveness and readiness probes to \`/api/health\`.\n\nUse the **Kubernetes** workflow in Sohail Studio to generate validated manifests.`;
-  }
-  if (lower.includes("cicd") || lower.includes("pipeline") || lower.includes("github actions")) {
-    return `### Continuous Integration & Delivery\n\nA resilient CI/CD pipeline should include:\n1. **Lint & Test**: Run checks and unit tests on every pull request.\n2. **Artifact Build**: Compile production bundles and container images.\n3. **Security Scan**: Scan container dependencies for CVEs.\n4. **Controlled Deployment**: Deploy to preview/staging with health verification before production rollout.`;
-  }
-  if (lower.includes("inspect") || lower.includes("stack") || lower.includes("architecture")) {
-    return `### Project Architecture & Inspection\n\nSohail Studio maps your repository's signals without altering source files:\n- Discovers component hierarchies and service ports.\n- Extracts manifest dependencies, runtime versions, and scripts.\n- Persists structured Project Intelligence for deterministic packaging.\n\nSelect **Inspect Project** from Workflows or run \`inspect\` in the terminal to view your project snapshot.`;
-  }
-  return `### Engineering Mentor Guidance\n\nI can assist you with:\n- **Repository Inspection**: Mapping technology stacks and service dependencies.\n- **Containerization**: Drafting optimized multi-stage Dockerfiles.\n- **Kubernetes & CI/CD**: Generating production deployment manifests and delivery pipelines.\n- **Architecture Planning**: Designing resilient engineering workflows.\n\n*(Tip: Add your \`GEMINI_API_KEY\` in your environment settings to enable live Gemini AI streaming!)*`;
+if (process.env.NODE_ENV !== "test") {
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Sohail Studio server running on http://0.0.0.0:${PORT}`);
+  });
 }
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Sohail Studio server running on http://0.0.0.0:${PORT}`);
-});
